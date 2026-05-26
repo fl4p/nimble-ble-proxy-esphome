@@ -257,6 +257,11 @@ POST /clone/disable   → 200; stops adv + drops upstream link (no reboot)
 
 `reboot_required` is `true` whenever `addr` changes — see §7.
 
+The dashboard's **devices seen** table renders a `clone` button on
+each row that POSTs here with the row's `addr` and `type` — see
+`docs/web-ui.md` `/devices`. The button passes `enabled=1`, so it
+both retargets and (re)enables the supervisor in one click.
+
 ## 7. NimBLE constraints
 
 **GATT DB is one-shot.** `ble_gatts_start()` builds the host's

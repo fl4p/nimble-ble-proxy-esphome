@@ -186,6 +186,10 @@ Internal table holds up to 64 entries; when full, the row with the oldest
 `last_ms` is evicted (LRU by sighting). Response is built into a 6 KiB
 static buffer; httpd serializes requests so the single buffer is safe.
 
+The dashboard renders a `clone` button on each row when
+`CONFIG_NBP_CLONE` is on; clicking it POSTs `/clone?addr=…&type=…&enabled=1`
+with the row's `addr` / `type`. See `docs/clone.md` §6.
+
 ### `GET /log?since=<seq>` *(gated by `CONFIG_NBP_WEB_CONSOLE`)*
 
 Chunked stream of the slice `[since, current_seq)` of the log ring.
@@ -276,25 +280,37 @@ Requires `CONFIG_PM_ENABLE=y` (set in `sdkconfig.defaults`). Dropping
 to 80 MHz visibly slows GATT discovery — fine for a quiet observer,
 maybe not for fast pairing.
 
-### `GET /scan` &nbsp;·&nbsp; `POST /scan?window=<ms>&interval=<ms>`
+### `GET /scan` &nbsp;·&nbsp; `POST /scan?window=<ms>&interval=<ms>&active=<0|1>`
 
-Get / set the NimBLE scanner duty cycle. `interval` is the epoch
-length (when the next scan starts); `window` is how much of that
-epoch the radio is on. Both in ms, both writable. Lowering the duty
-is the biggest single thermal lever: a 30 ms window inside a 1000 ms
-interval drops the chip temperature by ~10 °C versus a 30/60 (50 %)
-duty.
+Get / set the NimBLE scanner duty cycle and active/passive mode.
+`interval` is the epoch length (when the next scan starts); `window`
+is how much of that epoch the radio is on. Both in ms, both writable.
+Lowering the duty is the biggest single thermal lever: a 30 ms window
+inside a 1000 ms interval drops the chip temperature by ~10 °C versus
+a 30/60 (50 %) duty.
 
-Stored in NVS namespace `stats`, keys `scan_w` / `scan_i` (uint16).
-Applied at boot by `apply_scan_from_nvs()` after `ble_backend::start()`
+`active=1` makes the scanner send `SCAN_REQ` to each advertiser and
+receive a `SCAN_RSP`, which is where many devices (e.g. Victron
+SmartShunt) put their Complete Local Name. Passive scan (`active=0`)
+only ingests the legacy adv packet, so names from scan-response-only
+devices never appear in `/devices`. Cost: roughly doubles per-advert
+radio time, mildly increases consumption, and adds congestion that
+can starve a clone supervisor's connect window when many devices are
+nearby.
+
+All three params are optional on POST — at least one must be set.
+Stored in NVS namespace `stats`, keys `scan_win` / `scan_int`
+(uint16) and `scan_act` (int8). Applied at boot by
+`apply_scan_from_nvs()` after `ble_backend::start()`
 (scanner::set\_duty is a no-op before scanner::init runs). The
-underlying `scanner::set_duty` calls NimBLE's `setInterval` /
-`setWindow`, then stop+restart the scan so the new timings take
-effect immediately.
+underlying `scanner::set_duty` / `set_active` call NimBLE's
+`setInterval` / `setWindow` / `setActiveScan`, then stop+restart the
+scan so the new settings take effect immediately.
 
-GET returns `{"window":N,"interval":M}`. Defaults from
-`proxy_config.h`. The dashboard exposes four presets:
-`30/60` (50 %), `30/120` (25 %), `30/300` (10 %), `30/1000` (3 %).
+GET returns `{"window":N,"interval":M,"active":true|false}`.
+Defaults from `proxy_config.h`. The dashboard exposes four duty
+presets (`30/60` 50 %, `30/120` 25 %, `30/300` 10 %, `30/1000` 3 %)
+and an `active scan` checkbox.
 
 ### `POST /trace?on=<0|1>`
 
