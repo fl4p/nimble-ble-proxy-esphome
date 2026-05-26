@@ -18,6 +18,7 @@
 #ifdef CONFIG_NBP_SMP
 #include "ble_backend.h"
 #include "connection.h"  // for connection::get_passkey()
+#include "scanner.h"     // resume() after NimBLE auto-stops on connect
 #endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -202,6 +203,10 @@ bool try_session(uint64_t address, uint8_t address_type) {
   }
   g_mtu.store(g_client->getMTU(), std::memory_order_relaxed);
   ESP_LOGI(TAG, "connected mtu=%u", g_mtu.load(std::memory_order_relaxed));
+  // NimBLE auto-stops the scan when a central initiates a connect.
+  // Resume it so the dashboard's device table and the api_server's
+  // raw-adv forwarding keep working while clone holds an upstream link.
+  ble_backend::scanner::resume();
 
   g_state.store(State::Discovering, std::memory_order_relaxed);
   ESP_LOGI(TAG, "starting discoverAttributes; heap=%u",
@@ -273,6 +278,7 @@ bool try_session(uint64_t address, uint8_t address_type) {
     g_mtu.store(g_client->getMTU(), std::memory_order_relaxed);
     ESP_LOGI(TAG, "reconnected mtu=%u",
              g_mtu.load(std::memory_order_relaxed));
+    ble_backend::scanner::resume();
     if (!g_client->discoverAttributes()) {
       ESP_LOGW(TAG, "post-rebuild discoverAttributes failed");
       g_client->disconnect();
