@@ -95,13 +95,8 @@ void unregister_client(int fd) {
   g_active_count.fetch_sub(1, std::memory_order_release);
 }
 
-// Thunk passed to bt_handlers; just routes sync replies to the calling
-// client's fd while the dispatch path already holds g_tx_mutex.
-bool send_response_thunk(int fd, uint16_t msg_type, size_t payload_len) {
-  return send_locked_to(fd, msg_type, payload_len);
-}
-
-bool dispatch_one(int fd, uint8_t *rx_payload, size_t rx_cap) {
+bool dispatch_one(int fd, uint8_t *rx_payload, size_t rx_cap,
+                  bt_handlers::ClientSubs *subs) {
   uint16_t msg_type = 0;
   size_t payload_len = 0;
   frame_codec::Error e = frame_codec::read_frame(socket_read, &fd, rx_payload,
@@ -138,7 +133,7 @@ bool dispatch_one(int fd, uint8_t *rx_payload, size_t rx_cap) {
   }
   if (is_handshake) return keep_open;
 
-  bt_handlers::Context bctx{fd};
+  bt_handlers::Context bctx{fd, subs};
   if (!bt_handlers::handle(msg_type, rx_payload, payload_len, bctx)) {
     ESP_LOGD(TAG, "fd=%d unhandled msg_type=%u (len=%zu)", fd, msg_type,
              payload_len);
@@ -152,20 +147,22 @@ void connection_task(void *arg) {
   ESP_LOGI(TAG, "client connected (fd=%d, total=%u)", client_fd,
            g_active_count.load(std::memory_order_acquire));
 
-  // Per-connection RX buffer. Static-sized to MAX_MESSAGE_SIZE; lives
-  // on the connection task's stack (≈8 KiB total).
+  // Per-connection state. The RX buffer and ClientSubs both live on
+  // this task's stack — gone when the task exits.
   uint8_t rx_payload[proxy::MAX_MESSAGE_SIZE];
+  bt_handlers::ClientSubs subs;
 
-  while (dispatch_one(client_fd, rx_payload, sizeof(rx_payload))) {
+  while (dispatch_one(client_fd, rx_payload, sizeof(rx_payload), &subs)) {
     // loop
   }
 
+  // Release this client's subscription refs FIRST so any in-flight
+  // async sends to other clients don't keep targeting our (now-closing)
+  // fd. on_last_client_disconnect handles the global GATT teardown.
+  bt_handlers::on_client_disconnect(subs);
   unregister_client(client_fd);
   ESP_LOGI(TAG, "client disconnected (fd=%d, remaining=%u)", client_fd,
            g_active_count.load(std::memory_order_acquire));
-
-  // Tear down BLE state only when the LAST client leaves — otherwise
-  // we'd kill adv forwarding for the remaining clients.
   if (g_active_count.load(std::memory_order_acquire) == 0) {
     bt_handlers::on_last_client_disconnect();
   }

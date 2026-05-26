@@ -84,7 +84,35 @@ all wire output from bt_handlers goes through `send_async`, which
 acquires the mutex itself. The `Context.send_response` callback (and
 `response_buf` staging area) were removed entirely.
 
-### 5. Synchronous NimBLE connect blocks the per-client task
+### 5. MAC byte order was reversed in every adv (silent until verified)
+
+`scanner::onResult` did
+`rec.address = address::swap6(static_cast<uint64_t>(addr))`. That was
+backwards: `NimBLEAddress::operator uint64_t()` already memcpys the
+6 LE bytes onto a uint64 on an LE host, placing the MAC's MSB in bits
+40-47 of the int — which is exactly the layout aioesphomeapi formats
+back into MSB-first hex. Applying `swap6` *additionally* reversed it,
+so every adv we forwarded had its MAC bytes flipped.
+
+Symptom: undetectable until you check a specific MAC. HA still
+"works" because HA just uses whatever address we report — both proxies
+in our setup will agree on the (wrong) address for the same peripheral,
+RSSI routing still functions, adv counts on the dashboard look fine.
+The bug surfaced only when we scanned for the ANT BMS target
+`20:A1:11:02:23:45` and saw `45:23:02:11:A1:20` in the output — exact
+byte reversal.
+
+**Fix:** removed both call sites (scanner + notify_cb) and deleted
+`swap6` from `ble_backend::address`. After the fix the ANT BMS shows
+up at its real MAC and is reachable at -76 dBm; the earlier "out of
+range" verdict was a misdiagnosis caused by the reversed address.
+
+Lesson: any time the proxy invents an integer that's printed back as a
+MAC by the client, validate it against a known peripheral early.
+"All MACs look plausible" is not a verification — every MAC reversed
+also looks plausible.
+
+### 6. Synchronous NimBLE connect blocks the per-client task
 
 `NimBLEClient::connect(..., asyncConnect=false)` blocks the caller for
 up to 8 seconds while it scans + connects. During that time the client
@@ -203,12 +231,11 @@ What was tested and how, in order:
   the static caps (8 services / 12 chars / 6 descriptors per service)
   get truncated with a warning. Real chunking against
   `GATT_DISCOVERY_CHUNK_BYTES` is a v0.2 concern.
-- **Subscription bookkeeping is global, not per-client.** Ref counts
-  `g_sub_adv_count` / `g_sub_free_count` rise on subscribe, fall on
-  unsubscribe, and reset to zero only when the LAST client disconnects.
-  A client that subscribes then crashes will leave its increment until
-  another connection drains the slot. Tolerable for HA + occasional
-  CLI; not what you want with many clients.
+- ~~Subscription bookkeeping is global, not per-client.~~ Fixed: each
+  connection task owns a `ClientSubs{sub_adv, sub_free}` on its stack;
+  handlers flip those flags idempotently and bump atomic global counts.
+  `on_client_disconnect` decrements based on the flags so a crashing
+  client releases its refs without needing the "last client" sweep.
 - **No Noise encryption.** Plaintext only. Fine on a trusted LAN, not
   internet-exposed.
 - **No pairing / cache-clearing / scanner state+mode / connection

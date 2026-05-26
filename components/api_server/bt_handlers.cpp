@@ -22,6 +22,7 @@
 #include "pb_decode.h"
 #include "pb_encode.h"
 
+#include <atomic>
 #include <cstring>
 #include <vector>
 
@@ -31,13 +32,15 @@ namespace {
 
 constexpr const char *TAG = "api.bt";
 
-// Subscription counters across all clients. send_async broadcasts to
-// every connected client anyway, so we only need to know "is anyone
-// subscribed". Counters get reset by on_last_client_disconnect()
-// rather than per-client decrement — simpler, and any stale increment
-// gets cleared the next time the API goes idle.
-int g_sub_adv_count = 0;
-int g_sub_free_count = 0;
+// Subscription ref counts across all clients. send_async broadcasts to
+// every connected client anyway, so we only need "is anyone subscribed".
+// Per-client flags live in Context::subs so a stuck or crashing client
+// can have its increments rolled back via on_client_disconnect rather
+// than waiting for the LAST client to leave.
+//
+// Atomic because per-client tasks compete on the same counter.
+std::atomic<int> g_sub_adv_count{0};
+std::atomic<int> g_sub_free_count{0};
 
 // ---- encode helpers ----
 
@@ -105,7 +108,7 @@ void build_free_msg(proxyapi_BluetoothConnectionsFreeResponse *m) {
 }
 
 void on_free_change() {
-  if (g_sub_free_count <= 0) return;
+  if (g_sub_free_count.load(std::memory_order_acquire) <= 0) return;
   proxyapi_BluetoothConnectionsFreeResponse msg;
   build_free_msg(&msg);
   api_server::send_async(proxyapi::MSG_BLUETOOTH_CONNECTIONS_FREE_RESPONSE,
@@ -148,8 +151,10 @@ void notify_cb(NimBLERemoteCharacteristic *chr, uint8_t *data, size_t len,
   // the address. NimBLE provides ->getClient() on remote chars.
   NimBLEClient *client = chr->getClient();
   if (client == nullptr) return;
-  msg.address = ble_backend::address::swap6(
-      static_cast<uint64_t>(client->getPeerAddress()));
+  // NimBLEAddress::operator uint64_t() already memcpys the LE bytes
+  // onto a uint64 on this LE host, which is exactly the layout
+  // aioesphomeapi expects (MSB of the int == MSB of the printed MAC).
+  msg.address = static_cast<uint64_t>(client->getPeerAddress());
   msg.handle = chr->getHandle();
   size_t copy = len;
   if (copy > sizeof(msg.data.bytes)) copy = sizeof(msg.data.bytes);
@@ -162,25 +167,40 @@ void notify_cb(NimBLERemoteCharacteristic *chr, uint8_t *data, size_t len,
 
 // ---- per-request handlers ----
 
-bool handle_subscribe_adv(const uint8_t *payload, size_t payload_len) {
+bool handle_subscribe_adv(const uint8_t *payload, size_t payload_len,
+                          const Context &ctx) {
   // Decode but ignore `flags` — we always forward raw payloads in v1.
   proxyapi_SubscribeBluetoothLEAdvertisementsRequest req =
       proxyapi_SubscribeBluetoothLEAdvertisementsRequest_init_zero;
   pb_istream_t s = pb_istream_from_buffer(payload, payload_len);
   pb_decode(&s, proxyapi_SubscribeBluetoothLEAdvertisementsRequest_fields, &req);
-  if (++g_sub_adv_count == 1) ble_backend::scanner::start_forwarding();
-  return true;
-}
-
-bool handle_unsubscribe_adv() {
-  if (g_sub_adv_count > 0 && --g_sub_adv_count == 0) {
-    ble_backend::scanner::stop_forwarding();
+  // Idempotent per-client: only the FIRST subscribe from a given client
+  // bumps the global ref count. Stops a misbehaving client from running
+  // the count up unboundedly.
+  if (!ctx.subs->sub_adv) {
+    ctx.subs->sub_adv = true;
+    if (g_sub_adv_count.fetch_add(1, std::memory_order_acq_rel) == 0) {
+      ble_backend::scanner::start_forwarding();
+    }
   }
   return true;
 }
 
-bool handle_subscribe_free(const Context & /*ctx*/) {
-  ++g_sub_free_count;
+bool handle_unsubscribe_adv(const Context &ctx) {
+  if (ctx.subs->sub_adv) {
+    ctx.subs->sub_adv = false;
+    if (g_sub_adv_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      ble_backend::scanner::stop_forwarding();
+    }
+  }
+  return true;
+}
+
+bool handle_subscribe_free(const Context &ctx) {
+  if (!ctx.subs->sub_free) {
+    ctx.subs->sub_free = true;
+    g_sub_free_count.fetch_add(1, std::memory_order_acq_rel);
+  }
   proxyapi_BluetoothConnectionsFreeResponse msg;
   build_free_msg(&msg);
   // Broadcast — send_async takes g_tx_mutex itself, safe to call here
@@ -429,9 +449,9 @@ bool handle(uint16_t request_type, const uint8_t *request_payload,
 
   switch (request_type) {
     case proxyapi::MSG_SUBSCRIBE_BLE_ADVERTISEMENTS_REQUEST:
-      return handle_subscribe_adv(request_payload, request_len);
+      return handle_subscribe_adv(request_payload, request_len, ctx);
     case proxyapi::MSG_UNSUBSCRIBE_BLE_ADVERTISEMENTS_REQUEST:
-      return handle_unsubscribe_adv();
+      return handle_unsubscribe_adv(ctx);
     case proxyapi::MSG_SUBSCRIBE_BLUETOOTH_CONNECTIONS_FREE_REQUEST:
       return handle_subscribe_free(ctx);
     case proxyapi::MSG_BLUETOOTH_DEVICE_REQUEST:
@@ -452,9 +472,24 @@ bool handle(uint16_t request_type, const uint8_t *request_payload,
   }
 }
 
+void on_client_disconnect(ClientSubs &subs) {
+  // Release whatever this client subscribed to. Counters drop to zero
+  // → stop the underlying ble_backend work (adv forwarding etc.).
+  if (subs.sub_adv) {
+    subs.sub_adv = false;
+    if (g_sub_adv_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      ble_backend::scanner::stop_forwarding();
+    }
+  }
+  if (subs.sub_free) {
+    subs.sub_free = false;
+    g_sub_free_count.fetch_sub(1, std::memory_order_acq_rel);
+  }
+}
+
 void on_last_client_disconnect() {
-  g_sub_adv_count = 0;
-  g_sub_free_count = 0;
+  // GATT links are global, not per-client. When everyone's gone, drop
+  // them so we don't keep peers connected with nothing reading.
   ble_backend::on_api_client_disconnect();
 }
 

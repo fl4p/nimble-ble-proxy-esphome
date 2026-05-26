@@ -35,12 +35,4 @@ void uint64_to_nimble_le(uint64_t value, uint8_t le_bytes[6]) {
   }
 }
 
-uint64_t swap6(uint64_t le_packed) {
-  uint64_t v = 0;
-  for (int i = 0; i < 6; ++i) {
-    v = (v << 8) | ((le_packed >> (i * 8)) & 0xff);
-  }
-  return v;
-}
-
 }  // namespace ble_backend::address

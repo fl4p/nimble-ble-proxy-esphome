@@ -106,7 +106,11 @@ class AdvCallbacks : public NimBLEScanCallbacks {
     proxyapi_BluetoothLERawAdvertisement rec =
         proxyapi_BluetoothLERawAdvertisement_init_zero;
     NimBLEAddress addr = dev->getAddress();
-    rec.address = address::swap6(static_cast<uint64_t>(addr));
+    // NimBLEAddress::operator uint64_t() memcpys NimBLE's 6 LE bytes
+    // into a uint64 on an LE host. Result: bits 40-47 hold the MAC's
+    // MSB, which is exactly the layout aioesphomeapi formats back into
+    // MSB-first hex ("20A111022345" → "20:A1:11:02:23:45"). No swap.
+    rec.address = static_cast<uint64_t>(addr);
     rec.rssi = dev->getRSSI();
     rec.address_type = addr.getType();
 
