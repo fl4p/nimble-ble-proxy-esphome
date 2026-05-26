@@ -21,3 +21,9 @@ components/api_proto/nanopb/
 
 # MicroPython prototype lives in its own subtree; not part of the firmware build.
 micropython/
+
+build-bletest/log/
+
+build-bletest/gdbinit/
+
+build-bletest/
