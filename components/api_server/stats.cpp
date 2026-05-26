@@ -41,7 +41,13 @@ std::atomic<uint32_t> g_notifies{0};
 // The hook keeps calling the original vprintf so UART/JTAG output is
 // preserved — this is purely a tee.
 
+// Bigger ring when NimBLE is compiled at DEBUG — DEBUG output during
+// connect/discovery rolls a small ring in well under a second.
+#if defined(CONFIG_BT_NIMBLE_LOG_LEVEL_DEBUG) || defined(CONFIG_NIMBLE_CPP_LOG_LEVEL_DEBUG)
+constexpr size_t LOG_RING_SIZE = 65536;
+#else
 constexpr size_t LOG_RING_SIZE = 8192;
+#endif
 char g_log_ring[LOG_RING_SIZE];
 uint32_t g_log_seq = 0;
 SemaphoreHandle_t g_log_mutex = nullptr;
@@ -117,26 +123,41 @@ esp_err_t log_get(httpd_req_t *req) {
     return httpd_resp_send(req, "", 0);
   }
 
-  // Copy out under the mutex; send outside so the lock isn't held
-  // across socket IO.
-  char *out = static_cast<char *>(std::malloc(backlog));
-  if (out == nullptr) {
-    xSemaphoreGive(g_log_mutex);
-    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                               "log alloc failed");
-  }
+  // Stream in two slices (handling wrap-around) via chunked encoding so
+  // we never need a single contiguous malloc — fragmented heap with a
+  // 64 KiB ring would otherwise fail the alloc and lose the response.
+  // A small bounce buffer copies under the mutex; sends happen outside.
   size_t start = since % LOG_RING_SIZE;
-  size_t first = std::min(static_cast<size_t>(backlog), LOG_RING_SIZE - start);
-  std::memcpy(out, g_log_ring + start, first);
-  if (backlog > first) {
-    std::memcpy(out + first, g_log_ring, backlog - first);
-  }
-  xSemaphoreGive(g_log_mutex);
+  size_t first_len = std::min(static_cast<size_t>(backlog), LOG_RING_SIZE - start);
+  size_t second_len = backlog - first_len;
+
+  constexpr size_t CHUNK = 1024;
+  static char bounce[CHUNK];
 
   httpd_resp_set_hdr(req, "X-Log-Seq", hdr);
   httpd_resp_set_type(req, "text/plain; charset=utf-8");
-  esp_err_t r = httpd_resp_send(req, out, backlog);
-  std::free(out);
+
+  esp_err_t r = ESP_OK;
+  auto send_range = [&](const char *base, size_t len) {
+    while (len > 0 && r == ESP_OK) {
+      size_t take = len < CHUNK ? len : CHUNK;
+      std::memcpy(bounce, base, take);
+      xSemaphoreGive(g_log_mutex);
+      r = httpd_resp_send_chunk(req, bounce, take);
+      xSemaphoreTake(g_log_mutex, portMAX_DELAY);
+      base += take;
+      len -= take;
+    }
+  };
+  send_range(g_log_ring + start, first_len);
+  if (r == ESP_OK && second_len > 0) {
+    send_range(g_log_ring, second_len);
+  }
+  xSemaphoreGive(g_log_mutex);
+
+  if (r == ESP_OK) {
+    r = httpd_resp_send_chunk(req, nullptr, 0);  // terminator
+  }
   return r;
 }
 
