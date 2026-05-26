@@ -18,3 +18,6 @@ components/api_proto/api_subset.pb.h
 
 # Vendored nanopb runtime (cloned per-host, see generate.sh).
 components/api_proto/nanopb/
+
+# MicroPython prototype lives in its own subtree; not part of the firmware build.
+micropython/
