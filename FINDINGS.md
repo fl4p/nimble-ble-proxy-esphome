@@ -204,7 +204,37 @@ matches what aioesphomeapi sends. Verified end-to-end:
 The byte-array `uint64_to_nimble_le` helper is now unused on the
 connect path.
 
-### 9. Synchronous NimBLE connect blocks the per-client task
+### 9. `handle_get_services` stack-overflows the 8 KiB api_client task
+
+The first time a real peer completed GATT discovery, the proxy
+crashed and the TCP socket got RST'd mid-`bluetooth_gatt_get_services`.
+Symptom from HA / bleak-esphome was a 25 s timeout followed by
+"unexpected disconnect from ESPHome API."
+
+Root cause: `gatt_discovery::run()` stack-allocated a
+`ServicesEncodeCtx` wrapping `proxyapi_BluetoothGATTGetServicesResponse`.
+nanopb generates that struct with worst-case fixed-size arrays — the
+`_size` macros say `proxyapi_BluetoothGATTGetServicesResponse_size =
+25171` (~25 KiB). The api_client tasks have an 8 KiB stack. Every
+real discovery overran the canary and panic-rebooted the chip.
+
+Hadn't surfaced during bring-up because at that time the only candidate
+peer was out of range, so the connect path was only exercised through
+`onConnectFail` — `discoverAttributes()` never ran.
+
+**Fix:** `std::unique_ptr<ServicesEncodeCtx>` for the heap allocation;
+`publish::send_async` invokes the encode callback synchronously before
+returning, so the unique_ptr scoped to `run()` is sufficient — no
+ownership transfer needed. Verified end-to-end against the ANT BMS:
+connect → get_services returns 3 services (0x1800 + 0x1801 + 0xFFE0
+with chars 0xFFE1 + 0xFFE2) → disconnect cleanly.
+
+Lesson: when a generated struct's `_size` macro is in the tens of KB,
+the C struct is at least that large even when only partially populated,
+because the inner arrays are statically sized. Don't put it on a stack
+that fits in `idf.py size`.
+
+### 10. Synchronous NimBLE connect blocks the per-client task
 
 `NimBLEClient::connect(..., asyncConnect=false)` blocks the caller for
 up to 8 seconds while it scans + connects. During that time the client
