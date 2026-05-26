@@ -116,6 +116,16 @@ table#devices tr.stale{opacity:.4}
       <option value=80>80</option><option value=160>160</option>
       <option value=240>240</option>
     </select> MHz</label>
+    <!-- BLE scan duty cycle. Values are "<window_ms>,<interval_ms>";
+         JS splits and POSTs both. Lower duty = cooler chip, slower
+         pickup of new advertisers. -->
+    <label>BLE scan: <select id=duty>
+      <option value="30,60">50% (responsive)</option>
+      <option value="30,120">25%</option>
+      <option value="30,300">10% (balanced)</option>
+      <option value="30,1000">3% (cool)</option>
+    </select></label>
+    <label><input type=checkbox id=ls> light sleep</label>
     <button id=reboot class=danger>reboot device</button>
   </div>
 
@@ -438,6 +448,13 @@ async function loadInitialValues() {
     const l = await bleJson('GET /level');   lvl.value = l.nimble;
     const p = await bleJson('GET /txpower'); wtx.value = p.wifi; btx.value = p.ble;
     const f = await bleJson('GET /cpufreq'); cpu.value = f.mhz;
+    document.getElementById('ls').checked = !!f.ls;
+    const sc = await bleJson('GET /scan');
+    const duty = document.getElementById('duty');
+    const key = `${sc.window},${sc.interval}`;
+    // Match if one of the presets fits exactly; otherwise leave the
+    // dropdown showing the first option (we don't add a custom row).
+    for (const opt of duty.options) if (opt.value === key) duty.value = key;
   } catch (e) { /* dropdowns just stay at defaults */ }
 }
 
@@ -455,6 +472,14 @@ function wireControls() {
   };
   document.getElementById('cpu').onchange = e => {
     bleFetch('POST /cpufreq?mhz=' + e.target.value).catch(err => alert(err));
+  };
+  document.getElementById('ls').onchange = e => {
+    bleFetch('POST /cpufreq?ls=' + (e.target.checked ? 1 : 0))
+      .catch(err => alert(err));
+  };
+  document.getElementById('duty').onchange = e => {
+    const [w, i] = e.target.value.split(',');
+    bleFetch(`POST /scan?window=${w}&interval=${i}`).catch(err => alert(err));
   };
   document.getElementById('reboot').onclick = async () => {
     if (!confirm('Reboot device?')) return;
