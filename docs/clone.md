@@ -1,9 +1,22 @@
 # BLE Clone Mode (`CONFIG_NBP_CLONE`)
 
-Status: **implemented + verified** against an ANT-BLE20PHUB (MAC
-`20:A1:11:02:23:45`). Reaches `state=Ready` with `advertising=true`,
-1 service / 2 chars mirrored. Reconnect-on-supervision-timeout cycle
-stable (~3 s recovery).
+Status: **implemented + end-to-end verified** against an
+ANT-BLE20PHUB BMS (MAC `20:A1:11:02:23:45`).
+
+- Clone reaches `state=Ready` with `advertising=true`, 1 service /
+  2 chars mirrored (0xFFE0 / 0xFFE1 NOTIFY+WRITE / 0xFFE2 WRITE+WRITE_NR).
+- Reconnect-on-supervision-timeout cycle stable (~3 s recovery, rebinds
+  NimBLERemoteCharacteristic\* pointers by UUID).
+- [batmon-ha](https://github.com/fl4p/batmon-ha) connects to the cloned
+  device by name and pulls live samples:
+  ```
+  device_info=DeviceInfo(ANT-20PHB0TB120A, hw-20PHB0TB120A, sw-20PHUB00-211026A)
+  BmsSampl(87.5%, U=26.5V, I=4.30A, P=114W, Q=245/280Ah, mos=24°C)
+  volt=[3322,3321,3322,3323,3321,3321,3320,3278] mV
+  ```
+- Throughput: sustained ~15 NOTIFY/s upstream → mirror → batmon, 1:1
+  fan-out (`notifies_in == notifies_out` in `/clone`). Bidirectional —
+  batmon's command writes reach the BMS via `writes_drained`.
 
 Inspired by `clone.py` in [micropython-blebms](https://github.com/PvMz/micropython-blebms),
 adapted to NimBLE-CPP on ESP-IDF and adapted to live alongside the
@@ -554,3 +567,30 @@ Tasks (FreeRTOS):
 
 State machine snapshot (`upstream::State`): `Disabled → Idle → Scanning
 → Connecting → Discovering → Ready → Reconnecting → Connecting → …`.
+
+## 15. Verification recipe
+
+To reproduce against an ANT BMS (or any BLE peripheral with the same
+class of layout — one custom service, NOTIFY-bearing characteristic,
+no auth requirement):
+
+1. Flash + boot the device. NVS clean = `enabled=false` by default.
+2. `POST /clone?addr=AA:BB:CC:DD:EE:FF&type=0&enabled=1`. Reboot if
+   you want to be safe; not required on first enable.
+3. Watch `/clone` until `state == "Ready"`. Typical timeline:
+   `Connecting` (~0.5 s) → `Discovering` (~2–4 s) → disconnect for
+   server registration (~50 ms) → reconnect (~0.5 s) → re-discover →
+   rebind → prime/subscribe → `Ready` with `advertising=true`.
+4. From a host with BLE: `bleak.BleakScanner.discover()` should show
+   the cloned name (`<upstream-name>_cloned`). If macOS shows the old
+   `nimble-proxy` name, toggle Bluetooth off/on — CoreBluetooth caches
+   names per synthetic device UUID and doesn't auto-refresh.
+5. Connect by UUID. `BleakClient.services` should show the cloned
+   service + chars (CCCD auto-added for NOTIFY).
+6. Subscribe to the NOTIFY char and run upstream commands; data should
+   flow without code changes on the application side.
+
+**Counter check** — `notifies_in == notifies_out` in `/clone` JSON
+means the host → mirror → local-central fan-out is 1:1. A non-zero
+`writes_dropped` means the host-side queue was full (raise depth in
+`clone_upstream.cpp` if this is sustained, not just bursty).
