@@ -112,7 +112,99 @@ MAC by the client, validate it against a known peripheral early.
 "All MACs look plausible" is not a verification — every MAC reversed
 also looks plausible.
 
-### 6. Synchronous NimBLE connect blocks the per-client task
+### 6. `setConnectTimeout` takes ms, not seconds
+
+`s->client->setConnectTimeout(proxy::CONNECT_TIMEOUT_MS / 1000)` —
+divided 8000 ms by 1000 because the previous lib version (or our
+assumption from `ble_gap_connect`'s API) took seconds. NimBLE-Cpp 2.5
+takes **milliseconds**, default 30000. We were telling it to give up
+after 8 ms.
+
+Symptom: every connect failed with `BLE_HS_ETIMEOUT` (reason=13) about
+40 ms after issue, no matter peer state, distance, or address. Looked
+like "the proxy isn't actually trying" but was actually "the proxy gave
+up before the controller could send a single scan packet."
+
+Verified with serial: pre-fix `connect → onConnectFail` delta 40 ms;
+post-fix delta = configured timeout (8 s) almost to the millisecond.
+
+**Fix:** drop the `/ 1000`. Commit `cc2e4d3`.
+
+### 7. Scanner stays dead after every connect attempt
+
+NimBLE auto-suspends the active scan when starting a GAP connect
+procedure (only one GAP procedure at a time on the controller). After
+`onConnect` / `onConnectFail` / `onDisconnect`, the scan is **not**
+auto-resumed by NimBLE — and our code didn't restart it either.
+
+Symptom subtle and counterintuitive: dashboard showed 30+ adverts/s
+right after boot, then the first connect attempt killed the scan
+forever, and aioesphomeapi clients subscribing to raw adverts saw
+zero packets. `/stats.json` froze at the adverts count from before the
+first connect attempt, even after 20+ seconds of "should be scanning."
+
+Easy to miss because the adv counter was added *for* diagnosing this,
+and proved its own usefulness immediately: counter at 166 → wait 20 s
+→ counter at 166. No more guessing about RF range vs. forwarding bugs.
+
+**Fix:** `scanner::resume()` helper (idempotent `start()` if not
+currently scanning), called from `onConnect`, `onConnectFail`, and
+`onDisconnect` in `connection.cpp`. Serial confirms within ~10 ms of
+any connect event: `NimBLE: GAP procedure initiated: discovery; …
+ble.scan: scan resumed`.
+
+### 8. **`NimBLEAddress(uint8_t[6], type)` reverses the bytes** (the actual cure)
+
+This was the headline bug of today's session. NimBLE-Cpp's
+byte-array address constructor:
+
+```cpp
+NimBLEAddress::NimBLEAddress(const uint8_t address[6], uint8_t type) {
+    std::reverse_copy(address, address + 6, this->val);
+    this->type = type;
+}
+```
+
+It **reverses** whatever you give it before storing into `val[]`. Our
+connect path was:
+
+```cpp
+uint8_t le[6];
+address::uint64_to_nimble_le(address, le);   // [0x45,0x23,0x02,0x11,0xa1,0x20]
+NimBLEAddress nimble_addr(le, address_type); // val = [0x20,0xa1,0x11,...,0x45]
+```
+
+So we ended up with `val[]` in MSB-first order, but NimBLE uses `val[]`
+directly as the on-air LE wire bytes — meaning the CONNECT_REQ was sent
+for an entirely fictional peer. Every connect timed out (reason=13)
+because that fictional address never advertised.
+
+How it masked itself:
+
+- The scanner path works fine — adverts come from NimBLE in
+  `NimBLEAdvertisedDevice` form, so we never hit this constructor; the
+  rec.address int we forward via `static_cast<uint64_t>(addr)` is
+  already correct end-to-end.
+- The connect serial log shows `peer_addr=45:23:02:11:a1:20`, which
+  *looks* like NimBLE's normal LSB-first print convention for the
+  correct address — but is actually the reversed bytes printed in
+  storage order. Two wrongs cancelling out visually.
+- We spent significant time chasing RF range / NimBLE timeouts /
+  scan params / explicit scan-stop before checking what bytes the
+  constructor actually stored. Lesson: when "the controller can't see
+  a device it just saw," verify the bytes that went into the HCI
+  command, not just the bytes the application thinks it sent.
+
+**Fix:** use `NimBLEAddress(uint64_t, type)` — the uint64 constructor
+takes MSB-first hex (`0x20a111022345` → MAC 20:A1:11:02:23:45), which
+matches what aioesphomeapi sends. Verified end-to-end:
+`onConnect 20a111022345 mtu=136` 290 ms after issuing connect, at
+-60 dBm.
+
+The byte-array `uint64_to_nimble_le` helper is now unused on the
+connect path.
+
+### 9. Synchronous NimBLE connect blocks the per-client task
 
 `NimBLEClient::connect(..., asyncConnect=false)` blocks the caller for
 up to 8 seconds while it scans + connects. During that time the client
@@ -126,6 +218,47 @@ after issuing the GAP command; `ClientCb::onConnect` /
 `onConnectFail` from the NimBLE host task drive the success/failure
 path and emit the `BluetoothDeviceConnectionResponse` via send_async.
 Slot bookkeeping moved into the callbacks.
+
+## ANT BMS specifics (observed on `20:A1:11:02:23:45`)
+
+Captured during the connect bring-up because it's the canonical test
+peripheral and useful context for anyone adding BMS-aware features
+later.
+
+- **Address**: Public (`addr_type=0`). Stable across reboots/cycles.
+- **Adv PDU**: `advType=0` (ADV_IND) — connectable + scannable +
+  legacy. Goes "stealth" (stops advertising) while a connection is
+  active, accepts only one client at a time.
+- **Adv interval**: ~100 ms when idle. Multiple adverts per scan
+  window at strong signal.
+- **Adv payload** (21 B, AD-formatted):
+  - `02 01 06` — Flags = LE General Discoverable + BR/EDR not supported
+  - `05 02 e0ff e7fe` — Incomplete 16-bit service UUIDs: **0xFFE0**
+    (primary, matches the `aiobmsble` matcher) + 0xFEE7
+  - `0b ff 5706 88a0 20a111012345` — Manufacturer Specific Data,
+    company ID **0x0657** (not the `0x2313` that `ant_bms.py` matches
+    against — this unit is a different vendor revision or an
+    `ant_leg_bms` variant; matcher in HA may need adjusting)
+- **MTU after connect**: 136 (NimBLE negotiates this from 247 down).
+- **GATT shape** (per `aiobmsble/bms/ant_bms.py`, not yet verified in
+  proxy): service `0xFFE0`, single characteristic `0xFFE1` with both
+  notify and write properties. Application protocol uses frames
+  `HEAD=0x7E 0xA1 … TAIL=0xAA 0x55` with Modbus CRC; status command
+  `0x01`, device command `0x02`.
+- **Range**: at the desk where this was developed, the BMS sits at
+  -55 to -69 dBm via the proxy's ESP32-S3 onboard antenna. At -80 dBm
+  (across a wall) the connect succeeds but is unreliable; below -85
+  expect frequent `BLE_HS_ETIMEOUT`. Once connected, the link is far
+  more tolerant — supervision timeout = 2.56 s by default.
+- **Phone app coexistence**: if the user's official BMS app is
+  connected, the proxy connect fails fast because the BMS suppresses
+  adverts while connected. No way to detect this from the proxy side
+  beyond "we used to see it, now we don't" — worth logging if the
+  scanner stops seeing a previously-known address for >N seconds.
+
+The reference Python implementations in `/Users/fab/dev/pv/micropython-blebms`
+(uPython aioble, batmon-ha via bleak) both connect successfully and
+have been our ground-truth for protocol behaviour.
 
 ## Architecture
 
