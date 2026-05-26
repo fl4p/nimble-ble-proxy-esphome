@@ -16,4 +16,5 @@ idf_component_register(
         esp_netif
         log
         lwip
+        nvs_flash
 )

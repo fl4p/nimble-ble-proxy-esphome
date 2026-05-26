@@ -1,10 +1,13 @@
 #include "stats.h"
 
+#include "ble_backend.h"
 #include "connection.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "nvs.h"
 #include "proxy_config.h"
 #include "scanner.h"
 
@@ -137,6 +140,106 @@ esp_err_t log_get(httpd_req_t *req) {
   return r;
 }
 
+// ---- NimBLE log-level override (NVS-persisted) ----
+//
+// One slot, one knob: a single esp_log_level applied to all the
+// NimBLE-Cpp tags we know about. Stored in NVS namespace "stats" as
+// key "nimble_lvl" (int8). Default = WARN, which is what we had
+// hard-coded for NimBLEScan before.
+
+constexpr const char *NVS_NS = "stats";
+constexpr const char *NVS_LEVEL_KEY = "nimble_lvl";
+constexpr esp_log_level_t DEFAULT_NIMBLE_LEVEL = ESP_LOG_WARN;
+
+// Every NimBLE-Cpp log tag we've observed. Adding more is harmless;
+// esp_log_level_set just stores the mapping.
+constexpr const char *NIMBLE_TAGS[] = {
+    "NimBLE", "NimBLEScan", "NimBLEDevice", "NimBLEClient",
+    "NimBLEAdvertisedDevice", "NimBLERemoteCharacteristic",
+};
+
+esp_log_level_t g_current_nimble_level = DEFAULT_NIMBLE_LEVEL;
+
+void apply_level(esp_log_level_t lvl) {
+  for (const char *tag : NIMBLE_TAGS) {
+    esp_log_level_set(tag, lvl);
+  }
+  g_current_nimble_level = lvl;
+}
+
+esp_err_t nvs_read_level(esp_log_level_t *out) {
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
+  if (err != ESP_OK) return err;
+  int8_t v = 0;
+  err = nvs_get_i8(h, NVS_LEVEL_KEY, &v);
+  nvs_close(h);
+  if (err != ESP_OK) return err;
+  *out = static_cast<esp_log_level_t>(v);
+  return ESP_OK;
+}
+
+esp_err_t nvs_write_level(esp_log_level_t lvl) {
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+  if (err != ESP_OK) return err;
+  err = nvs_set_i8(h, NVS_LEVEL_KEY, static_cast<int8_t>(lvl));
+  if (err == ESP_OK) err = nvs_commit(h);
+  nvs_close(h);
+  return err;
+}
+
+esp_err_t level_get(httpd_req_t *req) {
+  char buf[32];
+  int n = std::snprintf(buf, sizeof(buf), "{\"nimble\":%d}",
+                        static_cast<int>(g_current_nimble_level));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, n);
+}
+
+esp_err_t level_post(httpd_req_t *req) {
+  // Accept the level in a query string: POST /level?nimble=2 .
+  // Keeps the handler trivial — no body parsing needed.
+  char query[64];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                               "missing query");
+  }
+  char val[8];
+  if (httpd_query_key_value(query, "nimble", val, sizeof(val)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                               "missing nimble=");
+  }
+  int parsed = std::atoi(val);
+  if (parsed < ESP_LOG_NONE || parsed > ESP_LOG_VERBOSE) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                               "level out of range");
+  }
+  auto lvl = static_cast<esp_log_level_t>(parsed);
+  esp_err_t err = nvs_write_level(lvl);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "nvs write failed: %s", esp_err_to_name(err));
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                               "nvs write failed");
+  }
+  apply_level(lvl);
+  ESP_LOGI(TAG, "NimBLE log level set to %d (persisted)",
+           static_cast<int>(lvl));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+
+esp_err_t reboot_post(httpd_req_t *req) {
+  httpd_resp_set_type(req, "text/plain");
+  httpd_resp_send(req, "rebooting\n", HTTPD_RESP_USE_STRLEN);
+  ESP_LOGI(TAG, "reboot requested via /reboot");
+  // Let the response drain and the TCP FIN reach the client before we
+  // yank the rug — same pattern as the OTA handler.
+  vTaskDelay(pdMS_TO_TICKS(500));
+  esp_restart();
+  return ESP_OK;
+}
+
 esp_err_t stats_get(httpd_req_t *req) {
   char buf[192];
   unsigned in_use = proxy::MAX_CONNECTIONS -
@@ -144,13 +247,16 @@ esp_err_t stats_get(httpd_req_t *req) {
   int n = std::snprintf(
       buf, sizeof(buf),
       "{\"reads\":%lu,\"writes\":%lu,\"notifies\":%lu,\"adverts\":%lu,"
-      "\"connections\":%u,\"heap\":%lu}",
+      "\"connections\":%u,\"heap\":%lu,"
+      "\"notify_rx\":%lu,\"last_notify_handle\":%u}",
       static_cast<unsigned long>(g_reads.load(std::memory_order_relaxed)),
       static_cast<unsigned long>(g_writes.load(std::memory_order_relaxed)),
       static_cast<unsigned long>(g_notifies.load(std::memory_order_relaxed)),
       static_cast<unsigned long>(ble_backend::scanner::adv_count()),
       in_use,
-      static_cast<unsigned long>(esp_get_free_heap_size()));
+      static_cast<unsigned long>(esp_get_free_heap_size()),
+      static_cast<unsigned long>(ble_backend::notify_rx_total()),
+      ble_backend::last_notify_handle());
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
 }
@@ -176,9 +282,29 @@ esp_err_t root_get(httpd_req_t *req) {
       "margin:0;border:1px solid #222}"
       "footer{margin-top:1em;color:#888;font-size:.85em}"
       "code{color:#bbb}"
+      "#controls{margin:1em 0;display:flex;gap:1em;align-items:center}"
+      "#controls label{color:#aaa}"
+      "#controls select,#controls button{"
+      "background:#1a1a1a;color:#eee;border:1px solid #333;"
+      "border-radius:4px;padding:.3em .6em;font:inherit;cursor:pointer}"
+      "#controls button:hover{background:#2a2a2a}"
+      "#controls button.danger{border-color:#7f1d1d;color:#fca5a5}"
+      "#controls button.danger:hover{background:#3b0a0a}"
       "</style></head><body>"
       "<h1>nimble-ble-proxy &mdash; BLE activity/s</h1>"
       "<div id=chart></div>"
+      "<div id=controls>"
+      "<label>NimBLE log level: "
+      "<select id=lvl>"
+      "<option value=0>NONE</option>"
+      "<option value=1>ERROR</option>"
+      "<option value=2>WARN</option>"
+      "<option value=3>INFO</option>"
+      "<option value=4>DEBUG</option>"
+      "<option value=5>VERBOSE</option>"
+      "</select></label>"
+      "<button id=reboot class=danger>reboot device</button>"
+      "</div>"
       "<h2>device log</h2>"
       "<pre id=console></pre>"
       "<footer>OTA: <code>curl --data-binary @firmware.bin "
@@ -240,6 +366,16 @@ esp_err_t root_get(httpd_req_t *req) {
       "if(atBottom)con.scrollTop=con.scrollHeight;"
       "}}catch(e){}}"
       "setInterval(pollLog,500);pollLog();"
+      "const lvl=document.getElementById('lvl');"
+      "fetch('/level').then(r=>r.json()).then(j=>{lvl.value=j.nimble;});"
+      "lvl.onchange=()=>{"
+      "fetch('/level?nimble='+lvl.value,{method:'POST'})"
+      ".then(r=>{if(!r.ok)alert('level update failed');});};"
+      "document.getElementById('reboot').onclick=()=>{"
+      "if(!confirm('Reboot device?'))return;"
+      "fetch('/reboot',{method:'POST'}).then(()=>{"
+      "con.appendChild(document.createTextNode("
+      "'\\n[client] reboot requested, waiting for device...\\n'));});};"
       "</script></body></html>";
   httpd_resp_set_type(req, "text/html");
   return httpd_resp_send(req, page, sizeof(page) - 1);
@@ -250,6 +386,18 @@ esp_err_t root_get(httpd_req_t *req) {
 void record_read() { g_reads.fetch_add(1, std::memory_order_relaxed); }
 void record_write() { g_writes.fetch_add(1, std::memory_order_relaxed); }
 void record_notify() { g_notifies.fetch_add(1, std::memory_order_relaxed); }
+
+void apply_log_overrides_from_nvs() {
+  esp_log_level_t lvl;
+  if (nvs_read_level(&lvl) == ESP_OK) {
+    apply_level(lvl);
+    ESP_LOGI(TAG, "NimBLE log level from NVS: %d", static_cast<int>(lvl));
+  } else {
+    apply_level(DEFAULT_NIMBLE_LEVEL);
+    ESP_LOGI(TAG, "NimBLE log level default: %d",
+             static_cast<int>(DEFAULT_NIMBLE_LEVEL));
+  }
+}
 
 void install_log_hook() {
   if (g_log_mutex != nullptr) return;  // already installed
@@ -277,9 +425,24 @@ void register_endpoints(httpd_handle_t srv) {
                      .method = HTTP_GET,
                      .handler = &log_get,
                      .user_ctx = nullptr};
+  httpd_uri_t level_g = {.uri = "/level",
+                         .method = HTTP_GET,
+                         .handler = &level_get,
+                         .user_ctx = nullptr};
+  httpd_uri_t level_p = {.uri = "/level",
+                         .method = HTTP_POST,
+                         .handler = &level_post,
+                         .user_ctx = nullptr};
+  httpd_uri_t reboot = {.uri = "/reboot",
+                        .method = HTTP_POST,
+                        .handler = &reboot_post,
+                        .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &root);
   httpd_register_uri_handler(srv, &stats);
   httpd_register_uri_handler(srv, &log);
+  httpd_register_uri_handler(srv, &level_g);
+  httpd_register_uri_handler(srv, &level_p);
+  httpd_register_uri_handler(srv, &reboot);
   ESP_LOGI(TAG, "stats UI at /");
 }
 

@@ -146,11 +146,11 @@ AdvCallbacks g_cb;
 void init() {
   g_mutex = xSemaphoreCreateMutex();
 
-  // NimBLE-Cpp's scanner logs "New advertiser: <mac>" at INFO for every
-  // advertisement when wantDuplicates=true — that's tens of lines/s of
-  // noise from a library that doesn't actually de-dup. Cap it to WARN
-  // so genuine NimBLE problems still surface.
-  esp_log_level_set("NimBLEScan", ESP_LOG_WARN);
+  // NimBLE log level is applied by api_server::stats from NVS
+  // (apply_log_overrides_from_nvs) before this runs. NimBLE-Cpp's
+  // scanner is the noisiest source — "New advertiser: <mac>" at INFO
+  // on every advert with wantDuplicates=true — so the persisted level
+  // gates that flood.
 
   g_scan = NimBLEDevice::getScan();
   g_scan->setScanCallbacks(&g_cb, /*wantDuplicates=*/true);

@@ -18,7 +18,13 @@ void record_notify();
 // invoked, so console output is preserved.
 void install_log_hook();
 
-// Registers `/`, `/stats.json`, and `/log` on the given httpd.
+// Read persisted NimBLE log level from NVS and apply via
+// esp_log_level_set. Must be called AFTER nvs_flash_init and BEFORE
+// ble_backend::start() so the level is in effect by the time NimBLE
+// initialises. Default if no key present: ESP_LOG_WARN.
+void apply_log_overrides_from_nvs();
+
+// Registers `/`, `/stats.json`, `/log`, `/level`, `/reboot`.
 void register_endpoints(httpd_handle_t srv);
 
 }  // namespace api_server::stats

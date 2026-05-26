@@ -34,6 +34,11 @@ extern "C" void app_main() {
 
   ESP_LOGI(TAG, "nimble-ble-proxy %s booting", proxy::VERSION);
 
+  // NVS is up — apply the persisted NimBLE log level before any
+  // NimBLE component initialises so it takes effect from the first
+  // scan callback.
+  api_server::stats::apply_log_overrides_from_nvs();
+
   wifi_sta::start_and_wait_for_ip();
   mdns_announce::start();
   ota::start();
