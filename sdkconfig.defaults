@@ -1,0 +1,41 @@
+# BLE: NimBLE host, central+observer only (no peripheral, no broadcaster).
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=n
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=9
+# BLE controller activity slots must accommodate connections + scan/adv;
+# default is 6 on S3 which caps NimBLE's effective concurrency.
+CONFIG_BT_CTRL_BLE_MAX_ACT=10
+CONFIG_BT_NIMBLE_MAX_BONDS=0
+CONFIG_BT_NIMBLE_EXT_ADV=n
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=5120
+CONFIG_BT_NIMBLE_HOST_BASED_PRIVACY=n
+CONFIG_BT_NIMBLE_NVS_PERSIST=n
+
+# Networking: enough sockets for HA control + lwip housekeeping.
+CONFIG_LWIP_MAX_SOCKETS=8
+CONFIG_LWIP_SO_REUSE=y
+
+# Task watchdog generous enough for BLE scan callbacks + GATT discovery bursts.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+
+# Logging: info level by default; bump to debug while bringing up.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Custom partition table (factory app, nvs only — no OTA in v1).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ESP32-S3 DevKitC ships with 8 MB flash by default. The custom partition
+# table reserves 2 MB for the factory app, which doesn't fit in IDF's
+# 2 MB default.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# C++ exceptions disabled — IDF default; cheaper code.
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_CXX_RTTI=n

@@ -1,0 +1,17 @@
+idf_component_register(
+    SRCS
+        "frame_codec.cpp"
+        "api_server.cpp"
+        "handshake.cpp"
+        "bt_handlers.cpp"
+    INCLUDE_DIRS
+        "."
+        "../../include"
+    REQUIRES
+        api_proto
+        ble_backend
+        esp_event
+        esp_netif
+        log
+        lwip
+)

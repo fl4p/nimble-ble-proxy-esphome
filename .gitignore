@@ -1,0 +1,19 @@
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# clangd / IDE caches.
+.cache/
+.idea/
+
+# Real wifi credentials never committed — copy from wifi_creds.h.example.
+include/wifi_creds.h
+
+# Generated nanopb output.
+components/api_proto/api_subset.pb.c
+components/api_proto/api_subset.pb.h
+
+# Vendored nanopb runtime (cloned per-host, see generate.sh).
+components/api_proto/nanopb/

@@ -1,0 +1,19 @@
+idf_component_register(
+    SRCS
+        "address.cpp"
+        "publish.cpp"
+        "scanner.cpp"
+        "connection.cpp"
+        "gatt_discovery.cpp"
+        "ble_backend.cpp"
+    INCLUDE_DIRS
+        "."
+        "../../include"
+    REQUIRES
+        api_proto
+        bt
+        log
+        esp_event
+        esp_timer
+        freertos
+)

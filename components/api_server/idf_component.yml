@@ -1,0 +1,6 @@
+dependencies:
+  # bt_handlers calls NimBLE directly to walk services/chars/descriptors;
+  # ble_backend re-exports it transitively only for public headers, not
+  # for internal includes, so list it here too.
+  h2zero/esp-nimble-cpp: "^2.5.0"
+  idf: ">=5.1"

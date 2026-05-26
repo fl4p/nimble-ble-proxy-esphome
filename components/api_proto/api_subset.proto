@@ -1,0 +1,246 @@
+// Subset of esphome/components/api/api.proto needed for a NimBLE BLE proxy.
+//
+// Field numbers and message-type IDs (the framing varint, NOT proto field
+// numbers — listed in the comment above each message) MUST match upstream
+// exactly so unmodified aioesphomeapi can decode our frames.
+//
+// Source: esphome/components/api/api.proto @ ESPHome 2026.5.0
+//
+// Sizing for nanopb (max_size, max_count) lives in api_subset.options.
+
+syntax = "proto3";
+
+package proxyapi;
+
+// ==================== HANDSHAKE ====================
+
+// id = 1
+message HelloRequest {
+  string client_info = 1;
+  uint32 api_version_major = 2;
+  uint32 api_version_minor = 3;
+}
+
+// id = 2
+message HelloResponse {
+  uint32 api_version_major = 1;
+  uint32 api_version_minor = 2;
+  string server_info = 3;
+  string name = 4;
+}
+
+// id = 3 — deprecated since ESPHome 2026.1; we accept and ignore the password.
+message ConnectRequest {
+  string password = 1;
+}
+
+// id = 4
+message ConnectResponse {
+  bool invalid_password = 1;
+}
+
+// id = 5
+message DisconnectRequest {}
+
+// id = 6
+message DisconnectResponse {}
+
+// id = 7
+message PingRequest {}
+
+// id = 8
+message PingResponse {}
+
+// id = 9
+message DeviceInfoRequest {}
+
+// id = 10 — only fields HA consumes for a Bluetooth proxy.
+message DeviceInfoResponse {
+  bool uses_password = 1;       // deprecated; leave false
+  string name = 2;
+  string mac_address = 3;
+  string esphome_version = 4;
+  string compilation_time = 5;
+  string model = 6;
+  // 7-11 omitted (deep_sleep, project_*, webserver_port, legacy bt version)
+  string manufacturer = 12;
+  string friendly_name = 13;
+  uint32 bluetooth_proxy_feature_flags = 15;
+  string bluetooth_mac_address = 18;
+}
+
+// id = 11
+message ListEntitiesRequest {}
+
+// id = 19
+message ListEntitiesDoneResponse {}
+
+// id = 28 — HA always sends this; we accept and never emit log responses.
+message SubscribeLogsRequest {
+  uint32 level = 1;
+  bool dump_config = 2;
+}
+
+// ==================== BLUETOOTH PROXY ====================
+
+enum BluetoothDeviceRequestType {
+  BLUETOOTH_DEVICE_REQUEST_TYPE_CONNECT = 0;            // V1, deprecated
+  BLUETOOTH_DEVICE_REQUEST_TYPE_DISCONNECT = 1;
+  BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR = 2;
+  BLUETOOTH_DEVICE_REQUEST_TYPE_UNPAIR = 3;
+  BLUETOOTH_DEVICE_REQUEST_TYPE_CONNECT_V3_WITH_CACHE = 4;
+  BLUETOOTH_DEVICE_REQUEST_TYPE_CONNECT_V3_WITHOUT_CACHE = 5;
+  BLUETOOTH_DEVICE_REQUEST_TYPE_CLEAR_CACHE = 6;
+}
+
+// id = 66
+message SubscribeBluetoothLEAdvertisementsRequest {
+  uint32 flags = 1;
+}
+
+// id = 87
+message UnsubscribeBluetoothLEAdvertisementsRequest {}
+
+message BluetoothLERawAdvertisement {
+  uint64 address = 1;
+  sint32 rssi = 2;
+  uint32 address_type = 3;
+  bytes data = 4;  // adv + scan_response concatenated, max 62 B (sized in .options)
+}
+
+// id = 93
+message BluetoothLERawAdvertisementsResponse {
+  repeated BluetoothLERawAdvertisement advertisements = 1;
+}
+
+// id = 68
+message BluetoothDeviceRequest {
+  uint64 address = 1;
+  BluetoothDeviceRequestType request_type = 2;
+  bool has_address_type = 3;
+  uint32 address_type = 4;
+}
+
+// id = 69
+message BluetoothDeviceConnectionResponse {
+  uint64 address = 1;
+  bool connected = 2;
+  uint32 mtu = 3;
+  int32 error = 4;
+}
+
+// id = 80
+message SubscribeBluetoothConnectionsFreeRequest {}
+
+// id = 81
+message BluetoothConnectionsFreeResponse {
+  uint32 free = 1;
+  uint32 limit = 2;
+  repeated uint64 allocated = 3;
+}
+
+// ==================== GATT ====================
+
+message BluetoothGATTDescriptor {
+  repeated uint64 uuid = 1;       // 128-bit split into 2x uint64; sized in .options
+  uint32 handle = 2;
+  uint32 short_uuid = 3;          // 16- or 32-bit UUID; mutually exclusive with uuid
+}
+
+message BluetoothGATTCharacteristic {
+  repeated uint64 uuid = 1;
+  uint32 handle = 2;
+  uint32 properties = 3;
+  repeated BluetoothGATTDescriptor descriptors = 4;
+  uint32 short_uuid = 5;
+}
+
+message BluetoothGATTService {
+  repeated uint64 uuid = 1;
+  uint32 handle = 2;
+  repeated BluetoothGATTCharacteristic characteristics = 3;
+  uint32 short_uuid = 4;
+}
+
+// id = 70
+message BluetoothGATTGetServicesRequest {
+  uint64 address = 1;
+}
+
+// id = 71
+message BluetoothGATTGetServicesResponse {
+  uint64 address = 1;
+  repeated BluetoothGATTService services = 2;
+}
+
+// id = 72
+message BluetoothGATTGetServicesDoneResponse {
+  uint64 address = 1;
+}
+
+// id = 73
+message BluetoothGATTReadRequest {
+  uint64 address = 1;
+  uint32 handle = 2;
+}
+
+// id = 74
+message BluetoothGATTReadResponse {
+  uint64 address = 1;
+  uint32 handle = 2;
+  bytes data = 3;
+}
+
+// id = 75
+message BluetoothGATTWriteRequest {
+  uint64 address = 1;
+  uint32 handle = 2;
+  bool response = 3;
+  bytes data = 4;
+}
+
+// id = 76
+message BluetoothGATTReadDescriptorRequest {
+  uint64 address = 1;
+  uint32 handle = 2;
+}
+
+// id = 77
+message BluetoothGATTWriteDescriptorRequest {
+  uint64 address = 1;
+  uint32 handle = 2;
+  bytes data = 3;
+}
+
+// id = 78
+message BluetoothGATTNotifyRequest {
+  uint64 address = 1;
+  uint32 handle = 2;
+  bool enable = 3;
+}
+
+// id = 79
+message BluetoothGATTNotifyDataResponse {
+  uint64 address = 1;
+  uint32 handle = 2;
+  bytes data = 3;
+}
+
+// id = 82
+message BluetoothGATTErrorResponse {
+  uint64 address = 1;
+  uint32 handle = 2;
+  int32 error = 3;
+}
+
+// id = 83
+message BluetoothGATTWriteResponse {
+  uint64 address = 1;
+  uint32 handle = 2;
+}
+
+// id = 84
+message BluetoothGATTNotifyResponse {
+  uint64 address = 1;
+  uint32 handle = 2;
+}

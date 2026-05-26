@@ -1,0 +1,7 @@
+// Copy this file to wifi_creds.h (which is gitignored) and fill in your
+// network. The build will fail with a clear error if wifi_creds.h is missing.
+
+#pragma once
+
+#define WIFI_SSID     "your-ssid"
+#define WIFI_PASSWORD "your-password"

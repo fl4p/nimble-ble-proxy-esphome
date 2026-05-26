@@ -1,0 +1,50 @@
+# nanopb sizing for api_subset.proto. All strings/bytes/repeated fields need
+# a static bound so generated structs can live in BSS without heap allocation.
+# Bounds mirror ESPHome's (max_data_length) annotations where possible.
+
+# ---- handshake ----
+proxyapi.HelloRequest.client_info             max_size:64
+proxyapi.HelloResponse.server_info            max_size:32
+proxyapi.HelloResponse.name                   max_size:31
+proxyapi.ConnectRequest.password              max_size:64
+
+# max_size in nanopb is buffer length INCLUDING null terminator. A
+# MAC string "XX:XX:XX:XX:XX:XX" is 17 chars → needs 18 bytes.
+proxyapi.DeviceInfoResponse.name                max_size:32
+proxyapi.DeviceInfoResponse.mac_address         max_size:18
+proxyapi.DeviceInfoResponse.esphome_version     max_size:32
+proxyapi.DeviceInfoResponse.compilation_time    max_size:32
+proxyapi.DeviceInfoResponse.model               max_size:32
+proxyapi.DeviceInfoResponse.manufacturer        max_size:32
+proxyapi.DeviceInfoResponse.friendly_name       max_size:64
+proxyapi.DeviceInfoResponse.bluetooth_mac_address max_size:18
+
+# ---- bluetooth raw adv ----
+# fixed_array_size=62 in upstream BluetoothLERawAdvertisement.data
+proxyapi.BluetoothLERawAdvertisement.data                       max_size:62
+# Batch size — must match proxy::ADV_BATCH_SIZE in include/proxy_config.h
+proxyapi.BluetoothLERawAdvertisementsResponse.advertisements    max_count:16
+
+# ---- bluetooth connection slots ----
+# Must match proxy::MAX_CONNECTIONS in include/proxy_config.h
+proxyapi.BluetoothConnectionsFreeResponse.allocated   max_count:9
+
+# ---- GATT discovery ----
+# 128-bit UUID split into 2x uint64; short_uuid covers the 16/32-bit cases.
+proxyapi.BluetoothGATTDescriptor.uuid                 max_count:2
+proxyapi.BluetoothGATTCharacteristic.uuid             max_count:2
+proxyapi.BluetoothGATTService.uuid                    max_count:2
+# Per-chunk caps for discovery responses. Chunks are flushed when encoded
+# size exceeds proxy::GATT_DISCOVERY_CHUNK_BYTES, so these are just safety
+# upper bounds — bump if you proxy unusually complex peripherals.
+proxyapi.BluetoothGATTCharacteristic.descriptors      max_count:6
+proxyapi.BluetoothGATTService.characteristics         max_count:12
+proxyapi.BluetoothGATTGetServicesResponse.services    max_count:8
+
+# ---- GATT read/write/notify payloads ----
+# Bounded by negotiated MTU (≤ ATT_MTU_MAX = 517). 512 is the GATT spec cap
+# on a single attribute value and matches what NimBLE will deliver.
+proxyapi.BluetoothGATTReadResponse.data         max_size:512
+proxyapi.BluetoothGATTWriteRequest.data         max_size:512
+proxyapi.BluetoothGATTWriteDescriptorRequest.data  max_size:512
+proxyapi.BluetoothGATTNotifyDataResponse.data   max_size:512
