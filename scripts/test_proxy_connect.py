@@ -43,25 +43,47 @@ async def run(proxy_ip: str, mac: str, adv_window_s: float,
         print("[!] proxy doesn't advertise ACTIVE_CONNECTIONS — "
               "GATT connect will fail", file=sys.stderr)
 
-    seen: set[str] = set()
+    # mac -> (rssi, addr_type)
+    seen: dict[str, tuple[int, int]] = {}
+    target_advs: list[bytes] = []
 
-    def on_adv(adv) -> None:
-        a = f"{adv.address:012X}"
+    def note(addr_int: int, rssi: int, atype: int, data: bytes = b"") -> None:
+        a = f"{addr_int:012X}"
         a_fmt = ":".join(a[i:i + 2] for i in range(0, 12, 2))
         if a_fmt not in seen:
-            seen.add(a_fmt)
-            rssi = getattr(adv, "rssi", "?")
-            print(f"    adv {a_fmt} rssi={rssi}")
+            print(f"    adv {a_fmt} rssi={rssi} type={atype}")
+        seen[a_fmt] = (rssi, atype)
+        if a_fmt.upper() == mac.upper() and data:
+            target_advs.append(data)
 
-    print(f"[+] subscribing to advertisements for {adv_window_s:.0f}s")
-    unsub = client.subscribe_bluetooth_le_advertisements(on_adv)
+    use_raw = bool(feats & BluetoothProxyFeature.RAW_ADVERTISEMENTS)
+    if use_raw:
+        def on_raw(resp) -> None:
+            for adv in resp.advertisements:
+                note(adv.address, adv.rssi, adv.address_type, bytes(adv.data))
+        print(f"[+] subscribing to RAW advertisements for {adv_window_s:.0f}s")
+        unsub = client.subscribe_bluetooth_le_raw_advertisements(on_raw)
+    else:
+        def on_adv(adv) -> None:
+            note(adv.address, getattr(adv, "rssi", 0),
+                 getattr(adv, "address_type", 0))
+        print(f"[+] subscribing to advertisements for {adv_window_s:.0f}s")
+        unsub = client.subscribe_bluetooth_le_advertisements(on_adv)
     try:
         await asyncio.sleep(adv_window_s)
     finally:
         unsub()
     print(f"[+] saw {len(seen)} unique peripherals")
-    if mac.upper() in {s.upper() for s in seen}:
-        print(f"[+] target {mac} was visible in scan")
+    if target_advs:
+        print(f"[+] target adv samples ({len(target_advs)}):")
+        for i, d in enumerate(target_advs[:3]):
+            print(f"    [{i}] len={len(d)} {d.hex()}")
+    tgt = seen.get(mac.upper())
+    tgt_atype = 0
+    if tgt is not None:
+        tgt_rssi, tgt_atype = tgt
+        print(f"[+] target {mac} was visible in scan, rssi={tgt_rssi} dBm, "
+              f"addr_type={tgt_atype}")
     else:
         print(f"[!] target {mac} not seen during scan window "
               "— connect may still work if the device is advertising")
@@ -77,14 +99,15 @@ async def run(proxy_ip: str, mac: str, adv_window_s: float,
         print(f"[+] connection state: connected={connected} mtu={mtu} "
               f"error={error}")
 
-    print(f"[+] requesting GATT connect to {mac} ({addr_int:#014x})")
+    print(f"[+] requesting GATT connect to {mac} ({addr_int:#014x}) "
+          f"addr_type={tgt_atype}")
     cancel = await client.bluetooth_device_connect(
         addr_int,
         on_bluetooth_connection_state=on_state,
         timeout=connect_timeout_s,
         feature_flags=feats,
         has_cache=False,
-        address_type=0,
+        address_type=tgt_atype,
     )
 
     try:
