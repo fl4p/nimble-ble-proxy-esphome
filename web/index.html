@@ -23,6 +23,7 @@
 <meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>nimble-ble-proxy</title>
+<link rel=icon type="image/svg+xml" href="/favicon.svg">
 <link rel=stylesheet href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
 <style>
 html,body{box-sizing:border-box}*,*::before,*::after{box-sizing:inherit}
@@ -69,6 +70,10 @@ table#devices th,table#devices td{padding:.2em .6em;
 table#devices th{color:#888;font-weight:normal}
 table#devices .r{text-align:right;font-variant-numeric:tabular-nums}
 table#devices tr.stale{opacity:.4}
+table#devices button.clone-btn{background:#1a1a1a;border:1px solid #333;
+  color:#ddd;font:inherit;padding:.1em .5em;border-radius:3px;cursor:pointer}
+table#devices button.clone-btn:hover{background:#2a2a2a}
+table#devices button.clone-btn:disabled{opacity:.5;cursor:default}
 .hidden{display:none}
 #unsupported{background:#3b0a0a;color:#fca5a5;padding:1em;border-radius:6px;
   border:1px solid #7f1d1d;margin-bottom:1em}
@@ -98,6 +103,7 @@ table#devices tr.stale{opacity:.4}
   <div class=devwrap><table id=devices><thead><tr>
     <th>MAC</th><th>name</th><th class=r>RSSI</th>
     <th class=r>adv/s</th><th class=r>total</th><th class=r>age</th>
+    <th></th>
   </tr></thead><tbody></tbody></table></div>
 
   <div id=tunables>
@@ -135,6 +141,7 @@ table#devices tr.stale{opacity:.4}
       <option value="30,1000">3% (cool)</option>
     </select></label>
     <label><input type=checkbox id=ls> light sleep</label>
+    <label><input type=checkbox id=act> active scan</label>
     <button id=reboot class=danger>reboot device</button>
   </div>
 
@@ -482,6 +489,14 @@ async function tickDevices() {
         td.textContent = v;
         tr.appendChild(td);
       }
+      const tdBtn = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.className = 'clone-btn';
+      btn.textContent = 'clone';
+      btn.dataset.addr = x.addr;
+      btn.dataset.type = x.type;
+      tdBtn.appendChild(btn);
+      tr.appendChild(tdBtn);
       tb.appendChild(tr);
     }
     g_devPrev = next;
@@ -518,6 +533,7 @@ async function loadInitialValues() {
     // Match if one of the presets fits exactly; otherwise leave the
     // dropdown showing the first option (we don't add a custom row).
     for (const opt of duty.options) if (opt.value === key) duty.value = key;
+    document.getElementById('act').checked = !!sc.active;
   } catch (e) { /* dropdowns just stay at defaults */ }
 }
 
@@ -547,6 +563,10 @@ function wireControls() {
     const [w, i] = e.target.value.split(',');
     apiText(`POST /scan?window=${w}&interval=${i}`).catch(err => alert(err));
   };
+  document.getElementById('act').onchange = e => {
+    apiText('POST /scan?active=' + (e.target.checked ? 1 : 0))
+      .catch(err => alert(err));
+  };
   document.getElementById('reboot').onclick = async () => {
     if (!confirm('Reboot device?')) return;
     try {
@@ -561,6 +581,34 @@ function wireControls() {
       setStatus(e.message || String(e), 'err');
     }
   };
+
+  // Delegated handler so we don't re-bind every poll. The button carries
+  // addr + addr-type from the scanner row; clone supervisor picks the
+  // change up live (only first-time MAC change after mirror has built
+  // sets reboot_required).
+  document.querySelector('#devices').addEventListener('click', async (e) => {
+    const b = e.target.closest('button.clone-btn');
+    if (!b) return;
+    const addr = b.dataset.addr;
+    const type = b.dataset.type || '0';
+    if (!confirm(`Clone ${addr}?`)) return;
+    b.disabled = true;
+    const prev = b.textContent;
+    b.textContent = '…';
+    try {
+      const r = await apiJson(
+        `POST /clone?addr=${addr}&type=${type}&enabled=1`);
+      b.textContent = r.reboot_required ? 'reboot' : 'ok';
+      if (r.reboot_required) alert(
+        'Target MAC changed after the GATT mirror was already built. ' +
+        'Reboot the device to rebuild against the new target.');
+    } catch (err) {
+      b.textContent = prev;
+      alert(err);
+    } finally {
+      setTimeout(() => { b.disabled = false; b.textContent = prev; }, 2000);
+    }
+  });
 
   addEventListener('resize', () => {
     if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
