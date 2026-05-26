@@ -158,9 +158,29 @@ void init() {
 }
 
 void start() {
+  if (!g_scan) {
+    ESP_LOGE(TAG, "g_scan is null — NimBLEDevice::init() must precede start()");
+    return;
+  }
+  bool ok = g_scan->start(0, /*isContinue=*/true);
+  if (!ok) {
+    ESP_LOGE(TAG, "NimBLEScan::start() returned false — scan not active");
+    return;
+  }
+  ESP_LOGI(TAG, "scanning (interval=%ums window=%ums passive)",
+           proxy::SCAN_INTERVAL_MS, proxy::SCAN_WINDOW_MS);
+}
+
+void resume() {
+  // NimBLE-Cpp's start() is a no-op if scan is already running, so this
+  // is cheap to call defensively after every connect-procedure end.
   if (!g_scan) return;
-  g_scan->start(0, /*restart=*/true);
-  ESP_LOGI(TAG, "scanning");
+  if (g_scan->isScanning()) return;
+  if (!g_scan->start(0, /*isContinue=*/true)) {
+    ESP_LOGW(TAG, "scan resume failed");
+    return;
+  }
+  ESP_LOGI(TAG, "scan resumed");
 }
 
 void start_forwarding() {

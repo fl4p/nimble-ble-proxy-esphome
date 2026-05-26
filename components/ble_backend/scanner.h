@@ -18,6 +18,11 @@ void init();
 // Begin scanning (continuous, passive by default). Idempotent.
 void start();
 
+// Ensure the scan is running. NimBLE auto-suspends the scan whenever
+// it starts a GAP connect procedure; this restarts it once the
+// procedure ends so the scanner doesn't stay dead between connects.
+void resume();
+
 // Toggle whether each adv callback is queued for forwarding to HA.
 // When off, ads are dropped on the floor.
 void start_forwarding();

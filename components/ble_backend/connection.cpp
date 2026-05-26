@@ -2,6 +2,7 @@
 
 #include "address.h"
 #include "proxy_config.h"
+#include "scanner.h"
 
 #include "NimBLEDevice.h"
 #include "esp_log.h"
@@ -90,6 +91,9 @@ class ClientCb : public NimBLEClientCallbacks {
       cb_snapshot(addr_snapshot, r);
     }
     notify_free_change();
+    // NimBLE suspends the scan while doing the GAP connect procedure;
+    // resume it so advert forwarding stays alive for other devices.
+    scanner::resume();
   }
 
   void onConnectFail(NimBLEClient *c, int reason) override {
@@ -113,6 +117,7 @@ class ClientCb : public NimBLEClientCallbacks {
       cb_snapshot(addr_snapshot, r);
     }
     notify_free_change();
+    scanner::resume();
   }
 
   void onDisconnect(NimBLEClient *c, int reason) override {
@@ -140,6 +145,7 @@ class ClientCb : public NimBLEClientCallbacks {
         cb_snapshot(addr_snapshot, r);
       }
       notify_free_change();
+      scanner::resume();
     }
   }
 };
@@ -192,6 +198,16 @@ bool connect(uint64_t address, uint8_t address_type, ConnectCallback cb) {
 
   ESP_LOGI(TAG, "connect %012llx type=%u (async)",
            static_cast<unsigned long long>(address), address_type);
+
+  // Stop our continuous scan first. NimBLE's ble_gap_connect implicitly
+  // pre-empts the radio but ESP32-S3 + NimBLE host appears to miss
+  // connectable adverts during the connect-scan when our user scan was
+  // running; cancelling it explicitly is what micropython's aioble does
+  // and what makes the connect actually catch the peer.
+  auto *scan = NimBLEDevice::getScan();
+  if (scan && scan->isScanning()) {
+    scan->stop();
+  }
 
   // Async connect — returns immediately. ClientCb::onConnect /
   // onConnectFail will fire later from the NimBLE host task and route
