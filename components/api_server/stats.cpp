@@ -902,8 +902,15 @@ const char *handle_level_set(const char *query) {
 }
 
 size_t build_txpower_json(char *buf, size_t cap) {
-  int n = std::snprintf(buf, cap, "{\"wifi\":%d,\"ble\":%d}",
-                        g_wifi_off ? 0 : static_cast<int>(g_wifi_tx_dbm),
+  // wifi==0 in the wire format means "WiFi not active" — either runtime
+  // off (via handle_txpower_set) or compile-time absent. Either way the
+  // dashboard disables the TX-power dropdown on seeing 0.
+#if CONFIG_NBP_WIFI
+  int wifi = g_wifi_off ? 0 : static_cast<int>(g_wifi_tx_dbm);
+#else
+  int wifi = 0;
+#endif
+  int n = std::snprintf(buf, cap, "{\"wifi\":%d,\"ble\":%d}", wifi,
                         static_cast<int>(g_ble_tx_dbm));
   if (n < 0) return 0;
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
