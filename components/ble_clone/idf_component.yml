@@ -1,0 +1,6 @@
+## Pulls NimBLE-CPP headers; same dependency line as ble_backend so the
+## managed-component manager resolves to the same version.
+dependencies:
+  h2zero/esp-nimble-cpp: "^2.5.0"
+  idf:
+    version: ">=5.1"

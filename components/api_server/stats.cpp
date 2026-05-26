@@ -8,7 +8,9 @@
 #include "esp_pm.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#if CONFIG_NBP_WIFI
 #include "esp_wifi.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -104,63 +106,34 @@ esp_err_t log_get(httpd_req_t *req) {
     }
   }
 
-  xSemaphoreTake(g_log_mutex, portMAX_DELAY);
-  uint32_t seq = g_log_seq;
-  // If the client is way behind, clamp to the oldest byte we still hold.
-  uint32_t backlog;
-  if (since > seq) {
-    // Counter wrap or client seq came from a previous boot; reset.
-    since = seq;
-    backlog = 0;
-  } else if (seq - since > LOG_RING_SIZE) {
-    since = seq - LOG_RING_SIZE;
-    backlog = LOG_RING_SIZE;
-  } else {
-    backlog = seq - since;
-  }
-
-  char hdr[32];
-  std::snprintf(hdr, sizeof(hdr), "%lu", static_cast<unsigned long>(seq));
-
-  if (backlog == 0) {
-    xSemaphoreGive(g_log_mutex);
-    httpd_resp_set_hdr(req, "X-Log-Seq", hdr);
-    httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    return httpd_resp_send(req, "", 0);
-  }
-
-  // Stream in two slices (handling wrap-around) via chunked encoding so
-  // we never need a single contiguous malloc — fragmented heap with a
-  // 64 KiB ring would otherwise fail the alloc and lose the response.
-  // A small bounce buffer copies under the mutex; sends happen outside.
-  size_t start = since % LOG_RING_SIZE;
-  size_t first_len = std::min(static_cast<size_t>(backlog), LOG_RING_SIZE - start);
-  size_t second_len = backlog - first_len;
-
   constexpr size_t CHUNK = 1024;
   static char bounce[CHUNK];
 
+  // First slice snapshots g_log_seq. The header advertises that snapshot
+  // so the client's next poll resumes from a deterministic boundary; new
+  // bytes arriving during the drain loop are picked up on the next poll.
+  uint32_t target_seq = 0;
+  size_t n = build_log_slice(&since, bounce, sizeof(bounce), &target_seq);
+
+  char hdr[32];
+  std::snprintf(hdr, sizeof(hdr), "%lu",
+                static_cast<unsigned long>(target_seq));
   httpd_resp_set_hdr(req, "X-Log-Seq", hdr);
   httpd_resp_set_type(req, "text/plain; charset=utf-8");
 
-  esp_err_t r = ESP_OK;
-  auto send_range = [&](const char *base, size_t len) {
-    while (len > 0 && r == ESP_OK) {
-      size_t take = len < CHUNK ? len : CHUNK;
-      std::memcpy(bounce, base, take);
-      xSemaphoreGive(g_log_mutex);
-      r = httpd_resp_send_chunk(req, bounce, take);
-      xSemaphoreTake(g_log_mutex, portMAX_DELAY);
-      base += take;
-      len -= take;
-    }
-  };
-  send_range(g_log_ring + start, first_len);
-  if (r == ESP_OK && second_len > 0) {
-    send_range(g_log_ring, second_len);
+  if (n == 0) {
+    return httpd_resp_send(req, "", 0);
   }
-  xSemaphoreGive(g_log_mutex);
 
+  esp_err_t r = httpd_resp_send_chunk(req, bounce, n);
+  since += n;
+  while (r == ESP_OK && since < target_seq) {
+    uint32_t ignore;
+    n = build_log_slice(&since, bounce, sizeof(bounce), &ignore);
+    if (n == 0) break;
+    r = httpd_resp_send_chunk(req, bounce, n);
+    since += n;
+  }
   if (r == ESP_OK) {
     r = httpd_resp_send_chunk(req, nullptr, 0);  // terminator
   }
@@ -388,7 +361,12 @@ esp_err_t apply_ble_tx_dbm(int dbm) {
 }
 
 esp_err_t apply_wifi_tx_dbm(int dbm) {
+#if CONFIG_NBP_WIFI
   return esp_wifi_set_max_tx_power(static_cast<int8_t>(dbm * 4));
+#else
+  (void)dbm;
+  return ESP_OK;
+#endif
 }
 
 esp_err_t nvs_read_i8(const char *key, int8_t *out) {
@@ -632,26 +610,7 @@ void sample_cpu_pct(int *cpu0, int *cpu1) {
 
 esp_err_t stats_get(httpd_req_t *req) {
   char buf[256];
-  unsigned in_use = proxy::MAX_CONNECTIONS -
-                    ble_backend::connection::free_slots();
-  int cpu0 = 0, cpu1 = 0;
-  sample_cpu_pct(&cpu0, &cpu1);
-  float temp_c = read_temp_c();
-  int n = std::snprintf(
-      buf, sizeof(buf),
-      "{\"reads\":%lu,\"writes\":%lu,\"notifies\":%lu,\"adverts\":%lu,"
-      "\"connections\":%u,\"heap\":%lu,"
-      "\"notify_rx\":%lu,\"last_notify_handle\":%u,"
-      "\"cpu0\":%d,\"cpu1\":%d,\"temp_c\":%.1f}",
-      static_cast<unsigned long>(g_reads.load(std::memory_order_relaxed)),
-      static_cast<unsigned long>(g_writes.load(std::memory_order_relaxed)),
-      static_cast<unsigned long>(g_notifies.load(std::memory_order_relaxed)),
-      static_cast<unsigned long>(ble_backend::scanner::adv_count()),
-      in_use,
-      static_cast<unsigned long>(esp_get_free_heap_size()),
-      static_cast<unsigned long>(ble_backend::notify_rx_total()),
-      ble_backend::last_notify_handle(),
-      cpu0, cpu1, static_cast<double>(temp_c));
+  size_t n = build_stats_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
 }
@@ -972,6 +931,65 @@ esp_err_t root_get(httpd_req_t *req) {
 void record_read() { g_reads.fetch_add(1, std::memory_order_relaxed); }
 void record_write() { g_writes.fetch_add(1, std::memory_order_relaxed); }
 void record_notify() { g_notifies.fetch_add(1, std::memory_order_relaxed); }
+
+size_t build_stats_json(char *buf, size_t cap) {
+  unsigned in_use = proxy::MAX_CONNECTIONS -
+                    ble_backend::connection::free_slots();
+  int cpu0 = 0, cpu1 = 0;
+  sample_cpu_pct(&cpu0, &cpu1);
+  float temp_c = read_temp_c();
+  int n = std::snprintf(
+      buf, cap,
+      "{\"reads\":%lu,\"writes\":%lu,\"notifies\":%lu,\"adverts\":%lu,"
+      "\"connections\":%u,\"heap\":%lu,"
+      "\"notify_rx\":%lu,\"last_notify_handle\":%u,"
+      "\"cpu0\":%d,\"cpu1\":%d,\"temp_c\":%.1f}",
+      static_cast<unsigned long>(g_reads.load(std::memory_order_relaxed)),
+      static_cast<unsigned long>(g_writes.load(std::memory_order_relaxed)),
+      static_cast<unsigned long>(g_notifies.load(std::memory_order_relaxed)),
+      static_cast<unsigned long>(ble_backend::scanner::adv_count()),
+      in_use,
+      static_cast<unsigned long>(esp_get_free_heap_size()),
+      static_cast<unsigned long>(ble_backend::notify_rx_total()),
+      ble_backend::last_notify_handle(),
+      cpu0, cpu1, static_cast<double>(temp_c));
+  if (n < 0) return 0;
+  return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+
+#if CONFIG_NBP_WEB_CONSOLE
+size_t build_log_slice(uint32_t *since_inout, char *buf, size_t cap,
+                       uint32_t *out_seq) {
+  if (g_log_mutex == nullptr) {
+    if (out_seq) *out_seq = 0;
+    return 0;
+  }
+  xSemaphoreTake(g_log_mutex, portMAX_DELAY);
+  uint32_t seq = g_log_seq;
+  uint32_t since = *since_inout;
+  if (since > seq) {
+    since = seq;  // client reboot or counter ahead — reset to current.
+  } else if (seq - since > LOG_RING_SIZE) {
+    since = seq - LOG_RING_SIZE;  // client too far behind; drop older.
+  }
+  *since_inout = since;
+
+  uint32_t backlog = seq - since;
+  if (backlog == 0 || cap == 0) {
+    xSemaphoreGive(g_log_mutex);
+    if (out_seq) *out_seq = seq;
+    return 0;
+  }
+  size_t start = since % LOG_RING_SIZE;
+  size_t contig = std::min(static_cast<size_t>(backlog),
+                           LOG_RING_SIZE - start);
+  size_t take = std::min(contig, cap);
+  std::memcpy(buf, g_log_ring + start, take);
+  xSemaphoreGive(g_log_mutex);
+  if (out_seq) *out_seq = seq;
+  return take;
+}
+#endif
 
 void apply_log_overrides_from_nvs() {
   esp_log_level_t lvl;

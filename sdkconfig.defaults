@@ -22,7 +22,26 @@ CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
 # arrived from fugu-fry but BLE_GAP_EVENT_NOTIFY_RX never fired.
 CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
 CONFIG_BT_NIMBLE_GATT_SERVER=y
+# Required for NimBLE-CPP's NimBLEServer::start() path: without this,
+# ble_gatts_reset() does NOT free the svc_entries list, so the second
+# call to ble_svc_gap_init() (triggered by resetGATT during the first
+# server start) hits SYSINIT_PANIC_ASSERT at ble_svc_gap.c:395 because
+# ble_gatts_add_svcs returns EALREADY. With DYNAMIC_SERVICE=y, the
+# reset actually clears the table and re-init succeeds. Verified
+# against the Victron SmartShunt clone bring-up, 2026-05-26.
+CONFIG_BT_NIMBLE_DYNAMIC_SERVICE=y
+# NimBLE caps at 9 connections on ESP32-S3 (Kconfig range 1..9). With
+# NBP_CLONE=y, one slot is held by the clone upstream — leaves 8 for
+# HA-proxy GATT connections. proxy::MAX_CONNECTIONS still advertises 9
+# to HA; collision is only possible if HA holds every slot at once.
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=9
+# NimBLE host at INFO; flip to LOG_LEVEL_DEBUG to recompile with LOGD
+# calls when investigating wire-level issues — but it costs ~40 KB BSS
+# (string literals + 64 KiB web console ring) and the runtime DEBUG-only
+# output rarely tells us more than the existing GAP/GATT "procedure
+# initiated" INFO lines.
+CONFIG_BT_NIMBLE_LOG_LEVEL_INFO=y
+CONFIG_BT_NIMBLE_LOG_LEVEL=1
 # BLE controller activity slots must accommodate connections + scan/adv;
 # default is 6 on S3 which caps NimBLE's effective concurrency.
 CONFIG_BT_CTRL_BLE_MAX_ACT=10
@@ -63,7 +82,9 @@ CONFIG_LWIP_MAX_SOCKETS=8
 CONFIG_LWIP_SO_REUSE=y
 
 # Task watchdog generous enough for BLE scan callbacks + GATT discovery bursts.
-CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+# 30s gives the clone supervisor headroom for long peripheral discoveries
+# (some BMSes walk 60+ characteristics × ~80ms per round-trip).
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 
 # Runtime stats so /stats.json can report per-core CPU%. TRACE_FACILITY
 # enables uxTaskGetSystemState; GENERATE_RUN_TIME_STATS makes
@@ -97,9 +118,15 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # ESP32-S3 DevKitC ships with 8 MB flash by default. The custom partition
 # table reserves 2 MB for the factory app, which doesn't fit in IDF's
 # 2 MB default.
-CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 
 # C++ exceptions disabled — IDF default; cheaper code.
 CONFIG_COMPILER_CXX_EXCEPTIONS=n
 CONFIG_COMPILER_CXX_RTTI=n
+
+# clone bring-up — turn on by default during dev so the build is testable
+CONFIG_NBP_CLONE=y
+CONFIG_NBP_CLONE_MAX_CHARS=64
+CONFIG_NBP_CLONE_VALUE_CACHE_BYTES=64
+

@@ -13,6 +13,32 @@ void record_read();
 void record_write();
 void record_notify();
 
+// Build the same JSON body that /stats.json returns into a caller-
+// supplied buffer. Returns bytes written (truncated at cap-1 by
+// snprintf semantics). Safe to call from any task. The CPU-percent
+// fields advance a static window between calls — if two callers poll
+// concurrently each sees its own delta window, not a shared one.
+size_t build_stats_json(char *buf, size_t cap);
+
+#if CONFIG_NBP_WEB_CONSOLE
+// Copy one contiguous slice of the log ring starting at byte position
+// `*since_inout` into `buf`. `*since_inout` is clamped on the way in
+// (see below) so the caller can derive where the bytes actually came
+// from: the returned slice spans [*since_inout, *since_inout + ret).
+// `*out_seq` gets the current g_log_seq at snapshot time so the caller
+// knows the upper bound.
+//
+// Clamp behavior:
+//   since > seq           -> clamps to seq, returns 0 (client reboot)
+//   seq - since > RING    -> clamps to seq - RING (client far behind)
+//
+// Wrap-around: this call returns at most up to the ring end; if the
+// requested range straddles the wrap point, call again with
+// `*since_inout` advanced by the returned bytes.
+size_t build_log_slice(uint32_t *since_inout, char *buf, size_t cap,
+                       uint32_t *out_seq);
+#endif
+
 #if CONFIG_NBP_WEB_CONSOLE
 // Install the esp_log vprintf hook so device logs mirror into an
 // in-memory ring buffer. Call as early as possible in app_main so we

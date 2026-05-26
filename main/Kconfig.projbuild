@@ -1,5 +1,42 @@
 menu "nimble-ble-proxy"
 
+config NBP_WIFI
+    bool "Bring up WiFi STA + HTTP API (dashboard, OTA, aioesphomeapi)"
+    default y
+    help
+        Master switch for every WiFi-dependent subsystem: the STA
+        connect, mDNS announce, the OTA / dashboard httpd listener,
+        and the aioesphomeapi TCP server on port 6053.
+
+        Turn off to ship a BLE-only build. The radios stay BLE-only;
+        the HA proxy and the web dashboard disappear with it (until
+        a BLE-side transport is added). NimBLE scanner + clone
+        continue to work unchanged.
+
+config NBP_BLE_HTTPD
+    bool "BLE-side HTTP transport (GATT request/response service)"
+    default n
+    select BT_NIMBLE_ROLE_PERIPHERAL  if BT_NIMBLE_ENABLED
+    select BT_NIMBLE_ROLE_BROADCASTER if BT_NIMBLE_ENABLED
+    help
+        Expose a NimBLE peripheral GATT service that carries simple
+        request/response messages (HTTP-like). Lets a Web Bluetooth
+        page act as the dashboard frontend when NBP_WIFI is off.
+
+        Service / characteristic UUIDs:
+          service   6e627062-7072-7879-0001-000000000000
+          REQUEST   ...0001  (write — client → device, fragmented)
+          RESPONSE  ...0002  (notify — device → client, fragmented)
+          INFO      ...0003  (read — MTU + protocol version)
+
+        Framing per fragment: [u8 flags][u8 reqId][payload].
+        flags bit0 = FIN (last fragment), bit1 = ERR.
+
+        Note: this stub advertises its own service UUID. If NBP_CLONE
+        is also enabled, NimBLE has a single advertising context — only
+        one of them gets advertised at a time. A real coordination
+        layer can be added later.
+
 config NBP_DEVICES_PANEL
     bool "Web UI: live device table (/devices + dashboard table)"
     default y
@@ -29,6 +66,53 @@ config NBP_WEB_CONSOLE
         64 KiB with NimBLE DEBUG on, 8 KiB otherwise. The 64 KiB
         path is the dashboard's largest BSS consumer; disable here
         if you don't need the web console (UART logging stays).
+
+config NBP_CLONE
+    bool "BLE clone: local GATT mirror of one upstream device"
+    default n
+    select BT_NIMBLE_ROLE_PERIPHERAL  if BT_NIMBLE_ENABLED
+    select BT_NIMBLE_ROLE_BROADCASTER if BT_NIMBLE_ENABLED
+    select BT_NIMBLE_NVS_PERSIST      if BT_NIMBLE_ENABLED
+    help
+        Scan for a configured upstream peripheral (target MAC stored in
+        NVS), connect to it as a central, walk its GATT database, then
+        expose an identical local GATT server that proxies every
+        read / write / subscribe back to the upstream link.
+
+        Multiple local centrals (e.g. HA phone app + vendor app) can
+        connect simultaneously and all see the same upstream device.
+        NimBLE handles notification fan-out natively; writes from N
+        centrals serialize through one upstream mutex.
+
+        The ESPHome-style scanner + raw-advertisement forwarding keeps
+        running. Clone uses one of the BT_NIMBLE_MAX_CONNECTIONS slots
+        for its upstream link; local centrals also consume slots while
+        connected. Consider bumping BT_NIMBLE_MAX_CONNECTIONS by the
+        number of simultaneous local centrals you expect.
+
+        Costs ~20 KB flash and ~10-15 KB RAM when active and a device
+        is cloned. NimBLE GATT registration is one-shot, so re-targeting
+        requires a reboot: POST /clone?addr=...&type=N then reboot.
+
+config NBP_CLONE_MAX_CHARS
+    int "Clone: max characteristics to mirror"
+    depends on NBP_CLONE
+    default 64
+    range 8 256
+    help
+        Caps the local GATT-DB attribute table. Each slot also reserves
+        a value-cache buffer (NBP_CLONE_VALUE_CACHE_BYTES below). Bumps
+        BSS by ~(cache_bytes + 40) per slot.
+
+config NBP_CLONE_VALUE_CACHE_BYTES
+    int "Clone: per-char cached value buffer (bytes)"
+    depends on NBP_CLONE
+    default 64
+    range 20 244
+    help
+        Size of the per-characteristic read cache. The first read from a
+        local central hits this cache so HA's GATT connect doesn't stall
+        on N synchronous upstream reads. Writes invalidate the cache.
 
 config NBP_SMP
     bool "Enable central-side SMP / static-passkey pairing support"

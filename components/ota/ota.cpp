@@ -118,7 +118,7 @@ void start() {
   // (/update, /, /stats.json, /log, /level GET+POST, /reboot, /trace);
   // bumping past 8 covers /passkey GET+POST and leaves headroom for
   // future endpoints (e.g. /bonds for listing/clearing stored bonds).
-  cfg.max_uri_handlers = 16;
+  cfg.max_uri_handlers = 20;
   // LWIP_MAX_SOCKETS=8 leaves us 5 user sockets after the HTTPD's 3
   // internal ones; default 7 would fail to start. OTA only needs 1
   // concurrent client.
