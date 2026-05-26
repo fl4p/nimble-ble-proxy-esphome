@@ -27,7 +27,20 @@ void install_log_hook();
 // initialises. Default if no key present: ESP_LOG_WARN.
 void apply_log_overrides_from_nvs();
 
-// Registers `/`, `/stats.json`, `/log`, `/level`, `/reboot`.
+// Read persisted WiFi + BLE TX power (dBm) from NVS and apply them.
+// Call AFTER wifi_sta::start_and_wait_for_ip() AND ble_backend::start()
+// — both radios must be up before set-power calls succeed. Defaults if
+// no NVS entry: WiFi 20 dBm, BLE +9 dBm (chip maxes).
+void apply_tx_power_from_nvs();
+
+// Read persisted CPU clock (80/160/240 MHz) from NVS and apply via
+// esp_pm_configure. Safe to call any time after nvs_flash_init; calling
+// early (before WiFi/BLE init) makes the radios' init use the chosen
+// frequency from the start. Default if no NVS entry: 240 MHz.
+void apply_cpu_freq_from_nvs();
+
+// Registers /, /stats.json, /log, /level, /reboot, /trace, /devices,
+// /passkey, /txpower, /cpufreq.
 void register_endpoints(httpd_handle_t srv);
 
 }  // namespace api_server::stats

@@ -3,9 +3,12 @@
 #include "ble_backend.h"
 #include "connection.h"
 #include "driver/temperature_sensor.h"
+#include "esp_bt.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -336,6 +339,170 @@ esp_err_t passkey_post(httpd_req_t *req) {
 }
 #endif  // CONFIG_NBP_SMP
 
+// ---- TX power (NVS-persisted) ----
+//
+// WiFi: esp_wifi_set_max_tx_power takes int8 in 0.25 dBm units. Dropdown
+// values are dBm, converted on apply. Setting too low risks dropping
+// the LAN connection — see wifi_tx_revert_check for the safety net.
+//
+// BLE: esp_ble_tx_power_set with ESP_BLE_PWR_TYPE_DEFAULT maps to the
+// nearest 3 dBm step the controller supports. No connectivity safety
+// needed (LAN is unaffected).
+
+constexpr const char *NVS_WIFI_TX_KEY = "wifi_tx";
+constexpr const char *NVS_BLE_TX_KEY = "ble_tx";
+constexpr const char *NVS_CPU_FREQ_KEY = "cpu_freq";
+constexpr int8_t DEFAULT_WIFI_TX_DBM = 20;
+constexpr int8_t DEFAULT_BLE_TX_DBM = 9;
+constexpr int DEFAULT_CPU_FREQ_MHZ = 240;
+
+int8_t g_wifi_tx_dbm = DEFAULT_WIFI_TX_DBM;
+int8_t g_ble_tx_dbm = DEFAULT_BLE_TX_DBM;
+int g_cpu_freq_mhz = DEFAULT_CPU_FREQ_MHZ;
+
+esp_err_t apply_cpu_freq_mhz(int mhz) {
+  // Pin min=max so the CPU is clamped exactly. light_sleep off — a
+  // continuously-active scanner makes the sleep entry/exit overhead
+  // not worth its modest win.
+  esp_pm_config_t cfg = {
+      .max_freq_mhz = mhz,
+      .min_freq_mhz = mhz,
+      .light_sleep_enable = false,
+  };
+  return esp_pm_configure(&cfg);
+}
+
+esp_power_level_t dbm_to_ble_lvl(int dbm) {
+  if (dbm <= -12) return ESP_PWR_LVL_N12;
+  if (dbm <= -9) return ESP_PWR_LVL_N9;
+  if (dbm <= -6) return ESP_PWR_LVL_N6;
+  if (dbm <= -3) return ESP_PWR_LVL_N3;
+  if (dbm <= 0) return ESP_PWR_LVL_N0;
+  if (dbm <= 3) return ESP_PWR_LVL_P3;
+  if (dbm <= 6) return ESP_PWR_LVL_P6;
+  return ESP_PWR_LVL_P9;
+}
+
+esp_err_t apply_ble_tx_dbm(int dbm) {
+  return esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, dbm_to_ble_lvl(dbm));
+}
+
+esp_err_t apply_wifi_tx_dbm(int dbm) {
+  return esp_wifi_set_max_tx_power(static_cast<int8_t>(dbm * 4));
+}
+
+esp_err_t nvs_read_i8(const char *key, int8_t *out) {
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
+  if (err != ESP_OK) return err;
+  err = nvs_get_i8(h, key, out);
+  nvs_close(h);
+  return err;
+}
+
+esp_err_t nvs_write_i8(const char *key, int8_t v) {
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+  if (err != ESP_OK) return err;
+  err = nvs_set_i8(h, key, v);
+  if (err == ESP_OK) err = nvs_commit(h);
+  nvs_close(h);
+  return err;
+}
+
+esp_err_t txpower_get(httpd_req_t *req) {
+  char buf[32];
+  int n = std::snprintf(buf, sizeof(buf), "{\"wifi\":%d,\"ble\":%d}",
+                        static_cast<int>(g_wifi_tx_dbm),
+                        static_cast<int>(g_ble_tx_dbm));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, n);
+}
+
+esp_err_t cpufreq_get(httpd_req_t *req) {
+  char buf[32];
+  int n = std::snprintf(buf, sizeof(buf), "{\"mhz\":%d}", g_cpu_freq_mhz);
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, n);
+}
+
+esp_err_t cpufreq_post(httpd_req_t *req) {
+  char query[32];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
+  }
+  char val[8];
+  if (httpd_query_key_value(query, "mhz", val, sizeof(val)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing mhz=");
+  }
+  int mhz = std::atoi(val);
+  if (mhz != 80 && mhz != 160 && mhz != 240) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                               "mhz must be 80, 160, or 240");
+  }
+  esp_err_t err = apply_cpu_freq_mhz(mhz);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "esp_pm_configure failed: %s", esp_err_to_name(err));
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                               "cpu freq apply failed");
+  }
+  g_cpu_freq_mhz = mhz;
+  nvs_write_i8(NVS_CPU_FREQ_KEY, static_cast<int8_t>(mhz / 10));
+  ESP_LOGI(TAG, "cpu freq -> %d MHz (persisted)", mhz);
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+
+esp_err_t txpower_post(httpd_req_t *req) {
+  char query[64];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
+  }
+  char val[8];
+  bool changed = false;
+  if (httpd_query_key_value(query, "wifi", val, sizeof(val)) == ESP_OK) {
+    int dbm = std::atoi(val);
+    if (dbm < 2 || dbm > 21) {
+      return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "wifi 2..21");
+    }
+    if (dbm != g_wifi_tx_dbm) {
+      int8_t new_dbm = static_cast<int8_t>(dbm);
+      if (apply_wifi_tx_dbm(new_dbm) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "wifi tx apply failed");
+      }
+      g_wifi_tx_dbm = new_dbm;
+      nvs_write_i8(NVS_WIFI_TX_KEY, g_wifi_tx_dbm);
+      ESP_LOGI(TAG, "wifi tx -> %d dBm (persisted)",
+               static_cast<int>(g_wifi_tx_dbm));
+      changed = true;
+    }
+  }
+  if (httpd_query_key_value(query, "ble", val, sizeof(val)) == ESP_OK) {
+    int dbm = std::atoi(val);
+    if (dbm < -12 || dbm > 9) {
+      return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ble -12..9");
+    }
+    if (dbm != g_ble_tx_dbm) {
+      if (apply_ble_tx_dbm(dbm) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "ble tx apply failed");
+      }
+      g_ble_tx_dbm = static_cast<int8_t>(dbm);
+      nvs_write_i8(NVS_BLE_TX_KEY, g_ble_tx_dbm);
+      ESP_LOGI(TAG, "ble tx -> %d dBm (persisted)",
+               static_cast<int>(g_ble_tx_dbm));
+      changed = true;
+    }
+  }
+  if (!changed) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                               "no params or no change");
+  }
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+
 // Diagnostic capture mode. /trace?on=1 silences scanner noise and
 // pauses scanning so the 64 KiB log ring isn't flooded with "New
 // advertiser" lines during a BMS bring-up, then resets log_seq so the
@@ -545,27 +712,36 @@ esp_err_t root_get(httpd_req_t *req) {
   // plots the per-second delta over a 120-sample (2 min) window.
   static const char page[] =
       "<!doctype html><html><head><meta charset=utf-8>"
+      "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
       "<title>nimble-ble-proxy</title>"
       "<link rel=stylesheet "
       "href=\"https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css\">"
       "<style>"
-      "body{font:14px system-ui;margin:1em;color:#eee;background:#111}"
+      "html,body{box-sizing:border-box}*,*::before,*::after{box-sizing:inherit}"
+      "body{font:14px system-ui;margin:0;padding:1em;color:#eee;background:#111}"
       "h1,h2{font-size:1.1em;margin:0 0 1em}"
       "h2{margin-top:1.5em}"
+      // Charts are uPlot-sized in JS to match the wrapper's inner
+      // width (clamped to 900). max-width:100% keeps the wrapper from
+      // overflowing the body on narrow viewports.
       "#chart,#chart2{background:#1a1a1a;padding:.5em;border-radius:6px;"
-      "display:inline-block}"
+      "display:block;max-width:100%}"
       "#chart2{margin-top:.5em}"
 #if CONFIG_NBP_WEB_CONSOLE
       "#console{background:#0a0a0a;color:#d4d4d4;"
       "font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;"
-      "padding:.5em;border-radius:6px;width:900px;height:300px;"
-      "overflow-y:auto;white-space:pre-wrap;word-break:break-all;"
-      "margin:0;border:1px solid #222}"
+      "padding:.5em;border-radius:6px;width:100%;max-width:920px;"
+      "height:300px;overflow-y:auto;white-space:pre-wrap;"
+      "word-break:break-all;margin:0;border:1px solid #222}"
 #endif
       "footer{margin-top:1em;color:#888;font-size:.85em}"
       "code{color:#bbb}"
-      "#controls{margin:1em 0;display:flex;gap:1em;align-items:center}"
-      "#controls label{color:#aaa}"
+      // flex-wrap so the controls stack on narrow viewports instead of
+      // overflowing the screen edge.
+      "#controls{margin:1em 0;display:flex;flex-wrap:wrap;gap:.6em 1em;"
+      "align-items:center}"
+      "#controls label{color:#aaa;display:inline-flex;align-items:center;"
+      "gap:.3em}"
       "#controls select,#controls button{"
       "background:#1a1a1a;color:#eee;border:1px solid #333;"
       "border-radius:4px;padding:.3em .6em;font:inherit;cursor:pointer}"
@@ -573,27 +749,32 @@ esp_err_t root_get(httpd_req_t *req) {
       "#controls button.danger{border-color:#7f1d1d;color:#fca5a5}"
       "#controls button.danger:hover{background:#3b0a0a}"
 #if CONFIG_NBP_DEVICES_PANEL
+      // Wrap the table in a horizontally-scrollable container so it
+      // doesn't push the page wider than the viewport on mobile.
+      ".devwrap{overflow-x:auto;max-width:100%}"
       "table#devices{border-collapse:collapse;font-size:12px;color:#ddd;"
-      "margin-bottom:1em}"
+      "margin-bottom:1em;min-width:480px}"
       "table#devices th,table#devices td{padding:.2em .6em;"
       "border-bottom:1px solid #222;text-align:left}"
       "table#devices th{color:#888;font-weight:normal}"
       "table#devices .r{text-align:right;font-variant-numeric:tabular-nums}"
       "table#devices tr.stale{opacity:.4}"
 #endif
+      "@media(max-width:640px){body{padding:.5em;font-size:13px}"
+      "h1{font-size:1em}#controls{gap:.5em}}"
       "</style></head><body>"
       "<h1>nimble-ble-proxy &mdash; BLE activity/s</h1>"
       "<div id=chart></div>"
       "<br><div id=chart2></div>"
 #if CONFIG_NBP_DEVICES_PANEL
       "<h2>devices seen</h2>"
-      "<table id=devices><thead><tr>"
+      "<div class=devwrap><table id=devices><thead><tr>"
       "<th>MAC</th><th>name</th><th class=r>RSSI</th>"
       "<th class=r>adv/s</th><th class=r>total</th><th class=r>age</th>"
-      "</tr></thead><tbody></tbody></table>"
+      "</tr></thead><tbody></tbody></table></div>"
 #endif
       "<div id=controls>"
-      "<label>NimBLE log level: "
+      "<label>NimBLE log: "
       "<select id=lvl>"
       "<option value=0>NONE</option>"
       "<option value=1>ERROR</option>"
@@ -602,6 +783,21 @@ esp_err_t root_get(httpd_req_t *req) {
       "<option value=4>DEBUG</option>"
       "<option value=5>VERBOSE</option>"
       "</select></label>"
+      "<label>WiFi TX: <select id=wtx>"
+      "<option value=8>8</option><option value=11>11</option>"
+      "<option value=14>14</option><option value=17>17</option>"
+      "<option value=20>20</option><option value=21>21</option>"
+      "</select> dBm</label>"
+      "<label>BLE TX: <select id=btx>"
+      "<option value=-12>-12</option><option value=-9>-9</option>"
+      "<option value=-6>-6</option><option value=-3>-3</option>"
+      "<option value=0>0</option><option value=3>3</option>"
+      "<option value=6>6</option><option value=9>9</option>"
+      "</select> dBm</label>"
+      "<label>CPU: <select id=cpu>"
+      "<option value=80>80</option><option value=160>160</option>"
+      "<option value=240>240</option>"
+      "</select> MHz</label>"
       "<button id=reboot class=danger>reboot device</button>"
       "</div>"
 #if CONFIG_NBP_WEB_CONSOLE
@@ -618,16 +814,28 @@ esp_err_t root_get(httpd_req_t *req) {
 #endif
       "<script>"
       "const N=120,t=[],r=[],w=[],n=[],a=[],c=[],h=[],"
-      "c0=[],c1=[],tc=[];"
+      "c0=[],c1=[],tc=[],tcA=[];"
       "for(let i=0;i<N;i++){t.push(i-N+1);r.push(null);w.push(null);"
       "n.push(null);a.push(null);c.push(null);h.push(null);"
-      "c0.push(null);c1.push(null);tc.push(null);}"
+      "c0.push(null);c1.push(null);tc.push(null);tcA.push(null);}"
+      // Simple moving average over the last K non-null samples of arr.
+      // Returns null until at least one sample is in-window.
+      "const ma=(arr,k)=>{let s=0,c=0;for(let i=Math.max(0,arr.length-k);"
+      "i<arr.length;i++){if(arr[i]!=null){s+=arr[i];c++;}}"
+      "return c?s/c:null;};"
       "const fmt1=(u,v)=>v==null?'--':v.toFixed(1);"
-      "const u=new uPlot({width:900,height:320,"
+      // Chart canvas matches the wrapper's inner width (clamped to
+      // 900). Reading the live element's clientWidth — minus the
+      // wrapper's own padding — avoids overshooting on small screens.
+      "const chartW=el=>Math.min(900,el.clientWidth-16);"
+      "const chartEl=document.getElementById('chart'),"
+      "chart2El=document.getElementById('chart2');"
+      "const u=new uPlot({width:chartW(chartEl),height:320,"
       "scales:{x:{time:false},y:{},kb:{}},"
       "axes:[{stroke:'#aaa',grid:{stroke:'#333'}},"
       "{stroke:'#aaa',grid:{stroke:'#333'}},"
-      "{side:1,scale:'kb',stroke:'#9ca3af',grid:{show:false},"
+      // Explicit size: 5-char value labels ('999 KB') + a bit of margin.
+      "{side:1,scale:'kb',stroke:'#9ca3af',grid:{show:false},size:52,"
       "values:(u,vs)=>vs.map(v=>v+' KB')}],"
       "series:[{label:'t (s ago)'},"
       "{label:'reads/s',stroke:'#4ade80',width:2,value:fmt1},"
@@ -640,19 +848,21 @@ esp_err_t root_get(httpd_req_t *req) {
       // Second chart: per-core CPU% (left axis 0-100) and chip temp °C
       // (right axis, separate 'temp' scale). Separate from the rate
       // chart because the units (%, °C) don't share a sensible axis.
-      "const u2=new uPlot({width:900,height:200,"
+      "const u2=new uPlot({width:chartW(chart2El),height:200,"
       "scales:{x:{time:false},y:{range:[0,100]},temp:{}},"
       "axes:[{stroke:'#aaa',grid:{stroke:'#333'}},"
       "{stroke:'#aaa',grid:{stroke:'#333'},"
       "values:(u,vs)=>vs.map(v=>v+'%')},"
-      "{side:1,scale:'temp',stroke:'#22d3ee',grid:{show:false},"
+      "{side:1,scale:'temp',stroke:'#22d3ee',grid:{show:false},size:42,"
       "values:(u,vs)=>vs.map(v=>v.toFixed(0)+'\\u00B0C')}],"
       "series:[{label:'t (s ago)'},"
       "{label:'cpu0%',stroke:'#ef4444',width:2},"
       "{label:'cpu1%',stroke:'#f97316',width:2},"
+      // 10-sample moving average over s.temp_c; raw samples are kept
+      // in `tc` only as the MA's input, not plotted.
       "{label:'temp\\u00B0C',scale:'temp',stroke:'#22d3ee',width:2,"
       "value:fmt1}]},"
-      "[t,c0,c1,tc],document.getElementById('chart2'));"
+      "[t,c0,c1,tcA],document.getElementById('chart2'));"
       "let prev=null,prevT=null;"
       "const d=(cur,p,dt)=>{const v=(cur-p)/dt;return v<0?null:v;};"
       "async function tick(){"
@@ -660,7 +870,7 @@ esp_err_t root_get(httpd_req_t *req) {
       "const s=await(await fetch('/stats.json')).json();"
       "if(prev){const dt=now-prevT;"
       "r.shift();w.shift();n.shift();a.shift();c.shift();h.shift();"
-      "c0.shift();c1.shift();tc.shift();"
+      "c0.shift();c1.shift();tc.shift();tcA.shift();"
       "r.push(d(s.reads,prev.reads,dt));"
       "w.push(d(s.writes,prev.writes,dt));"
       "n.push(d(s.notifies,prev.notifies,dt));"
@@ -668,8 +878,9 @@ esp_err_t root_get(httpd_req_t *req) {
       "c.push(s.connections);"
       "h.push(Math.round(s.heap/1024));"
       "c0.push(s.cpu0);c1.push(s.cpu1);tc.push(s.temp_c);"
+      "tcA.push(ma(tc,10));"
       "u.setData([t,r,w,n,a,c,h]);"
-      "u2.setData([t,c0,c1,tc]);}"
+      "u2.setData([t,c0,c1,tcA]);}"
       "prev=s;prevT=now;}catch(e){}}"
       "setInterval(tick,1000);tick();"
 #if CONFIG_NBP_WEB_CONSOLE
@@ -697,6 +908,28 @@ esp_err_t root_get(httpd_req_t *req) {
       "lvl.onchange=()=>{"
       "fetch('/level?nimble='+lvl.value,{method:'POST'})"
       ".then(r=>{if(!r.ok)alert('level update failed');});};"
+      // TX power: dropdown preselected from /txpower, change POSTs the
+      // new value. WiFi <= 8 dBm is risky (may drop the LAN link), so
+      // confirm; device-side has an 8 s revert safety net regardless.
+      "const wtx=document.getElementById('wtx');"
+      "const btx=document.getElementById('btx');"
+      "fetch('/txpower').then(r=>r.json()).then(j=>{"
+      "wtx.value=j.wifi;btx.value=j.ble;});"
+      "wtx.onchange=()=>{"
+      "fetch('/txpower?wifi='+wtx.value,{method:'POST'})"
+      ".then(r=>{if(!r.ok)alert('wifi tx update failed');});};"
+      "btx.onchange=()=>{"
+      "fetch('/txpower?ble='+btx.value,{method:'POST'})"
+      ".then(r=>{if(!r.ok)alert('ble tx update failed');});};"
+      "const cpu=document.getElementById('cpu');"
+      "fetch('/cpufreq').then(r=>r.json()).then(j=>{cpu.value=j.mhz;});"
+      "cpu.onchange=()=>{"
+      "fetch('/cpufreq?mhz='+cpu.value,{method:'POST'})"
+      ".then(r=>{if(!r.ok)alert('cpu freq update failed');});};"
+      // Re-fit charts on viewport resize / orientation change.
+      "addEventListener('resize',()=>{"
+      "u.setSize({width:chartW(chartEl),height:320});"
+      "u2.setSize({width:chartW(chart2El),height:200});});"
       "document.getElementById('reboot').onclick=()=>{"
       "if(!confirm('Reboot device?'))return;"
       "fetch('/reboot',{method:'POST'})"
@@ -761,6 +994,33 @@ void apply_log_overrides_from_nvs() {
   }
   ble_backend::connection::set_passkey(pin);
 #endif
+}
+
+void apply_tx_power_from_nvs() {
+  int8_t v;
+  if (nvs_read_i8(NVS_WIFI_TX_KEY, &v) == ESP_OK) g_wifi_tx_dbm = v;
+  if (nvs_read_i8(NVS_BLE_TX_KEY, &v) == ESP_OK) g_ble_tx_dbm = v;
+  apply_wifi_tx_dbm(g_wifi_tx_dbm);
+  apply_ble_tx_dbm(g_ble_tx_dbm);
+  ESP_LOGI(TAG, "TX power applied: wifi=%d dBm, ble=%d dBm",
+           static_cast<int>(g_wifi_tx_dbm),
+           static_cast<int>(g_ble_tx_dbm));
+}
+
+void apply_cpu_freq_from_nvs() {
+  int8_t stored = 0;
+  // Stored as MHz/10 so it fits in int8 (24 -> 240 MHz, 16 -> 160 MHz, etc.).
+  if (nvs_read_i8(NVS_CPU_FREQ_KEY, &stored) == ESP_OK) {
+    int mhz = static_cast<int>(stored) * 10;
+    if (mhz == 80 || mhz == 160 || mhz == 240) g_cpu_freq_mhz = mhz;
+  }
+  esp_err_t err = apply_cpu_freq_mhz(g_cpu_freq_mhz);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "esp_pm_configure(%d MHz) failed: %s",
+             g_cpu_freq_mhz, esp_err_to_name(err));
+    return;
+  }
+  ESP_LOGI(TAG, "CPU freq applied: %d MHz", g_cpu_freq_mhz);
 }
 
 #if CONFIG_NBP_WEB_CONSOLE
@@ -828,6 +1088,26 @@ void register_endpoints(httpd_handle_t srv) {
   httpd_register_uri_handler(srv, &level_p);
   httpd_register_uri_handler(srv, &reboot);
   httpd_register_uri_handler(srv, &trace);
+  httpd_uri_t txpower_g = {.uri = "/txpower",
+                           .method = HTTP_GET,
+                           .handler = &txpower_get,
+                           .user_ctx = nullptr};
+  httpd_uri_t txpower_p = {.uri = "/txpower",
+                           .method = HTTP_POST,
+                           .handler = &txpower_post,
+                           .user_ctx = nullptr};
+  httpd_register_uri_handler(srv, &txpower_g);
+  httpd_register_uri_handler(srv, &txpower_p);
+  httpd_uri_t cpufreq_g = {.uri = "/cpufreq",
+                           .method = HTTP_GET,
+                           .handler = &cpufreq_get,
+                           .user_ctx = nullptr};
+  httpd_uri_t cpufreq_p = {.uri = "/cpufreq",
+                           .method = HTTP_POST,
+                           .handler = &cpufreq_post,
+                           .user_ctx = nullptr};
+  httpd_register_uri_handler(srv, &cpufreq_g);
+  httpd_register_uri_handler(srv, &cpufreq_p);
 #ifdef CONFIG_NBP_SMP
   httpd_register_uri_handler(srv, &passkey_g);
   httpd_register_uri_handler(srv, &passkey_p);

@@ -51,7 +51,10 @@ inline constexpr uint32_t BT_PROXY_FEATURE_FLAGS =
 // sdkconfig.defaults AND proxyapi.BluetoothConnectionsFreeResponse.allocated
 // max_count in components/api_proto/api_subset.options.
 inline constexpr uint8_t MAX_CONNECTIONS = 9;
-inline constexpr uint16_t SCAN_INTERVAL_MS = 30;
+// 50% duty: listening half the time still catches devices that
+// advertise every 100 ms-1 s in well under a second, while halving
+// scanner radio-on time vs the previous 100% duty (interval=window=30).
+inline constexpr uint16_t SCAN_INTERVAL_MS = 60;
 inline constexpr uint16_t SCAN_WINDOW_MS = 30;
 inline constexpr uint8_t ADV_BATCH_SIZE = 16;
 inline constexpr uint32_t ADV_FLUSH_INTERVAL_MS = 100;

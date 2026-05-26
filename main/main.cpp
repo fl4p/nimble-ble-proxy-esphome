@@ -41,6 +41,11 @@ extern "C" void app_main() {
   // scan callback.
   api_server::stats::apply_log_overrides_from_nvs();
 
+  // CPU frequency override needs esp_pm and NVS, both available now.
+  // Apply before WiFi/BLE init so those subsystems run at the chosen
+  // clock from the start.
+  api_server::stats::apply_cpu_freq_from_nvs();
+
   wifi_sta::start_and_wait_for_ip();
   mdns_announce::start();
   ota::start();
@@ -54,6 +59,11 @@ extern "C" void app_main() {
                                 &api_server::has_active_client);
   ble_backend::start();
   api_server::start();
+
+  // Both radios are up — apply persisted TX power overrides. Done last
+  // so any boot-time WiFi traffic (DHCP, mDNS, OTA listener) runs at
+  // chip-default power before being potentially throttled down.
+  api_server::stats::apply_tx_power_from_nvs();
 
   ESP_LOGI(TAG, "boot complete; main task exiting");
 }

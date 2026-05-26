@@ -11,10 +11,13 @@ idf_component_register(
     REQUIRES
         api_proto
         ble_backend
+        bt
         esp_driver_tsens
         esp_event
         esp_http_server
         esp_netif
+        esp_pm
+        esp_wifi
         log
         lwip
         nvs_flash
