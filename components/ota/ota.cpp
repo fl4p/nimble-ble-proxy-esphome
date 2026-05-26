@@ -114,6 +114,11 @@ void start() {
   cfg.recv_wait_timeout = 30;
   cfg.send_wait_timeout = 30;
   cfg.lru_purge_enable = true;
+  // Default 8 handlers is exactly what we needed for the bring-up set
+  // (/update, /, /stats.json, /log, /level GET+POST, /reboot, /trace);
+  // bumping past 8 covers /passkey GET+POST and leaves headroom for
+  // future endpoints (e.g. /bonds for listing/clearing stored bonds).
+  cfg.max_uri_handlers = 16;
   // LWIP_MAX_SOCKETS=8 leaves us 5 user sockets after the HTTPD's 3
   // internal ones; default 7 would fail to start. OTA only needs 1
   // concurrent client.

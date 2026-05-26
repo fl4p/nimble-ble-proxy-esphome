@@ -5,6 +5,7 @@
 #pragma once
 
 #include "esp_http_server.h"
+#include "proxy_config.h"
 
 namespace api_server::stats {
 
@@ -12,11 +13,13 @@ void record_read();
 void record_write();
 void record_notify();
 
+#if CONFIG_NBP_WEB_CONSOLE
 // Install the esp_log vprintf hook so device logs mirror into an
 // in-memory ring buffer. Call as early as possible in app_main so we
 // catch boot-time logs. The original vprintf (UART/JTAG) is still
 // invoked, so console output is preserved.
 void install_log_hook();
+#endif
 
 // Read persisted NimBLE log level from NVS and apply via
 // esp_log_level_set. Must be called AFTER nvs_flash_init and BEFORE

@@ -30,7 +30,12 @@ int notify_listener_cb(struct ble_gap_event *event, void *arg) {
     g_notify_rx_total.fetch_add(1, std::memory_order_relaxed);
     g_last_notify_handle.store(event->notify_rx.attr_handle,
                                std::memory_order_relaxed);
-    ESP_LOGI(TAG, "notify_rx conn=%u handle=%u len=%u indication=%u",
+    // Downgraded to DEBUG once notify-RX was confirmed working end-to-end
+    // (BMS bring-up, 2026-05-26). The counters above remain the ongoing
+    // diagnostic surface — visible via /stats.json as notify_rx and
+    // last_notify_handle. Bump to INFO temporarily by setting the "ble"
+    // tag level if you need a per-packet log again.
+    ESP_LOGD(TAG, "notify_rx conn=%u handle=%u len=%u indication=%u",
              event->notify_rx.conn_handle,
              event->notify_rx.attr_handle,
              event->notify_rx.om ? event->notify_rx.om->om_len : 0,
@@ -58,6 +63,7 @@ void start() {
   // Slightly larger MTU than the 23-byte default so notification payloads
   // aren't capped at 20 B. Peers may still negotiate down.
   NimBLEDevice::setMTU(247);
+
 
   scanner::init();
   connection::init();

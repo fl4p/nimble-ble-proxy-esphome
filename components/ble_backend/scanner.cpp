@@ -40,6 +40,61 @@ SemaphoreHandle_t g_mutex = nullptr;
 Batch g_pending;
 TaskHandle_t g_flush_task = nullptr;
 
+#if CONFIG_NBP_DEVICES_PANEL
+// Live device table. Same mutex as the forwarding batch — critical
+// sections are tiny (linear scan + memcpy) so the contention added on
+// top of the adv-forward path is negligible.
+constexpr size_t DEV_CAP = 64;
+DeviceRow g_devices[DEV_CAP];
+size_t g_device_count = 0;
+
+// Returns index in g_devices for `addr`, allocating or evicting LRU as
+// needed. Caller must hold g_mutex.
+size_t find_or_alloc_device(uint64_t addr) {
+  for (size_t i = 0; i < g_device_count; ++i) {
+    if (g_devices[i].addr == addr) return i;
+  }
+  if (g_device_count < DEV_CAP) {
+    size_t idx = g_device_count++;
+    g_devices[idx] = DeviceRow{};
+    g_devices[idx].addr = addr;
+    return idx;
+  }
+  // Full — evict the row with the oldest sighting.
+  size_t oldest = 0;
+  for (size_t i = 1; i < DEV_CAP; ++i) {
+    if (g_devices[i].last_ms < g_devices[oldest].last_ms) oldest = i;
+  }
+  g_devices[oldest] = DeviceRow{};
+  g_devices[oldest].addr = addr;
+  return oldest;
+}
+
+void record_device(const NimBLEAdvertisedDevice *dev, uint64_t addr,
+                   uint8_t addr_type) {
+  // Parse outside the mutex — getName() walks the AD list.
+  std::string nm = dev->getName();
+  int8_t rssi = static_cast<int8_t>(dev->getRSSI());
+  uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  auto &row = g_devices[find_or_alloc_device(addr)];
+  row.addr_type = addr_type;
+  row.rssi = rssi;
+  row.adv_count++;
+  row.last_ms = now_ms;
+  // Persist last non-empty name — many devices put it only in the scan
+  // response, so plain adv packets don't overwrite a known name.
+  if (!nm.empty()) {
+    size_t k = nm.size();
+    if (k >= sizeof(row.name)) k = sizeof(row.name) - 1;
+    std::memcpy(row.name, nm.data(), k);
+    row.name[k] = 0;
+  }
+  xSemaphoreGive(g_mutex);
+}
+#endif  // CONFIG_NBP_DEVICES_PANEL
+
 // pb_encode ctx for the flush path. Owns a SNAPSHOT of the batch so we
 // can release the scanner mutex before doing socket IO.
 struct EncodeCtx {
@@ -98,6 +153,17 @@ class AdvCallbacks : public NimBLEScanCallbacks {
  public:
   void onResult(const NimBLEAdvertisedDevice *dev) override {
     g_adv_count.fetch_add(1, std::memory_order_relaxed);
+
+    // NimBLEAddress::operator uint64_t() memcpys NimBLE's 6 LE bytes
+    // into a uint64 on an LE host. Result: bits 40-47 hold the MAC's
+    // MSB, which is exactly the layout aioesphomeapi formats back into
+    // MSB-first hex ("20A111022345" → "20:A1:11:02:23:45"). No swap.
+    NimBLEAddress addr = dev->getAddress();
+    uint64_t addr_u64 = static_cast<uint64_t>(addr);
+#if CONFIG_NBP_DEVICES_PANEL
+    record_device(dev, addr_u64, addr.getType());
+#endif
+
     if (!g_forwarding.load(std::memory_order_acquire)) return;
     if (!publish::has_client()) return;
 
@@ -105,12 +171,7 @@ class AdvCallbacks : public NimBLEScanCallbacks {
     // batch is full.
     proxyapi_BluetoothLERawAdvertisement rec =
         proxyapi_BluetoothLERawAdvertisement_init_zero;
-    NimBLEAddress addr = dev->getAddress();
-    // NimBLEAddress::operator uint64_t() memcpys NimBLE's 6 LE bytes
-    // into a uint64 on an LE host. Result: bits 40-47 hold the MAC's
-    // MSB, which is exactly the layout aioesphomeapi formats back into
-    // MSB-first hex ("20A111022345" → "20:A1:11:02:23:45"). No swap.
-    rec.address = static_cast<uint64_t>(addr);
+    rec.address = addr_u64;
     rec.rssi = dev->getRSSI();
     rec.address_type = addr.getType();
 
@@ -213,5 +274,15 @@ void stop_forwarding() {
 uint32_t adv_count() {
   return g_adv_count.load(std::memory_order_relaxed);
 }
+
+#if CONFIG_NBP_DEVICES_PANEL
+size_t snapshot_devices(DeviceRow *out, size_t cap) {
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  size_t n = g_device_count < cap ? g_device_count : cap;
+  std::memcpy(out, g_devices, n * sizeof(DeviceRow));
+  xSemaphoreGive(g_mutex);
+  return n;
+}
+#endif
 
 }  // namespace ble_backend::scanner

@@ -29,6 +29,7 @@ std::atomic<uint32_t> g_reads{0};
 std::atomic<uint32_t> g_writes{0};
 std::atomic<uint32_t> g_notifies{0};
 
+#if CONFIG_NBP_WEB_CONSOLE
 // ---- log ring buffer ----
 //
 // esp_log_set_vprintf installs a process-wide hook called from any
@@ -160,6 +161,7 @@ esp_err_t log_get(httpd_req_t *req) {
   }
   return r;
 }
+#endif  // CONFIG_NBP_WEB_CONSOLE
 
 // ---- NimBLE log-level override (NVS-persisted) ----
 //
@@ -188,16 +190,23 @@ esp_log_level_t g_current_nimble_level = DEFAULT_NIMBLE_LEVEL;
 
 void apply_level(esp_log_level_t lvl) {
   for (const char *tag : NIMBLE_CORE_TAGS) esp_log_level_set(tag, lvl);
-  for (const char *tag : NIMBLE_SCAN_TAGS) esp_log_level_set(tag, lvl);
+  // NimBLE-Cpp's scanner logs "New advertiser: <mac>" at INFO on every
+  // advert with wantDuplicates=true — instantly floods the console at
+  // INFO+. Cap scan tags at WARN regardless of the user-picked level;
+  // they only become more verbose via /trace ON's explicit override.
+  esp_log_level_t scan_lvl = (lvl < ESP_LOG_WARN) ? lvl : ESP_LOG_WARN;
+  for (const char *tag : NIMBLE_SCAN_TAGS) esp_log_level_set(tag, scan_lvl);
   g_current_nimble_level = lvl;
 }
 
+#if CONFIG_NBP_WEB_CONSOLE
 void log_ring_reset() {
   if (g_log_mutex == nullptr) return;
   xSemaphoreTake(g_log_mutex, portMAX_DELAY);
   g_log_seq = 0;
   xSemaphoreGive(g_log_mutex);
 }
+#endif
 
 esp_err_t nvs_read_level(esp_log_level_t *out) {
   nvs_handle_t h;
@@ -261,6 +270,7 @@ esp_err_t level_post(httpd_req_t *req) {
   return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
 
+
 // Diagnostic capture mode. /trace?on=1 silences scanner noise and
 // pauses scanning so the 64 KiB log ring isn't flooded with "New
 // advertiser" lines during a BMS bring-up, then resets log_seq so the
@@ -278,7 +288,9 @@ esp_err_t trace_post(httpd_req_t *req) {
     for (const char *tag : NIMBLE_SCAN_TAGS) esp_log_level_set(tag, ESP_LOG_ERROR);
     for (const char *tag : NIMBLE_CORE_TAGS) esp_log_level_set(tag, ESP_LOG_DEBUG);
     ble_backend::scanner::pause();
+#if CONFIG_NBP_WEB_CONSOLE
     log_ring_reset();
+#endif
     ESP_LOGI(TAG, "trace ON: scan paused, core=DEBUG, scan-tags=ERROR");
   } else {
     apply_level(g_current_nimble_level);
@@ -323,6 +335,57 @@ esp_err_t stats_get(httpd_req_t *req) {
   return httpd_resp_send(req, buf, n);
 }
 
+#if CONFIG_NBP_DEVICES_PANEL
+esp_err_t devices_get(httpd_req_t *req) {
+  // Snapshot under the scanner mutex, then format outside it.
+  static ble_backend::scanner::DeviceRow snap[64];
+  size_t n = ble_backend::scanner::snapshot_devices(snap, 64);
+  uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+  // httpd serializes requests on a single worker, so a static buffer
+  // is safe and avoids putting 6 KiB on the worker stack.
+  static char out[6144];
+  char *p = out;
+  char *const end = out + sizeof(out);
+  auto rem = [&]() -> size_t { return end > p ? size_t(end - p) : 0; };
+  auto bump = [&](int w) {
+    if (w > 0) p += size_t(w) < rem() ? size_t(w) : rem();
+  };
+
+  bump(std::snprintf(p, rem(), "{\"devices\":["));
+  for (size_t i = 0; i < n; ++i) {
+    const auto &r = snap[i];
+    uint8_t b[6];
+    for (int k = 0; k < 6; ++k) b[k] = (r.addr >> ((5 - k) * 8)) & 0xff;
+    bump(std::snprintf(
+        p, rem(),
+        "%s{\"addr\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
+        "\"type\":%u,\"rssi\":%d,\"count\":%lu,\"age\":%lu,\"name\":\"",
+        i ? "," : "", b[0], b[1], b[2], b[3], b[4], b[5],
+        static_cast<unsigned>(r.addr_type), static_cast<int>(r.rssi),
+        static_cast<unsigned long>(r.adv_count),
+        static_cast<unsigned long>(now_ms - r.last_ms)));
+    // JSON-escape the name: backslash " and \, \u-escape controls.
+    for (const char *q = r.name; *q && rem() > 8; ++q) {
+      char c = *q;
+      if (c == '"' || c == '\\') {
+        *p++ = '\\'; *p++ = c;
+      } else if (static_cast<unsigned char>(c) < 0x20) {
+        bump(std::snprintf(p, rem(), "\\u%04x",
+                           static_cast<unsigned>(static_cast<unsigned char>(c))));
+      } else {
+        *p++ = c;
+      }
+    }
+    if (rem() >= 2) { *p++ = '"'; *p++ = '}'; }
+  }
+  if (rem() >= 2) { *p++ = ']'; *p++ = '}'; }
+
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, out, p - out);
+}
+#endif  // CONFIG_NBP_DEVICES_PANEL
+
 esp_err_t root_get(httpd_req_t *req) {
   // uPlot loaded from jsdelivr. Page polls /stats.json each second and
   // plots the per-second delta over a 120-sample (2 min) window.
@@ -337,11 +400,13 @@ esp_err_t root_get(httpd_req_t *req) {
       "h2{margin-top:1.5em}"
       "#chart{background:#1a1a1a;padding:.5em;border-radius:6px;"
       "display:inline-block}"
+#if CONFIG_NBP_WEB_CONSOLE
       "#console{background:#0a0a0a;color:#d4d4d4;"
       "font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;"
       "padding:.5em;border-radius:6px;width:900px;height:300px;"
       "overflow-y:auto;white-space:pre-wrap;word-break:break-all;"
       "margin:0;border:1px solid #222}"
+#endif
       "footer{margin-top:1em;color:#888;font-size:.85em}"
       "code{color:#bbb}"
       "#controls{margin:1em 0;display:flex;gap:1em;align-items:center}"
@@ -352,9 +417,25 @@ esp_err_t root_get(httpd_req_t *req) {
       "#controls button:hover{background:#2a2a2a}"
       "#controls button.danger{border-color:#7f1d1d;color:#fca5a5}"
       "#controls button.danger:hover{background:#3b0a0a}"
+#if CONFIG_NBP_DEVICES_PANEL
+      "table#devices{border-collapse:collapse;font-size:12px;color:#ddd;"
+      "margin-bottom:1em}"
+      "table#devices th,table#devices td{padding:.2em .6em;"
+      "border-bottom:1px solid #222;text-align:left}"
+      "table#devices th{color:#888;font-weight:normal}"
+      "table#devices .r{text-align:right;font-variant-numeric:tabular-nums}"
+      "table#devices tr.stale{opacity:.4}"
+#endif
       "</style></head><body>"
       "<h1>nimble-ble-proxy &mdash; BLE activity/s</h1>"
       "<div id=chart></div>"
+#if CONFIG_NBP_DEVICES_PANEL
+      "<h2>devices seen</h2>"
+      "<table id=devices><thead><tr>"
+      "<th>MAC</th><th>name</th><th class=r>RSSI</th>"
+      "<th class=r>adv/s</th><th class=r>total</th><th class=r>age</th>"
+      "</tr></thead><tbody></tbody></table>"
+#endif
       "<div id=controls>"
       "<label>NimBLE log level: "
       "<select id=lvl>"
@@ -367,14 +448,18 @@ esp_err_t root_get(httpd_req_t *req) {
       "</select></label>"
       "<button id=reboot class=danger>reboot device</button>"
       "</div>"
+#if CONFIG_NBP_WEB_CONSOLE
       "<h2>device log</h2>"
       "<pre id=console></pre>"
+#endif
       "<footer>OTA: <code>curl --data-binary @firmware.bin "
       "http://&lt;host&gt;/update</code></footer>"
       "<script src=\"https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/"
       "uPlot.iife.min.js\"></script>"
+#if CONFIG_NBP_WEB_CONSOLE
       "<script src=\"https://cdn.jsdelivr.net/npm/ansi_up@5/ansi_up.js\">"
       "</script>"
+#endif
       "<script>"
       "const N=120,t=[],r=[],w=[],n=[],a=[],c=[],h=[];"
       "for(let i=0;i<N;i++){t.push(i-N+1);r.push(null);w.push(null);"
@@ -410,6 +495,7 @@ esp_err_t root_get(httpd_req_t *req) {
       "u.setData([t,r,w,n,a,c,h]);}"
       "prev=s;prevT=now;}catch(e){}}"
       "setInterval(tick,1000);tick();"
+#if CONFIG_NBP_WEB_CONSOLE
       "let logSeq=0;const con=document.getElementById('console');"
       // ansi_up output is HTML-safe (input is escape_html'd then wrapped
       // in <span>s); we still avoid innerHTML by inserting via a Range
@@ -428,6 +514,7 @@ esp_err_t root_get(httpd_req_t *req) {
       "if(atBottom)con.scrollTop=con.scrollHeight;"
       "}}catch(e){}}"
       "setInterval(pollLog,500);pollLog();"
+#endif
       "const lvl=document.getElementById('lvl');"
       "fetch('/level').then(r=>r.json()).then(j=>{lvl.value=j.nimble;});"
       "lvl.onchange=()=>{"
@@ -435,9 +522,36 @@ esp_err_t root_get(httpd_req_t *req) {
       ".then(r=>{if(!r.ok)alert('level update failed');});};"
       "document.getElementById('reboot').onclick=()=>{"
       "if(!confirm('Reboot device?'))return;"
-      "fetch('/reboot',{method:'POST'}).then(()=>{"
-      "con.appendChild(document.createTextNode("
-      "'\\n[client] reboot requested, waiting for device...\\n'));});};"
+      "fetch('/reboot',{method:'POST'})"
+#if CONFIG_NBP_WEB_CONSOLE
+      ".then(()=>{con.appendChild(document.createTextNode("
+      "'\\n[client] reboot requested, waiting for device...\\n'));})"
+#endif
+      ";};"
+#if CONFIG_NBP_DEVICES_PANEL
+      // Per-device adv/s computed from delta of `count` between polls,
+      // same pattern as the global rates. devPrev gets rebuilt each
+      // tick so it can't grow unbounded as the LRU evicts entries.
+      "let devPrev={};"
+      "async function pollDevices(){try{"
+      "const d=(await(await fetch('/devices')).json()).devices;"
+      "const now=performance.now()/1000;const next={};"
+      "d.sort((a,b)=>b.count-a.count);"
+      "const tb=document.querySelector('#devices tbody');tb.textContent='';"
+      "for(const x of d){const p=devPrev[x.addr];let rate='--';"
+      "if(p){const dt=now-p.t;if(dt>0){const v=(x.count-p.count)/dt;"
+      "if(v>=0)rate=v.toFixed(1);}}"
+      "next[x.addr]={count:x.count,t:now};"
+      "const tr=document.createElement('tr');"
+      "if(x.age>10000)tr.className='stale';"
+      "const cells=[[x.addr,''],[x.name||'',''],"
+      "[x.rssi,'r'],[rate,'r'],[x.count,'r'],"
+      "[(x.age/1000).toFixed(1)+'s','r']];"
+      "for(const [v,cls] of cells){const td=document.createElement('td');"
+      "if(cls)td.className=cls;td.textContent=v;tr.appendChild(td);}"
+      "tb.appendChild(tr);}devPrev=next;}catch(e){}}"
+      "setInterval(pollDevices,1000);pollDevices();"
+#endif
       "</script></body></html>";
   httpd_resp_set_type(req, "text/html");
   return httpd_resp_send(req, page, sizeof(page) - 1);
@@ -461,6 +575,7 @@ void apply_log_overrides_from_nvs() {
   }
 }
 
+#if CONFIG_NBP_WEB_CONSOLE
 void install_log_hook() {
   if (g_log_mutex != nullptr) return;  // already installed
   g_log_mutex = xSemaphoreCreateMutex();
@@ -469,6 +584,7 @@ void install_log_hook() {
   ESP_LOGI(TAG, "log hook installed, %u-byte ring",
            static_cast<unsigned>(LOG_RING_SIZE));
 }
+#endif
 
 void register_endpoints(httpd_handle_t srv) {
   if (srv == nullptr) {
@@ -483,10 +599,12 @@ void register_endpoints(httpd_handle_t srv) {
                        .method = HTTP_GET,
                        .handler = &stats_get,
                        .user_ctx = nullptr};
+#if CONFIG_NBP_WEB_CONSOLE
   httpd_uri_t log = {.uri = "/log",
                      .method = HTTP_GET,
                      .handler = &log_get,
                      .user_ctx = nullptr};
+#endif
   httpd_uri_t level_g = {.uri = "/level",
                          .method = HTTP_GET,
                          .handler = &level_get,
@@ -505,11 +623,20 @@ void register_endpoints(httpd_handle_t srv) {
                        .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &root);
   httpd_register_uri_handler(srv, &stats);
+#if CONFIG_NBP_WEB_CONSOLE
   httpd_register_uri_handler(srv, &log);
+#endif
   httpd_register_uri_handler(srv, &level_g);
   httpd_register_uri_handler(srv, &level_p);
   httpd_register_uri_handler(srv, &reboot);
   httpd_register_uri_handler(srv, &trace);
+#if CONFIG_NBP_DEVICES_PANEL
+  httpd_uri_t devices = {.uri = "/devices",
+                         .method = HTTP_GET,
+                         .handler = &devices_get,
+                         .user_ctx = nullptr};
+  httpd_register_uri_handler(srv, &devices);
+#endif
   ESP_LOGI(TAG, "stats UI at /");
 }
 

@@ -3,6 +3,11 @@
 
 #pragma once
 
+// IDF v5.5 does not auto-inject sdkconfig.h; pull it in here so every
+// translation unit that uses proxy_config.h also sees the CONFIG_NBP_*
+// macros from main/Kconfig.projbuild.
+#include "sdkconfig.h"
+
 #include <cstddef>
 #include <cstdint>
 

@@ -1,0 +1,33 @@
+menu "nimble-ble-proxy"
+
+config NBP_DEVICES_PANEL
+    bool "Web UI: live device table (/devices + dashboard table)"
+    default y
+    help
+        Track every unique MAC the scanner sees in a 64-entry table
+        (RSSI, last local name, cumulative adv count, last-seen
+        timestamp; LRU-by-last_ms eviction). Exposes it as a JSON
+        endpoint at /devices and renders a sortable table below the
+        rate chart on the dashboard.
+
+        Costs ~12 KB BSS (two 3 KB DeviceRow arrays + 6 KB JSON
+        scratch buffer) plus one extra mutex op per advertisement.
+        Disable for a slimmer build that keeps the rate chart but
+        drops the per-device view.
+
+config NBP_WEB_CONSOLE
+    bool "Web UI: device log mirror (/log + on-page console)"
+    default y
+    help
+        Tee esp_log_set_vprintf into a ring buffer and stream it to
+        the dashboard. /log?since=N returns new bytes via chunked
+        encoding; the page polls every 500 ms and renders ANSI
+        colors via ansi_up. UART/JTAG output is unaffected — this
+        is purely a copy.
+
+        Ring sizes itself from CONFIG_BT_NIMBLE_LOG_LEVEL_DEBUG:
+        64 KiB with NimBLE DEBUG on, 8 KiB otherwise. The 64 KiB
+        path is the dashboard's largest BSS consumer; disable here
+        if you don't need the web console (UART logging stays).
+
+endmenu

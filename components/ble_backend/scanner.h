@@ -8,7 +8,10 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+
+#include "proxy_config.h"
 
 namespace ble_backend::scanner {
 
@@ -37,5 +40,23 @@ void stop_forwarding();
 // Bumped from the NimBLE host task in every onResult, before any
 // forwarding/subscription gating.
 uint32_t adv_count();
+
+#if CONFIG_NBP_DEVICES_PANEL
+// Per-device entry in the live device table. Populated regardless of
+// forwarding state — used by the web UI to show what's nearby.
+struct DeviceRow {
+  uint64_t addr;       // MSB-first MAC packed into 48 low bits
+  uint8_t addr_type;   // BLE_ADDR_PUBLIC / RANDOM / ...
+  int8_t rssi;         // dBm from the most recent advert
+  char name[24];       // last non-empty Complete/Shortened Local Name, NUL-term
+  uint32_t adv_count;  // total adverts seen from this MAC
+  uint32_t last_ms;    // FreeRTOS millis at last sighting
+};
+
+// Snapshot up to `cap` rows of the device table into `out`. Internal
+// table holds up to ~64 unique MACs with LRU-by-last_ms eviction.
+// Returns the number of rows written.
+size_t snapshot_devices(DeviceRow *out, size_t cap);
+#endif  // CONFIG_NBP_DEVICES_PANEL
 
 }  // namespace ble_backend::scanner
