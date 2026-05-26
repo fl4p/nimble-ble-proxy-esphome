@@ -553,6 +553,60 @@ The clone reuses `ble_backend::connection::get_passkey()` so it's
 configured via the same `/passkey` HTTP endpoint as the ESPHome-API
 side.
 
+### 13.15 `NimBLEServer::start()` must be called **exactly once** per session
+
+The bug we hit when combining clone with `ble_httpd`:
+`ble_httpd::start()` registered its dashboard service via
+`server->start()` at boot, then clone added its mirrored services via
+`createService` and called `server->start()` a *second* time inside
+`finalize_server`. The second call appeared to succeed —
+`m_svcChanged=true`, `getConnectedCount()==0`, so NimBLE-CPP took the
+reset-and-re-register path, returned `true`, set `m_gattsStarted=true`
+again — but the cloned services were **silently absent from the host
+GATT DB**. Bleak (Linux *and* macOS) only saw the dashboard service
+even when `/clone` reported `services=4 chars=20` internally. The
+clone's `getHandle()` returned `0` for every char post-start because
+`gattRegisterCallback` never matched them.
+
+Symptom signature in the firmware log:
+
+```
+clone.mirror: GATT DB registered (services=1 chars=3)
+clone.mirror:   local[0] svc=… chr=… val_handle=0 …
+clone.mirror:   local[1] svc=… chr=… val_handle=0 …
+```
+
+(`val_handle=0` on every char immediately after a successful
+`server->start()` is the tell.)
+
+**Fix**: there must be exactly one `NimBLEServer::start()` call per
+session, after both ble_httpd's and clone's services are already in
+`m_svcVec`. The contract is now:
+
+- `ble_httpd::start()` only **creates** the service objects (no
+  `server->start()`, no `adv->start()`).
+- `ble_httpd::activate()` is the single `server->start()` +
+  `adv->start()` call. Idempotent via an atomic flag, so it's safe to
+  invoke from multiple callers.
+- `clone_mirror::finalize_server()` calls `ble_httpd::activate()`
+  instead of `g_server->start()`. By the time it runs, the cloned
+  services are sitting next to the dashboard service in `m_svcVec`,
+  so they all register together.
+- `main` calls `ble_httpd::activate()` as a fallback when
+  `CONFIG_NBP_CLONE` is off so the dashboard still comes up.
+
+Cross-reference 13.1 — `Server::start()` still requires the host to be
+idle, so the supervisor still disconnects the upstream link before
+`finalize_server` (now via `ble_httpd::activate()`). The fix is purely
+about consolidating to one start call, not about loosening NimBLE's
+constraints.
+
+Diagnostic probe left in `finalize_server`: after activate, walk each
+cloned service through `ble_gatts_find_svc` and log the host's actual
+handle. `rc=0` + non-zero handle means the host knows about the
+service. `rc=5` (BLE\_HS\_ENOENT) means it doesn't — that's the bug
+indicator if it ever returns.
+
 ## 14. Reference implementation map
 
 | File | Responsibility |
