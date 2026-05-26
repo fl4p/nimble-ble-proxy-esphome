@@ -211,8 +211,18 @@ function bleFetch(line) {
     frame[0] = FIN;
     frame[1] = reqId;
     frame.set(payload, 2);
+    // 8 s timeout so a wedged multi-fragment notify doesn't lock the
+    // single-flight queue forever — losing a poll is preferable to
+    // never recovering.
     const result = new Promise((resolve, reject) => {
       g_pending[reqId] = { resolve, reject };
+      setTimeout(() => {
+        if (g_pending[reqId]) {
+          delete g_pending[reqId];
+          delete g_chunks[reqId];
+          reject(new Error(`timeout: ${line}`));
+        }
+      }, 8000);
     });
     // Use writeValueWithResponse so we know the device ACKed before we
     // start waiting on the notify side. writeValue (without -Response)

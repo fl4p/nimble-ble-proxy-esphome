@@ -9,6 +9,8 @@
 #include "NimBLEService.h"
 #include "NimBLEUUID.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "scanner.h"
 #include "stats.h"
 
@@ -40,6 +42,8 @@ constexpr uint8_t FRAME_ERR = 0x02;
 constexpr uint8_t PROTO_VERSION = 1;
 
 std::atomic<bool> g_started{false};
+std::atomic<bool> g_activated{false};
+NimBLEServer *g_server = nullptr;
 NimBLECharacteristic *g_resp_chr = nullptr;
 
 // One response buffer reused across requests. Single connection
@@ -70,9 +74,27 @@ void send_response(uint8_t reqId, const char *payload, size_t len,
     frame[1] = reqId;
     std::memcpy(frame + 2, payload + off, take);
     g_resp_chr->setValue(frame, take + 2);
-    g_resp_chr->notify();
+
+    // Retry on transient failure: NimBLE drops notify() silently when
+    // the outbound MBuf pool is empty, which the client sees as a
+    // forever-hanging request (FIN bit never arrives). A short delay
+    // lets the host task recycle MBufs.
+    bool ok = false;
+    for (int attempt = 0; attempt < 6 && !ok; ++attempt) {
+      ok = g_resp_chr->notify();
+      if (!ok) vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (!ok) {
+      ESP_LOGW(TAG, "notify dropped at off=%u/%u; client will retry",
+               static_cast<unsigned>(off), static_cast<unsigned>(len));
+      break;  // give up; client hits its own timeout and retries
+    }
+
     off += take;
     if (last) break;
+    // No per-fragment delay: the retry-on-fail path above handles the
+    // (rare) MBuf-exhaustion case. vTaskDelay(1) here added 10 ms per
+    // fragment (HZ=100), making a 17-frag /log take 170 ms.
   }
 }
 
@@ -124,11 +146,18 @@ size_t dispatch(const char *method, char *path, char *out, size_t cap) {
     // reserve space and back-fill without shifting the log content.
     constexpr size_t PREFIX = 11;
     if (cap <= PREFIX) return 0;
+    // Cap per-request payload at ~1 KB (≤5 BLE fragments) regardless of
+    // the response-buffer size — keeps polling latency tight even when
+    // the client just connected and is draining a full ring. The
+    // remainder is delivered on subsequent /log polls (500 ms tick).
+    constexpr size_t LOG_MAX = 1024;
+    size_t log_cap = cap - PREFIX;
+    if (log_cap > LOG_MAX) log_cap = LOG_MAX;
     uint32_t since = 0;
     find_query_u32(query, "since", &since);
     uint32_t seq = 0;
     size_t n = api_server::stats::build_log_slice(
-        &since, out + PREFIX, cap - PREFIX, &seq);
+        &since, out + PREFIX, log_cap, &seq);
     uint32_t next_since = since + n;
     char hdr[16];
     int plen = std::snprintf(hdr, sizeof(hdr), "%010lu\n",
@@ -284,10 +313,10 @@ ServerCb g_server_cb;
 void start() {
   if (g_started.exchange(true)) return;
 
-  NimBLEServer *server = NimBLEDevice::createServer();
-  server->setCallbacks(&g_server_cb, /*deleteCallbacks=*/false);
+  g_server = NimBLEDevice::createServer();
+  g_server->setCallbacks(&g_server_cb, /*deleteCallbacks=*/false);
 
-  NimBLEService *svc = server->createService(NimBLEUUID(SVC_UUID));
+  NimBLEService *svc = g_server->createService(NimBLEUUID(SVC_UUID));
   if (svc == nullptr) {
     ESP_LOGE(TAG, "createService failed");
     return;
@@ -306,13 +335,27 @@ void start() {
   uint8_t info_val[4] = {PROTO_VERSION, 0, 242, 0};
   info_chr->setValue(info_val, sizeof(info_val));
 
+  ESP_LOGI(TAG, "ble_httpd: services created (svc=%s); awaiting activate",
+           SVC_UUID);
+}
+
+void activate() {
+  if (g_activated.exchange(true)) return;
+  if (g_server == nullptr) {
+    ESP_LOGE(TAG, "activate called before start");
+    return;
+  }
+
   // NimBLE refuses GATT mutations (ble_gatts_add_svcs → BLE_HS_EBUSY)
   // while any GAP procedure is active. ble_backend::start() leaves the
   // scanner running, so pause it across server->start(), then resume.
   // NimBLEService::start() is a deprecated no-op in NimBLE-CPP 2.5 —
-  // the real registration happens inside NimBLEServer::start().
+  // the real registration happens inside NimBLEServer::start(). This
+  // is the *single* server->start() per session: ble_clone has added
+  // its services to m_svcVec by now, so all of them register together
+  // and gattRegisterCallback assigns handles to both sets.
   ble_backend::scanner::pause();
-  bool ok = server->start();
+  bool ok = g_server->start();
   ble_backend::scanner::resume();
   if (!ok) {
     ESP_LOGE(TAG, "server start failed");
@@ -324,7 +367,7 @@ void start() {
   adv->enableScanResponse(true);
   adv->start();
 
-  ESP_LOGI(TAG, "ble_httpd up: svc=%s", SVC_UUID);
+  ESP_LOGI(TAG, "ble_httpd activated: svc=%s", SVC_UUID);
 }
 
 }  // namespace ble_httpd

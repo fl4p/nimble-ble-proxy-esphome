@@ -88,14 +88,29 @@ extern "C" void app_main() {
 #if CONFIG_NBP_CLONE
   // Clone supervisor runs alongside the ESPHome-style scanner/proxy.
   // load() reads target MAC from NVS; init() spawns the supervisor task
-  // that scans → connects → discovers → builds the local GATT mirror →
-  // begins advertising. register_endpoints() exposes /clone for runtime
-  // config changes (target MAC, enable/disable) — same pattern as
-  // /passkey under CONFIG_NBP_SMP.
+  // that scans → connects → discovers → builds the local GATT mirror,
+  // then calls ble_httpd::activate() to register all services in one
+  // shot. register_endpoints() exposes /clone for runtime config
+  // changes (target MAC, enable/disable) — same pattern as /passkey
+  // under CONFIG_NBP_SMP.
   ble_clone::config::load();
   ble_clone::init();
 #if CONFIG_NBP_WIFI
   ble_clone::register_endpoints(ota::handle());
+#endif
+#endif
+
+#if CONFIG_NBP_BLE_HTTPD
+  // Fallback: if clone is disabled, or if the supervisor never
+  // finishes building (upstream unreachable), still activate ble_httpd
+  // so the dashboard is reachable. activate() is idempotent — when
+  // clone's finalize_server runs successfully, that becomes a no-op.
+  // The cost is the dashboard going live without cloned services
+  // present until clone catches up; subsequent clone connects work
+  // fine because activate() registered both ble_httpd and any clone
+  // services already in m_svcVec at that moment.
+#if !CONFIG_NBP_CLONE
+  ble_httpd::activate();
 #endif
 #endif
 

@@ -7,6 +7,11 @@
 
 #include "NimBLEAdvertising.h"
 #include "NimBLECharacteristic.h"
+#include "host/ble_gatt.h"   // ble_gatts_find_svc, post-start sanity probe
+
+#if CONFIG_NBP_BLE_HTTPD
+#include "ble_httpd.h"
+#endif
 #include "NimBLEDescriptor.h"
 #include "NimBLEDevice.h"
 #include "NimBLERemoteCharacteristic.h"
@@ -271,11 +276,49 @@ bool finalize_server() {
   }
   if (g_built.load(std::memory_order_acquire)) return true;
 
+  // Single server->start() for the session, with both ble_httpd's
+  // dashboard service AND our cloned services in m_svcVec. Going
+  // through ble_httpd::activate() ensures we don't fight with an
+  // earlier start() in ble_httpd's own startup path (which would
+  // lock the GATT DB and cause cloned chars to be added but never
+  // registered).
+#if CONFIG_NBP_BLE_HTTPD
+  ble_httpd::activate();
+#else
   if (!g_server->start()) {
     ESP_LOGE(TAG, "NimBLEServer::start() failed");
     return false;
   }
+#endif
   g_built.store(true, std::memory_order_release);
+
+  // Direct probe of NimBLE host's view: for each unique service in our
+  // captured g_chars, ask the host whether it knows about it.
+  // ble_gatts_find_svc returns BLE_HS_ENOENT (5) when the host doesn't.
+  // Also probe the ble_httpd dashboard service if compiled in. Useful
+  // because gattRegisterCallback may have silently skipped a service.
+  {
+    NimBLEService *seen[16] = {};
+    size_t seen_n = 0;
+    for (size_t i = 0; i < g_char_count; ++i) {
+      auto *s = g_chars[i].local->getService();
+      bool dup = false;
+      for (size_t j = 0; j < seen_n; ++j) if (seen[j] == s) { dup = true; break; }
+      if (dup || s == nullptr) continue;
+      seen[seen_n++] = s;
+      uint16_t h = 0;
+      int rc = ble_gatts_find_svc(s->getUUID().getBase(), &h);
+      ESP_LOGI(TAG, "  host_svc(clone) %s handle=%u rc=%d",
+               s->getUUID().toString().c_str(), h, rc);
+    }
+#if CONFIG_NBP_BLE_HTTPD
+    NimBLEUUID dash("6e627062-7072-7879-0001-000000000000");
+    uint16_t h = 0;
+    int rc = ble_gatts_find_svc(dash.getBase(), &h);
+    ESP_LOGI(TAG, "  host_svc(dashboard) %s handle=%u rc=%d",
+             dash.toString().c_str(), h, rc);
+#endif
+  }
 
   g_adv = NimBLEDevice::getAdvertising();
   // NOTE: service UUIDs + scan-response enable are deferred to
@@ -458,9 +501,33 @@ void start_advertising(const char *base_name) {
   //      apps that filter by UUID) still find us via scan-response.
   g_adv->setName(name);
   g_adv->enableScanResponse(true);
+
+#if CONFIG_NBP_BLE_HTTPD
+  // Always advertise the dashboard service UUID so a Web Bluetooth
+  // picker filtering by it finds us regardless of which side last
+  // touched the advertising context. Added FIRST so it lands in the
+  // 31-byte main payload (one 128-bit UUID fits alongside flags +
+  // name); cloned service UUIDs spill into the scan response.
+  g_adv->addServiceUUID(
+      NimBLEUUID("6e627062-7072-7879-0001-000000000000"));
+#endif
+
+  // Dedup by NimBLEService pointer (every char of the same service
+  // returns the same pointer from getService()), so we only attempt
+  // each unique UUID once. Was hitting 'data length exceeded' ~40
+  // times before because the loop iterated every char.
+  NimBLEService *seen[16] = {};
+  size_t seen_n = 0;
   for (size_t i = 0; i < g_char_count; ++i) {
     auto *svc = g_chars[i].local->getService();
-    if (svc != nullptr) g_adv->addServiceUUID(svc->getUUID());
+    if (svc == nullptr) continue;
+    bool dup = false;
+    for (size_t j = 0; j < seen_n; ++j) {
+      if (seen[j] == svc) { dup = true; break; }
+    }
+    if (dup) continue;
+    if (seen_n < sizeof(seen) / sizeof(seen[0])) seen[seen_n++] = svc;
+    g_adv->addServiceUUID(svc->getUUID());
   }
 
   if (g_adv->start()) {

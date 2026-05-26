@@ -15,6 +15,7 @@ idf_component_register(
         "../../include"
     REQUIRES
         ble_backend
+        ble_httpd
         api_proto
         bt
         log
