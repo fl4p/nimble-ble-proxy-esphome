@@ -184,10 +184,11 @@ bool connect(uint64_t address, uint8_t address_type, ConnectCallback cb) {
   xSemaphoreGive(g_mutex);
   notify_free_change();
 
-  // Build NimBLEAddress from MSB-first uint64.
-  uint8_t le[6];
-  address::uint64_to_nimble_le(address, le);
-  NimBLEAddress nimble_addr(le, address_type);
+  // NimBLEAddress(uint64_t, type) takes MSB-first hex, so 0x20a111022345
+  // becomes MAC 20:A1:11:02:23:45 — which matches what aioesphomeapi sends.
+  // (Avoid the (uint8_t[6], type) constructor: it internally reverse_copies,
+  // so passing LE wire-order bytes ends up wrong on-air.)
+  NimBLEAddress nimble_addr(address, address_type);
 
   ESP_LOGI(TAG, "connect %012llx type=%u (async)",
            static_cast<unsigned long long>(address), address_type);
