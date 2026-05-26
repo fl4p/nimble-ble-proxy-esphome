@@ -177,7 +177,8 @@ bool connect(uint64_t address, uint8_t address_type, ConnectCallback cb) {
   if (s->client == nullptr) {
     s->client = NimBLEDevice::createClient();
     s->client->setClientCallbacks(&g_client_cb, /*deleteCallbacks=*/false);
-    s->client->setConnectTimeout(proxy::CONNECT_TIMEOUT_MS / 1000);
+    // NimBLE-Cpp setConnectTimeout takes milliseconds (default 30000).
+    s->client->setConnectTimeout(proxy::CONNECT_TIMEOUT_MS);
   }
   NimBLEClient *client = s->client;
   xSemaphoreGive(g_mutex);
