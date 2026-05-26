@@ -30,4 +30,25 @@ config NBP_WEB_CONSOLE
         path is the dashboard's largest BSS consumer; disable here
         if you don't need the web console (UART logging stays).
 
+config NBP_SMP
+    bool "Enable central-side SMP / static-passkey pairing support"
+    default y
+    select BT_NIMBLE_SECURITY_ENABLE if BT_NIMBLE_ENABLED
+    select BT_NIMBLE_SM_LEGACY        if BT_NIMBLE_ENABLED
+    select BT_NIMBLE_SM_SC            if BT_NIMBLE_ENABLED
+    select BT_NIMBLE_NVS_PERSIST      if BT_NIMBLE_ENABLED
+    help
+        Compile in NimBLE Security Manager + bond storage. Required for
+        peripherals that demand a paired+encrypted link with a static
+        passkey (Victron SmartShunt, some BMS variants). On first
+        connect the proxy auto-pairs using the passkey at /passkey
+        (default 123456, NVS-persisted, runtime-mutable). The bond is
+        stored in NVS so subsequent connects reuse it.
+
+        Disable for a smaller central-only build (~5 KB binary + a few
+        hundred bytes of NVS). With this off, peers that require
+        encryption will return an authentication-required error on
+        their characteristics; reads/writes/notifies on non-encrypted
+        chars still work normally.
+
 endmenu

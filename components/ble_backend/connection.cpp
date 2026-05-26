@@ -10,6 +10,7 @@
 #include "freertos/semphr.h"
 
 #include <array>
+#include <atomic>
 #include <cstring>
 
 namespace ble_backend::connection {
@@ -36,6 +37,15 @@ struct Slot {
 std::array<Slot, proxy::MAX_CONNECTIONS> g_slots;
 SemaphoreHandle_t g_mutex = nullptr;
 FreeChangeCallback g_free_cb = nullptr;
+
+#ifdef CONFIG_NBP_SMP
+// Static passkey used when a peer requests pairing with KEYBOARD_ONLY
+// I/O (we type, they display). Atomically updatable at runtime via
+// connection::set_passkey() — see /passkey HTTP handler. Default 123456
+// matches most Victron SmartShunts and many ESP32-based peripherals;
+// fallback "000000" is the other common Victron PIN.
+std::atomic<uint32_t> g_passkey{123456};
+#endif
 
 Slot *find_by_addr_locked(uint64_t address) {
   for (auto &s : g_slots) {
@@ -72,6 +82,26 @@ void notify_free_change() {
 // never call api_server::send_async while holding the mutex.
 class ClientCb : public NimBLEClientCallbacks {
  public:
+#ifdef CONFIG_NBP_SMP
+  // Peer requested a passkey (because it has DisplayOnly I/O cap and
+  // we declared KEYBOARD_ONLY). Inject the stored static passkey via
+  // NimBLEDevice — runs in NimBLE host task.
+  void onPassKeyEntry(NimBLEConnInfo &connInfo) override {
+    uint32_t pin = g_passkey.load(std::memory_order_relaxed);
+    ESP_LOGI(TAG, "onPassKeyEntry -> injecting passkey %06lu",
+             static_cast<unsigned long>(pin));
+    NimBLEDevice::injectPassKey(connInfo, pin);
+  }
+
+  void onAuthenticationComplete(NimBLEConnInfo &connInfo) override {
+    ESP_LOGI(TAG,
+             "onAuthenticationComplete encrypted=%d authenticated=%d "
+             "bonded=%d key_size=%u",
+             connInfo.isEncrypted(), connInfo.isAuthenticated(),
+             connInfo.isBonded(), connInfo.getSecKeySize());
+  }
+#endif  // CONFIG_NBP_SMP
+
   void onConnect(NimBLEClient *c) override {
     ConnectCallback cb_snapshot = nullptr;
     uint64_t addr_snapshot = 0;
@@ -157,6 +187,16 @@ ClientCb g_client_cb;
 void init() {
   g_mutex = xSemaphoreCreateMutex();
 }
+
+#ifdef CONFIG_NBP_SMP
+void set_passkey(uint32_t pin) {
+  g_passkey.store(pin, std::memory_order_relaxed);
+}
+
+uint32_t get_passkey() {
+  return g_passkey.load(std::memory_order_relaxed);
+}
+#endif
 
 void register_free_change_cb(FreeChangeCallback cb) {
   g_free_cb = cb;

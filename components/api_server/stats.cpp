@@ -173,6 +173,10 @@ esp_err_t log_get(httpd_req_t *req) {
 constexpr const char *NVS_NS = "stats";
 constexpr const char *NVS_LEVEL_KEY = "nimble_lvl";
 constexpr esp_log_level_t DEFAULT_NIMBLE_LEVEL = ESP_LOG_WARN;
+#ifdef CONFIG_NBP_SMP
+constexpr const char *NVS_PASSKEY_KEY = "ble_passkey";
+constexpr uint32_t DEFAULT_PASSKEY = 123456;
+#endif
 
 // Every NimBLE-Cpp log tag we've observed. Adding more is harmless;
 // esp_log_level_set just stores the mapping. Split into "scan" and
@@ -270,6 +274,65 @@ esp_err_t level_post(httpd_req_t *req) {
   return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
 
+#ifdef CONFIG_NBP_SMP
+// SMP passkey (NVS-persisted). Default 123456 — covers most Victron
+// SmartShunts. /passkey?val=000000 swaps at runtime.
+
+esp_err_t nvs_read_passkey(uint32_t *out) {
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
+  if (err != ESP_OK) return err;
+  err = nvs_get_u32(h, NVS_PASSKEY_KEY, out);
+  nvs_close(h);
+  return err;
+}
+
+esp_err_t nvs_write_passkey(uint32_t pin) {
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+  if (err != ESP_OK) return err;
+  err = nvs_set_u32(h, NVS_PASSKEY_KEY, pin);
+  if (err == ESP_OK) err = nvs_commit(h);
+  nvs_close(h);
+  return err;
+}
+
+esp_err_t passkey_get(httpd_req_t *req) {
+  char buf[32];
+  int n = std::snprintf(buf, sizeof(buf), "{\"passkey\":%06lu}",
+                        static_cast<unsigned long>(
+                            ble_backend::connection::get_passkey()));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, n);
+}
+
+esp_err_t passkey_post(httpd_req_t *req) {
+  char query[32];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
+  }
+  char val[8];
+  if (httpd_query_key_value(query, "val", val, sizeof(val)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing val=");
+  }
+  long parsed = std::strtol(val, nullptr, 10);
+  if (parsed < 0 || parsed > 999999) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                               "passkey must be 0..999999");
+  }
+  uint32_t pin = static_cast<uint32_t>(parsed);
+  esp_err_t err = nvs_write_passkey(pin);
+  if (err != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                               "nvs write failed");
+  }
+  ble_backend::connection::set_passkey(pin);
+  ESP_LOGI(TAG, "BLE passkey set to %06lu (persisted)",
+           static_cast<unsigned long>(pin));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+#endif  // CONFIG_NBP_SMP
 
 // Diagnostic capture mode. /trace?on=1 silences scanner noise and
 // pauses scanning so the 64 KiB log ring isn't flooded with "New
@@ -573,6 +636,17 @@ void apply_log_overrides_from_nvs() {
     ESP_LOGI(TAG, "NimBLE log level default: %d",
              static_cast<int>(DEFAULT_NIMBLE_LEVEL));
   }
+#ifdef CONFIG_NBP_SMP
+  uint32_t pin = DEFAULT_PASSKEY;
+  if (nvs_read_passkey(&pin) == ESP_OK) {
+    ESP_LOGI(TAG, "BLE passkey from NVS: %06lu",
+             static_cast<unsigned long>(pin));
+  } else {
+    ESP_LOGI(TAG, "BLE passkey default: %06lu",
+             static_cast<unsigned long>(pin));
+  }
+  ble_backend::connection::set_passkey(pin);
+#endif
 }
 
 #if CONFIG_NBP_WEB_CONSOLE
@@ -621,6 +695,16 @@ void register_endpoints(httpd_handle_t srv) {
                        .method = HTTP_POST,
                        .handler = &trace_post,
                        .user_ctx = nullptr};
+#ifdef CONFIG_NBP_SMP
+  httpd_uri_t passkey_g = {.uri = "/passkey",
+                           .method = HTTP_GET,
+                           .handler = &passkey_get,
+                           .user_ctx = nullptr};
+  httpd_uri_t passkey_p = {.uri = "/passkey",
+                           .method = HTTP_POST,
+                           .handler = &passkey_post,
+                           .user_ctx = nullptr};
+#endif
   httpd_register_uri_handler(srv, &root);
   httpd_register_uri_handler(srv, &stats);
 #if CONFIG_NBP_WEB_CONSOLE
@@ -630,6 +714,10 @@ void register_endpoints(httpd_handle_t srv) {
   httpd_register_uri_handler(srv, &level_p);
   httpd_register_uri_handler(srv, &reboot);
   httpd_register_uri_handler(srv, &trace);
+#ifdef CONFIG_NBP_SMP
+  httpd_register_uri_handler(srv, &passkey_g);
+  httpd_register_uri_handler(srv, &passkey_p);
+#endif
 #if CONFIG_NBP_DEVICES_PANEL
   httpd_uri_t devices = {.uri = "/devices",
                          .method = HTTP_GET,

@@ -64,6 +64,18 @@ void start() {
   // aren't capped at 20 B. Peers may still negotiate down.
   NimBLEDevice::setMTU(247);
 
+#ifdef CONFIG_NBP_SMP
+  // SMP defaults for peripherals that require pairing (Victron
+  // SmartShunt, some BMS variants). Bond, MITM auth, Secure
+  // Connections preferred. IO_CAP=KEYBOARD_ONLY tells the peer we'll
+  // type the passkey it displays. The passkey itself is injected by
+  // ClientCb::onPassKeyEntry. CONFIG_BT_NIMBLE_NVS_PERSIST=y stores
+  // the resulting bond in NVS so subsequent connects skip pairing.
+  NimBLEDevice::setSecurityAuth(/*bond=*/true,
+                                /*mitm=*/true,
+                                /*sc=*/true);
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_KEYBOARD_ONLY);
+#endif  // CONFIG_NBP_SMP
 
   scanner::init();
   connection::init();

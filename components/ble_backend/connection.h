@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "sdkconfig.h"
+
 #include <cstdint>
 
 namespace ble_backend::connection {
@@ -50,5 +52,13 @@ void disconnect_all();
 // NimBLEClient* for the given address, or nullptr if not connected.
 // Type-erased to keep the header NimBLE-free.
 void *client_for(uint64_t address);
+
+#ifdef CONFIG_NBP_SMP
+// SMP passkey used when a peer requests KEYBOARD_ONLY pairing.
+// Runtime-mutable via /passkey?val=NNNNNN. Default 123456 covers most
+// Victron SmartShunts and many ESP32-based peripherals.
+void set_passkey(uint32_t pin);
+uint32_t get_passkey();
+#endif
 
 }  // namespace ble_backend::connection
