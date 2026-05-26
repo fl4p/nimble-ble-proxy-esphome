@@ -38,16 +38,21 @@ h2{margin-top:1.5em}
   word-break:break-all;margin:0;border:1px solid #222}
 footer{margin-top:1em;color:#888;font-size:.85em}
 code{color:#bbb}
-#controls{margin:1em 0;display:flex;flex-wrap:wrap;gap:.6em 1em;align-items:center}
-#controls label{color:#aaa;display:inline-flex;align-items:center;gap:.3em}
-#controls select,#controls button{
+#controls,#tunables{margin:1em 0;display:flex;flex-wrap:wrap;
+  gap:.6em 1em;align-items:center}
+#controls label,#tunables label{color:#aaa;
+  display:inline-flex;align-items:center;gap:.3em}
+#controls select,#controls button,
+#tunables select,#tunables button,#tunables input[type=checkbox]{
   background:#1a1a1a;color:#eee;border:1px solid #333;
   border-radius:4px;padding:.3em .6em;font:inherit;cursor:pointer}
-#controls button:hover{background:#2a2a2a}
-#controls button.danger{border-color:#7f1d1d;color:#fca5a5}
-#controls button.danger:hover{background:#3b0a0a}
+#tunables input[type=checkbox]{padding:0;width:1em;height:1em;accent-color:#3b82f6}
+#controls button:hover,#tunables button:hover{background:#2a2a2a}
+#controls button.danger,#tunables button.danger{border-color:#7f1d1d;color:#fca5a5}
+#controls button.danger:hover,#tunables button.danger:hover{background:#3b0a0a}
 #controls button.primary{border-color:#3b82f6;color:#bfdbfe}
 #controls button.primary:hover{background:#1e3a8a}
+#tunables select:disabled{opacity:.4;cursor:not-allowed}
 #status{color:#888;margin-left:auto}
 #status.ok{color:#4ade80}
 #status.err{color:#f87171}
@@ -63,7 +68,7 @@ table#devices tr.stale{opacity:.4}
 #unsupported{background:#3b0a0a;color:#fca5a5;padding:1em;border-radius:6px;
   border:1px solid #7f1d1d;margin-bottom:1em}
 @media(max-width:640px){body{padding:.5em;font-size:13px}
-  h1{font-size:1em}#controls{gap:.5em}}
+  h1{font-size:1em}#controls,#tunables{gap:.5em}}
 </style>
 </head>
 <body>
@@ -227,11 +232,20 @@ async function bleJson(line) {
 //
 // HTTP mode: page is served by the on-device httpd (WiFi build), so we
 // hit the same URIs with fetch(). BLE mode: page loaded from disk or a
-// static host; talk to ble_httpd via GATT. URL flag `?ble` forces BLE
-// in case auto-detection picks wrong (e.g. dashboard hosted off-device).
-const TRANSPORT = (location.protocol === 'file:' ||
-                   /\bble\b/.test(location.search))
-                    ? 'ble' : 'http';
+// static host; talk to ble_httpd via GATT. We probe HEAD /level at boot
+// instead of trusting location.protocol — the dashboard might be served
+// by an unrelated local httpd (e.g. dev preview) where /level 404s and
+// we should fall back to BLE. URL flag `?ble` forces BLE explicitly.
+let TRANSPORT = 'ble';
+
+async function probeHttpTransport() {
+  if (location.protocol === 'file:') return false;
+  if (/\bble\b/.test(location.search)) return false;
+  try {
+    const r = await fetch('/level', { cache: 'no-store' });
+    return r.ok;
+  } catch (e) { return false; }
+}
 
 function parseLine(line) {
   const sp = line.indexOf(' ');
@@ -554,19 +568,22 @@ function wireControls() {
 initCharts();
 wireControls();
 
-if (TRANSPORT === 'http') {
-  // Served by the on-device httpd — no Connect step. Hide the BLE-only
-  // chrome and start polling immediately.
-  document.getElementById('controls').classList.add('hidden');
-  document.getElementById('app').classList.remove('hidden');
-  if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
-  if (u_cpu)   u_cpu  .setSize({ width: chartW(chart2El), height: 200 });
-  loadInitialValues();
-  startPolling();
-} else if (!navigator.bluetooth) {
-  document.getElementById('unsupported').classList.remove('hidden');
-  document.getElementById('connect').disabled = true;
-}
+(async () => {
+  if (await probeHttpTransport()) {
+    TRANSPORT = 'http';
+    // Served by the on-device httpd — no Connect step. Hide the BLE-only
+    // chrome and start polling immediately.
+    document.getElementById('controls').classList.add('hidden');
+    document.getElementById('app').classList.remove('hidden');
+    if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
+    if (u_cpu)   u_cpu  .setSize({ width: chartW(chart2El), height: 200 });
+    loadInitialValues();
+    startPolling();
+  } else if (!navigator.bluetooth) {
+    document.getElementById('unsupported').classList.remove('hidden');
+    document.getElementById('connect').disabled = true;
+  }
+})();
 </script>
 </body>
 </html>
