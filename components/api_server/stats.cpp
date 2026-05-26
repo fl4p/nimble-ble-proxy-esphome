@@ -185,7 +185,7 @@ esp_err_t root_get(httpd_req_t *req) {
       "http://&lt;host&gt;/update</code></footer>"
       "<script src=\"https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/"
       "uPlot.iife.min.js\"></script>"
-      "<script src=\"https://cdn.jsdelivr.net/npm/ansi_up@6/ansi_up.js\">"
+      "<script src=\"https://cdn.jsdelivr.net/npm/ansi_up@5/ansi_up.js\">"
       "</script>"
       "<script>"
       "const N=120,t=[],r=[],w=[],n=[],a=[],c=[],h=[];"
