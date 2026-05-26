@@ -201,7 +201,16 @@ function bleFetch(line) {
 }
 
 async function bleJson(line) {
-  const txt = await bleFetch(line);
+  let txt = await bleFetch(line);
+  // build_devices_json on the device side uses snprintf which writes a
+  // NUL terminator when the response fills the buffer; the wrapping
+  // dispatch returns p-buf with that NUL included. Strip it and any
+  // trailing partial JSON record so JSON.parse doesn't choke.
+  txt = txt.replace(/\0+$/, '');
+  if (txt.endsWith(',') || (!txt.endsWith('}') && !txt.endsWith(']'))) {
+    const lastClose = Math.max(txt.lastIndexOf('}'), txt.lastIndexOf(']'));
+    if (lastClose > 0) txt = txt.slice(0, lastClose + 1) + ']}';
+  }
   return JSON.parse(txt);
 }
 
@@ -229,6 +238,12 @@ async function connect() {
   setStatus(device.name || 'connected', 'ok');
   document.getElementById('connect').textContent = 'Disconnect';
   document.getElementById('app').classList.remove('hidden');
+
+  // #app was display:none at initCharts() time, so chartW() returned a
+  // negative number and uPlot rendered the canvases at width=0. Now
+  // that the wrapper is visible, give the charts the real width.
+  if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
+  if (u_cpu)   u_cpu  .setSize({ width: chartW(chart2El), height: 200 });
 
   await loadInitialValues();
   startPolling();
@@ -327,6 +342,11 @@ async function tickStats() {
       shiftPush(tcA, ma(tc, 10));
       u_rates.setData([t, r, w, n, a, c, h]);
       u_cpu.setData([t, c0, c1, tcA]);
+      // uPlot's legend defaults to showing the value under the cursor;
+      // with no cursor it renders '--'. Pin it to the latest sample so
+      // glancing at the legend always shows current values.
+      u_rates.setLegend({ idx: N - 1 });
+      u_cpu  .setLegend({ idx: N - 1 });
     }
     g_prev = s; g_prevT = now;
   } catch (e) { /* ignore poll errors; reconnect path handles drops */ }
