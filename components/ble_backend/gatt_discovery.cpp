@@ -13,6 +13,7 @@
 #include "pb_encode.h"
 
 #include <cstring>
+#include <memory>
 
 namespace ble_backend::gatt_discovery {
 
@@ -63,7 +64,13 @@ void pack_uuid(const NimBLEUUID &uuid, uint32_t *short_out,
 }
 
 // Context owned for the duration of one discovery — passed to send_async
-// for the services + done encodes. We allocate on the stack of run().
+// for the services + done encodes.
+//
+// HEAP-allocated: proxyapi_BluetoothGATTGetServicesResponse is ~25 KiB
+// (worst-case static nanopb arrays for 8 services × 12 chars × 6 descs).
+// api_client tasks have only 8 KiB stack, so this MUST NOT live on the
+// stack of run(). send_async invokes the encode callback synchronously
+// before returning, so unique_ptr scoped to run() is sufficient.
 struct ServicesEncodeCtx {
   proxyapi_BluetoothGATTGetServicesResponse msg;
 };
@@ -155,23 +162,28 @@ Status run(uint64_t address) {
     return Status::EncodeFailed;
   }
 
-  ServicesEncodeCtx ctx;
-  ctx.msg = proxyapi_BluetoothGATTGetServicesResponse_init_zero;
-  ctx.msg.address = address;
-  ctx.msg.services_count = 0;
+  auto ctx = std::make_unique<ServicesEncodeCtx>();
+  if (ctx == nullptr) {
+    ESP_LOGW(TAG, "OOM allocating services encode ctx");
+    emit_error(address, /*err=*/-3);
+    return Status::EncodeFailed;
+  }
+  ctx->msg = proxyapi_BluetoothGATTGetServicesResponse_init_zero;
+  ctx->msg.address = address;
+  ctx->msg.services_count = 0;
 
   const auto &services = client->getServices(/*refresh=*/false);
 
   // Hard cap by the static array bound; over-budget peripherals get
   // silently truncated for v1 (logged so we notice).
   constexpr size_t kMaxServices =
-      sizeof(ctx.msg.services) / sizeof(ctx.msg.services[0]);
+      sizeof(ctx->msg.services) / sizeof(ctx->msg.services[0]);
   constexpr size_t kMaxChars =
-      sizeof(ctx.msg.services[0].characteristics) /
-      sizeof(ctx.msg.services[0].characteristics[0]);
+      sizeof(ctx->msg.services[0].characteristics) /
+      sizeof(ctx->msg.services[0].characteristics[0]);
   constexpr size_t kMaxDescs =
-      sizeof(ctx.msg.services[0].characteristics[0].descriptors) /
-      sizeof(ctx.msg.services[0].characteristics[0].descriptors[0]);
+      sizeof(ctx->msg.services[0].characteristics[0].descriptors) /
+      sizeof(ctx->msg.services[0].characteristics[0].descriptors[0]);
 
   size_t svc_idx = 0;
   for (const auto *svc : services) {
@@ -181,7 +193,7 @@ Status run(uint64_t address) {
                static_cast<unsigned long long>(address));
       break;
     }
-    auto &out_svc = ctx.msg.services[svc_idx];
+    auto &out_svc = ctx->msg.services[svc_idx];
     out_svc = proxyapi_BluetoothGATTService_init_zero;
     out_svc.handle = svc->getHandle();
     pack_uuid(svc->getUUID(), &out_svc.short_uuid, out_svc.uuid,
@@ -217,10 +229,10 @@ Status run(uint64_t address) {
     out_svc.characteristics_count = ch_idx;
     ++svc_idx;
   }
-  ctx.msg.services_count = svc_idx;
+  ctx->msg.services_count = svc_idx;
 
   if (!publish::send_async(proxyapi::MSG_BLUETOOTH_GATT_GET_SERVICES_RESPONSE,
-                           &encode_services, &ctx)) {
+                           &encode_services, ctx.get())) {
     ESP_LOGW(TAG, "send services failed");
     return Status::SendFailed;
   }
