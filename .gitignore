@@ -4,9 +4,10 @@ sdkconfig.old
 managed_components/
 dependencies.lock
 
-# clangd / IDE caches.
+# clangd / IDE / language caches.
 .cache/
 .idea/
+__pycache__/
 
 # Real wifi credentials never committed — copy from wifi_creds.h.example.
 include/wifi_creds.h
