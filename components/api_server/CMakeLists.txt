@@ -11,6 +11,7 @@ idf_component_register(
     REQUIRES
         api_proto
         ble_backend
+        esp_driver_tsens
         esp_event
         esp_http_server
         esp_netif

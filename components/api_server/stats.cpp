@@ -2,8 +2,10 @@
 
 #include "ble_backend.h"
 #include "connection.h"
+#include "driver/temperature_sensor.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -377,15 +379,103 @@ esp_err_t reboot_post(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// ---- CPU + chip temperature ----
+//
+// CPU% is computed from per-core IDLE-task run-time counters between
+// /stats.json polls. httpd serializes requests, so the static "last
+// sample" state is safe. The result is the busy fraction since the
+// previous call — clients polling at 1 Hz get a 1 s window; multiple
+// clients see slightly jittered windows but each measurement is still
+// internally consistent.
+//
+// Temperature uses the ESP32-S3 internal silicon-temperature sensor
+// (±1-2 °C absolute, fine for trend visibility).
+
+temperature_sensor_handle_t g_temp_handle = nullptr;
+bool g_temp_init_done = false;
+
+void ensure_temp_sensor() {
+  if (g_temp_init_done) return;
+  g_temp_init_done = true;
+  temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+  if (temperature_sensor_install(&cfg, &g_temp_handle) != ESP_OK ||
+      temperature_sensor_enable(g_temp_handle) != ESP_OK) {
+    ESP_LOGW(TAG, "temp sensor unavailable");
+    g_temp_handle = nullptr;
+  }
+}
+
+float read_temp_c() {
+  ensure_temp_sensor();
+  if (g_temp_handle == nullptr) return 0.0f;
+  float c = 0.0f;
+  if (temperature_sensor_get_celsius(g_temp_handle, &c) != ESP_OK) return 0.0f;
+  return c;
+}
+
+void sample_cpu_pct(int *cpu0, int *cpu1) {
+  // Persisted across calls; safe because httpd serializes requests.
+  static uint64_t prev_us = 0;       // wall-clock anchor
+  static uint32_t prev_idle[2] = {0, 0};
+
+  TaskStatus_t tasks[40];
+  uint32_t total_unused = 0;
+  UBaseType_t n = uxTaskGetSystemState(tasks, 40, &total_unused);
+  if (n == 0) {
+    *cpu0 = *cpu1 = 0;
+    return;
+  }
+
+  // Identify idle tasks by name ("IDLE0" / "IDLE1" on the SMP port).
+  // The handle returned by xTaskGetIdleTaskHandleForCore isn't always
+  // matchable against TaskStatus_t.xHandle on every IDF revision; name
+  // matching is more robust.
+  uint32_t idle_now[2] = {0, 0};
+  for (UBaseType_t i = 0; i < n; ++i) {
+    const char *nm = tasks[i].pcTaskName ? tasks[i].pcTaskName : "";
+    if (nm[0] == 'I' && nm[1] == 'D' && nm[2] == 'L' && nm[3] == 'E') {
+      if (nm[4] == '0' || nm[4] == '\0') idle_now[0] = tasks[i].ulRunTimeCounter;
+      else if (nm[4] == '1') idle_now[1] = tasks[i].ulRunTimeCounter;
+    }
+  }
+
+  // Use esp_timer as the wall-clock denominator (1 µs resolution). The
+  // runtime-stats counter wraps every ~71 min on its own u32 base, but
+  // taking deltas via subtraction makes wrap a non-issue. esp_timer is
+  // 64-bit so no wrap during a session.
+  uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+  uint64_t elapsed_us = (prev_us == 0) ? 0 : (now_us - prev_us);
+
+  int out[2] = {0, 0};
+  if (elapsed_us > 0) {
+    for (int k = 0; k < 2; ++k) {
+      uint32_t idle_delta = idle_now[k] - prev_idle[k];  // wraps fine
+      uint64_t idle_us = idle_delta;
+      if (idle_us > elapsed_us) idle_us = elapsed_us;
+      uint64_t busy_us = elapsed_us - idle_us;
+      out[k] = static_cast<int>((100ULL * busy_us) / elapsed_us);
+    }
+  }
+  prev_us = now_us;
+  prev_idle[0] = idle_now[0];
+  prev_idle[1] = idle_now[1];
+  *cpu0 = out[0];
+  *cpu1 = out[1];
+}
+
 esp_err_t stats_get(httpd_req_t *req) {
-  char buf[192];
+  char buf[256];
   unsigned in_use = proxy::MAX_CONNECTIONS -
                     ble_backend::connection::free_slots();
+  int cpu0 = 0, cpu1 = 0;
+  sample_cpu_pct(&cpu0, &cpu1);
+  float temp_c = read_temp_c();
   int n = std::snprintf(
       buf, sizeof(buf),
       "{\"reads\":%lu,\"writes\":%lu,\"notifies\":%lu,\"adverts\":%lu,"
       "\"connections\":%u,\"heap\":%lu,"
-      "\"notify_rx\":%lu,\"last_notify_handle\":%u}",
+      "\"notify_rx\":%lu,\"last_notify_handle\":%u,"
+      "\"cpu0\":%d,\"cpu1\":%d,\"temp_c\":%.1f}",
       static_cast<unsigned long>(g_reads.load(std::memory_order_relaxed)),
       static_cast<unsigned long>(g_writes.load(std::memory_order_relaxed)),
       static_cast<unsigned long>(g_notifies.load(std::memory_order_relaxed)),
@@ -393,7 +483,8 @@ esp_err_t stats_get(httpd_req_t *req) {
       in_use,
       static_cast<unsigned long>(esp_get_free_heap_size()),
       static_cast<unsigned long>(ble_backend::notify_rx_total()),
-      ble_backend::last_notify_handle());
+      ble_backend::last_notify_handle(),
+      cpu0, cpu1, static_cast<double>(temp_c));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
 }
@@ -461,8 +552,9 @@ esp_err_t root_get(httpd_req_t *req) {
       "body{font:14px system-ui;margin:1em;color:#eee;background:#111}"
       "h1,h2{font-size:1.1em;margin:0 0 1em}"
       "h2{margin-top:1.5em}"
-      "#chart{background:#1a1a1a;padding:.5em;border-radius:6px;"
+      "#chart,#chart2{background:#1a1a1a;padding:.5em;border-radius:6px;"
       "display:inline-block}"
+      "#chart2{margin-top:.5em}"
 #if CONFIG_NBP_WEB_CONSOLE
       "#console{background:#0a0a0a;color:#d4d4d4;"
       "font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;"
@@ -492,6 +584,7 @@ esp_err_t root_get(httpd_req_t *req) {
       "</style></head><body>"
       "<h1>nimble-ble-proxy &mdash; BLE activity/s</h1>"
       "<div id=chart></div>"
+      "<br><div id=chart2></div>"
 #if CONFIG_NBP_DEVICES_PANEL
       "<h2>devices seen</h2>"
       "<table id=devices><thead><tr>"
@@ -524,9 +617,11 @@ esp_err_t root_get(httpd_req_t *req) {
       "</script>"
 #endif
       "<script>"
-      "const N=120,t=[],r=[],w=[],n=[],a=[],c=[],h=[];"
+      "const N=120,t=[],r=[],w=[],n=[],a=[],c=[],h=[],"
+      "c0=[],c1=[],tc=[];"
       "for(let i=0;i<N;i++){t.push(i-N+1);r.push(null);w.push(null);"
-      "n.push(null);a.push(null);c.push(null);h.push(null);}"
+      "n.push(null);a.push(null);c.push(null);h.push(null);"
+      "c0.push(null);c1.push(null);tc.push(null);}"
       "const fmt1=(u,v)=>v==null?'--':v.toFixed(1);"
       "const u=new uPlot({width:900,height:320,"
       "scales:{x:{time:false},y:{},kb:{}},"
@@ -542,6 +637,22 @@ esp_err_t root_get(httpd_req_t *req) {
       "{label:'conns',stroke:'#a78bfa',width:2},"
       "{label:'heap',scale:'kb',stroke:'#9ca3af',width:2,dash:[4,4]}]},"
       "[t,r,w,n,a,c,h],document.getElementById('chart'));"
+      // Second chart: per-core CPU% (left axis 0-100) and chip temp °C
+      // (right axis, separate 'temp' scale). Separate from the rate
+      // chart because the units (%, °C) don't share a sensible axis.
+      "const u2=new uPlot({width:900,height:200,"
+      "scales:{x:{time:false},y:{range:[0,100]},temp:{}},"
+      "axes:[{stroke:'#aaa',grid:{stroke:'#333'}},"
+      "{stroke:'#aaa',grid:{stroke:'#333'},"
+      "values:(u,vs)=>vs.map(v=>v+'%')},"
+      "{side:1,scale:'temp',stroke:'#22d3ee',grid:{show:false},"
+      "values:(u,vs)=>vs.map(v=>v.toFixed(0)+'\\u00B0C')}],"
+      "series:[{label:'t (s ago)'},"
+      "{label:'cpu0%',stroke:'#ef4444',width:2},"
+      "{label:'cpu1%',stroke:'#f97316',width:2},"
+      "{label:'temp\\u00B0C',scale:'temp',stroke:'#22d3ee',width:2,"
+      "value:fmt1}]},"
+      "[t,c0,c1,tc],document.getElementById('chart2'));"
       "let prev=null,prevT=null;"
       "const d=(cur,p,dt)=>{const v=(cur-p)/dt;return v<0?null:v;};"
       "async function tick(){"
@@ -549,13 +660,16 @@ esp_err_t root_get(httpd_req_t *req) {
       "const s=await(await fetch('/stats.json')).json();"
       "if(prev){const dt=now-prevT;"
       "r.shift();w.shift();n.shift();a.shift();c.shift();h.shift();"
+      "c0.shift();c1.shift();tc.shift();"
       "r.push(d(s.reads,prev.reads,dt));"
       "w.push(d(s.writes,prev.writes,dt));"
       "n.push(d(s.notifies,prev.notifies,dt));"
       "a.push(d(s.adverts,prev.adverts,dt));"
       "c.push(s.connections);"
       "h.push(Math.round(s.heap/1024));"
-      "u.setData([t,r,w,n,a,c,h]);}"
+      "c0.push(s.cpu0);c1.push(s.cpu1);tc.push(s.temp_c);"
+      "u.setData([t,r,w,n,a,c,h]);"
+      "u2.setData([t,c0,c1,tc]);}"
       "prev=s;prevT=now;}catch(e){}}"
       "setInterval(tick,1000);tick();"
 #if CONFIG_NBP_WEB_CONSOLE
