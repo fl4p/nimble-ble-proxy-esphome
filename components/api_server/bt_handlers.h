@@ -9,11 +9,11 @@
 
 namespace api_server::bt_handlers {
 
+// Per-request context. Currently only carries the client fd; sync
+// responses now go through api_server::send_async (which broadcasts
+// to all clients and locks the TX mutex itself).
 struct Context {
   int client_fd;
-  uint8_t *response_buf;
-  size_t response_cap;
-  bool (*send_response)(int fd, uint16_t msg_type, size_t payload_len);
 };
 
 // Returns true if the message was recognized.

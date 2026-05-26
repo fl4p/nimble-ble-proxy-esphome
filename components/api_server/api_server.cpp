@@ -113,27 +113,37 @@ bool dispatch_one(int fd, uint8_t *rx_payload, size_t rx_cap) {
     return false;
   }
 
-  xSemaphoreTake(g_tx_mutex, portMAX_DELAY);
-  uint8_t *resp_payload = &g_tx_buf[frame_codec::MAX_HEADER_LEN];
-  size_t resp_cap = sizeof(g_tx_buf) - frame_codec::MAX_HEADER_LEN;
-
-  handshake::Result hr = handshake::handle(msg_type, rx_payload, payload_len,
-                                           resp_payload, resp_cap);
+  // Handshake holds the TX mutex (encodes directly into g_tx_buf and
+  // ships it before releasing). BT handlers do NOT — they use
+  // api_server::send_async for any wire output, which acquires the mutex
+  // itself. Holding the mutex through bt_handlers::handle would deadlock
+  // if a handler triggered an inline ble_backend callback that then tried
+  // to send_async.
   bool keep_open = true;
-  if (hr.handled) {
-    if (hr.response_type != 0) {
-      if (!send_locked_to(fd, hr.response_type, hr.payload_len)) keep_open = false;
+  bool is_handshake = false;
+  {
+    xSemaphoreTake(g_tx_mutex, portMAX_DELAY);
+    uint8_t *resp_payload = &g_tx_buf[frame_codec::MAX_HEADER_LEN];
+    size_t resp_cap = sizeof(g_tx_buf) - frame_codec::MAX_HEADER_LEN;
+    handshake::Result hr = handshake::handle(msg_type, rx_payload, payload_len,
+                                             resp_payload, resp_cap);
+    if (hr.handled) {
+      is_handshake = true;
+      if (hr.response_type != 0) {
+        if (!send_locked_to(fd, hr.response_type, hr.payload_len)) keep_open = false;
+      }
+      if (hr.close_after) keep_open = false;
     }
-    if (hr.close_after) keep_open = false;
-  } else {
-    bt_handlers::Context bctx{fd, resp_payload, resp_cap, &send_response_thunk};
-    if (!bt_handlers::handle(msg_type, rx_payload, payload_len, bctx)) {
-      ESP_LOGD(TAG, "fd=%d unhandled msg_type=%u (len=%zu)", fd, msg_type,
-               payload_len);
-    }
+    xSemaphoreGive(g_tx_mutex);
   }
-  xSemaphoreGive(g_tx_mutex);
-  return keep_open;
+  if (is_handshake) return keep_open;
+
+  bt_handlers::Context bctx{fd};
+  if (!bt_handlers::handle(msg_type, rx_payload, payload_len, bctx)) {
+    ESP_LOGD(TAG, "fd=%d unhandled msg_type=%u (len=%zu)", fd, msg_type,
+             payload_len);
+  }
+  return true;
 }
 
 // Per-connection task. One per active client; exits on disconnect.

@@ -61,17 +61,58 @@ void notify_free_change() {
   if (g_free_cb) g_free_cb();
 }
 
-// NimBLEClientCallbacks: we register one instance per slot via the
-// NimBLEDevice::setClientCallbacks pattern (the callback object is
-// shared; we map back to the slot via NimBLEClient*).
+// NimBLEClientCallbacks: shared callback object; we map back to the
+// slot via NimBLEClient*. Connect is now async (asyncConnect=true in
+// connect()), so onConnect / onConnectFail drive the success/failure
+// path instead of the connect() return value.
 //
-// Note: NimBLE invokes these from the host task. We touch slot state
-// under the mutex; we DO NOT call api_server::send_async while holding
-// the mutex (snapshot the callback + address first, then release).
+// All callbacks fire from the NimBLE host task. We touch slot state
+// under the mutex and snapshot the cb/address before releasing so we
+// never call api_server::send_async while holding the mutex.
 class ClientCb : public NimBLEClientCallbacks {
  public:
   void onConnect(NimBLEClient *c) override {
-    ESP_LOGI(TAG, "onConnect %s", c->getPeerAddress().toString().c_str());
+    ConnectCallback cb_snapshot = nullptr;
+    uint64_t addr_snapshot = 0;
+    uint16_t mtu = c->getMTU();
+    xSemaphoreTake(g_mutex, portMAX_DELAY);
+    Slot *s = find_by_client_locked(c);
+    if (s != nullptr && s->state == State::Connecting) {
+      s->state = State::Connected;
+      cb_snapshot = s->cb;
+      addr_snapshot = s->address;
+    }
+    xSemaphoreGive(g_mutex);
+    ESP_LOGI(TAG, "onConnect %012llx mtu=%u",
+             static_cast<unsigned long long>(addr_snapshot), mtu);
+    if (cb_snapshot) {
+      ConnectionResult r{true, mtu, 0};
+      cb_snapshot(addr_snapshot, r);
+    }
+    notify_free_change();
+  }
+
+  void onConnectFail(NimBLEClient *c, int reason) override {
+    ConnectCallback cb_snapshot = nullptr;
+    uint64_t addr_snapshot = 0;
+    xSemaphoreTake(g_mutex, portMAX_DELAY);
+    Slot *s = find_by_client_locked(c);
+    if (s != nullptr) {
+      cb_snapshot = s->cb;
+      addr_snapshot = s->address;
+      s->state = State::Free;
+      s->address = 0;
+      s->address_type = 0;
+      s->cb = nullptr;
+    }
+    xSemaphoreGive(g_mutex);
+    ESP_LOGW(TAG, "onConnectFail %012llx reason=%d",
+             static_cast<unsigned long long>(addr_snapshot), reason);
+    if (cb_snapshot) {
+      ConnectionResult r{false, 0, reason};
+      cb_snapshot(addr_snapshot, r);
+    }
+    notify_free_change();
   }
 
   void onDisconnect(NimBLEClient *c, int reason) override {
@@ -147,34 +188,29 @@ bool connect(uint64_t address, uint8_t address_type, ConnectCallback cb) {
   address::uint64_to_nimble_le(address, le);
   NimBLEAddress nimble_addr(le, address_type);
 
-  ESP_LOGI(TAG, "connect %012llx type=%u",
+  ESP_LOGI(TAG, "connect %012llx type=%u (async)",
            static_cast<unsigned long long>(address), address_type);
 
-  // Synchronous connect — blocks the caller (the api_server task) for
-  // up to CONNECT_TIMEOUT_MS. Acceptable for v1; revisit if HA's ping
-  // timeouts during long connects become a problem.
-  bool ok = client->connect(nimble_addr, /*deleteAttibutes=*/true,
-                            /*asyncConnect=*/false, /*exchangeMTU=*/true);
-  uint16_t mtu = ok ? client->getMTU() : 0;
-
-  ConnectionResult r;
-  if (ok) {
+  // Async connect — returns immediately. ClientCb::onConnect /
+  // onConnectFail will fire later from the NimBLE host task and route
+  // the result through the registered ConnectCallback.
+  bool issued = client->connect(nimble_addr, /*deleteAttibutes=*/true,
+                                /*asyncConnect=*/true, /*exchangeMTU=*/true);
+  if (!issued) {
+    // Couldn't even issue the connect (controller busy, bad addr, etc).
     xSemaphoreTake(g_mutex, portMAX_DELAY);
-    s->state = State::Connected;
-    xSemaphoreGive(g_mutex);
-    r = {true, mtu, 0};
-  } else {
-    xSemaphoreTake(g_mutex, portMAX_DELAY);
+    ConnectCallback cb_snapshot = s->cb;
     s->state = State::Free;
     s->address = 0;
     s->address_type = 0;
     s->cb = nullptr;
     xSemaphoreGive(g_mutex);
     notify_free_change();
-    r = {false, 0, /*errno-ish*/ -1};
+    if (cb_snapshot) {
+      ConnectionResult r{false, 0, /*errno-ish=*/-1};
+      cb_snapshot(address, r);
+    }
   }
-
-  if (cb) cb(address, r);
   return true;
 }
 

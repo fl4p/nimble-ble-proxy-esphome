@@ -179,16 +179,14 @@ bool handle_unsubscribe_adv() {
   return true;
 }
 
-bool handle_subscribe_free(const Context &ctx) {
+bool handle_subscribe_free(const Context & /*ctx*/) {
   ++g_sub_free_count;
   proxyapi_BluetoothConnectionsFreeResponse msg;
   build_free_msg(&msg);
-  size_t n = encode_one<proxyapi_BluetoothConnectionsFreeResponse>(
-      &msg, ctx.response_buf, ctx.response_cap,
-      proxyapi_BluetoothConnectionsFreeResponse_fields);
-  if (n == 0) return true;
-  ctx.send_response(ctx.client_fd,
-                    proxyapi::MSG_BLUETOOTH_CONNECTIONS_FREE_RESPONSE, n);
+  // Broadcast — send_async takes g_tx_mutex itself, safe to call here
+  // because bt_handlers::handle no longer runs under the mutex.
+  api_server::send_async(proxyapi::MSG_BLUETOOTH_CONNECTIONS_FREE_RESPONSE,
+                         &encode_connections_free, &msg);
   return true;
 }
 
@@ -208,20 +206,15 @@ bool handle_device_request(const uint8_t *payload, size_t payload_len,
       bool started = ble_backend::connection::connect(req.address, addr_type,
                                                       &on_connection_state);
       if (!started) {
-        // Emit failure inline so HA isn't left waiting.
+        // Emit failure so HA isn't left waiting.
         proxyapi_BluetoothDeviceConnectionResponse rsp =
             proxyapi_BluetoothDeviceConnectionResponse_init_zero;
         rsp.address = req.address;
         rsp.connected = false;
         rsp.error = -100;  // sentinel: "no slot / already connected"
-        size_t n = encode_one<proxyapi_BluetoothDeviceConnectionResponse>(
-            &rsp, ctx.response_buf, ctx.response_cap,
-            proxyapi_BluetoothDeviceConnectionResponse_fields);
-        if (n > 0) {
-          ctx.send_response(
-              ctx.client_fd,
-              proxyapi::MSG_BLUETOOTH_DEVICE_CONNECTION_RESPONSE, n);
-        }
+        api_server::send_async(
+            proxyapi::MSG_BLUETOOTH_DEVICE_CONNECTION_RESPONSE,
+            &encode_connection_response, &rsp);
       }
       break;
     }
