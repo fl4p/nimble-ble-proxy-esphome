@@ -44,6 +44,13 @@ void stop_forwarding();
 void set_duty(uint16_t window_ms, uint16_t interval_ms);
 void get_duty(uint16_t *window_ms, uint16_t *interval_ms);
 
+// Active scan: when on, the radio sends SCAN_REQ for each advert and
+// captures the SCAN_RSP — so peripherals advertising their full name /
+// extra service data in the scan response become visible. Costs a bit
+// of radio airtime per advert and slightly more power. Default on.
+void set_active(bool on);
+bool get_active();
+
 // Cumulative count of advertisements seen by the radio since boot.
 // Bumped from the NimBLE host task in every onResult, before any
 // forwarding/subscription gating.

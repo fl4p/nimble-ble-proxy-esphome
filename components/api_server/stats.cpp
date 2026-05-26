@@ -555,12 +555,22 @@ esp_err_t devices_get(httpd_req_t *req) {
 // transport to use.
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
+extern const uint8_t favicon_svg_start[] asm("_binary_favicon_svg_start");
+extern const uint8_t favicon_svg_end[]   asm("_binary_favicon_svg_end");
 
 esp_err_t root_get(httpd_req_t *req) {
   const size_t n = static_cast<size_t>(index_html_end - index_html_start);
   httpd_resp_set_type(req, "text/html");
   return httpd_resp_send(
       req, reinterpret_cast<const char *>(index_html_start), n);
+}
+
+esp_err_t favicon_get(httpd_req_t *req) {
+  const size_t n = static_cast<size_t>(favicon_svg_end - favicon_svg_start);
+  httpd_resp_set_type(req, "image/svg+xml");
+  httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
+  return httpd_resp_send(
+      req, reinterpret_cast<const char *>(favicon_svg_start), n);
 }
 #endif  // CONFIG_NBP_WIFI
 
@@ -848,9 +858,10 @@ bool handle_trace_set(const char *query) {
 size_t build_scan_json(char *buf, size_t cap) {
   uint16_t window = 0, interval = 0;
   ble_backend::scanner::get_duty(&window, &interval);
-  int n = std::snprintf(buf, cap, "{\"window\":%u,\"interval\":%u}",
-                        static_cast<unsigned>(window),
-                        static_cast<unsigned>(interval));
+  int n = std::snprintf(
+      buf, cap, "{\"window\":%u,\"interval\":%u,\"active\":%s}",
+      static_cast<unsigned>(window), static_cast<unsigned>(interval),
+      ble_backend::scanner::get_active() ? "true" : "false");
   if (n < 0) return 0;
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
@@ -860,31 +871,51 @@ const char *handle_scan_set(const char *query) {
   uint16_t cur_win = 0, cur_int = 0;
   ble_backend::scanner::get_duty(&cur_win, &cur_int);
   long window = cur_win, interval = cur_int;
-  bool any = false;
+  bool duty_changed = false;
+  bool active_changed = false;
+  bool active = ble_backend::scanner::get_active();
   if (httpd_query_key_value(query, "window", val, sizeof(val)) == ESP_OK) {
     window = std::strtol(val, nullptr, 10);
-    any = true;
+    duty_changed = true;
   }
   if (httpd_query_key_value(query, "interval", val, sizeof(val)) == ESP_OK) {
     interval = std::strtol(val, nullptr, 10);
-    any = true;
+    duty_changed = true;
   }
-  if (!any) return "missing window= or interval=";
-  if (window < 20 || window > 10000) return "window 20..10000 ms";
-  if (interval < 20 || interval > 10000) return "interval 20..10000 ms";
-  if (window > interval) return "window must be <= interval";
+  if (httpd_query_key_value(query, "active", val, sizeof(val)) == ESP_OK) {
+    active = (std::atoi(val) != 0);
+    active_changed = true;
+  }
+  if (!duty_changed && !active_changed) {
+    return "missing window= / interval= / active=";
+  }
+  if (duty_changed) {
+    if (window < 20 || window > 10000) return "window 20..10000 ms";
+    if (interval < 20 || interval > 10000) return "interval 20..10000 ms";
+    if (window > interval) return "window must be <= interval";
+  }
 
-  // NVS persist (one u16 per key) BEFORE applying so a bad apply
-  // doesn't leave stale state behind.
+  // NVS persist BEFORE applying so a bad apply doesn't leave stale
+  // state behind.
   nvs_handle_t h;
   if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-    nvs_set_u16(h, "scan_win", static_cast<uint16_t>(window));
-    nvs_set_u16(h, "scan_int", static_cast<uint16_t>(interval));
+    if (duty_changed) {
+      nvs_set_u16(h, "scan_win", static_cast<uint16_t>(window));
+      nvs_set_u16(h, "scan_int", static_cast<uint16_t>(interval));
+    }
+    if (active_changed) {
+      nvs_set_i8(h, "scan_act", active ? 1 : 0);
+    }
     nvs_commit(h);
     nvs_close(h);
   }
-  ble_backend::scanner::set_duty(static_cast<uint16_t>(window),
-                                 static_cast<uint16_t>(interval));
+  if (duty_changed) {
+    ble_backend::scanner::set_duty(static_cast<uint16_t>(window),
+                                   static_cast<uint16_t>(interval));
+  }
+  if (active_changed) {
+    ble_backend::scanner::set_active(active);
+  }
   return nullptr;
 }
 
@@ -894,11 +925,18 @@ void apply_scan_from_nvs() {
   uint16_t window = 0, interval = 0;
   bool have_w = (nvs_get_u16(h, "scan_win", &window) == ESP_OK);
   bool have_i = (nvs_get_u16(h, "scan_int", &interval) == ESP_OK);
+  int8_t active_v = -1;
+  bool have_a = (nvs_get_i8(h, "scan_act", &active_v) == ESP_OK);
   nvs_close(h);
-  if (!have_w || !have_i) return;  // keep proxy:: defaults
-  if (window < 20 || window > interval || interval > 10000) return;
-  ble_backend::scanner::set_duty(window, interval);
-  ESP_LOGI(TAG, "scan duty from NVS: window=%u interval=%u", window, interval);
+  if (have_w && have_i && window >= 20 && window <= interval &&
+      interval <= 10000) {
+    ble_backend::scanner::set_duty(window, interval);
+    ESP_LOGI(TAG, "scan duty from NVS: window=%u interval=%u", window,
+             interval);
+  }
+  if (have_a) {
+    ble_backend::scanner::set_active(active_v != 0);
+  }
 }
 
 void schedule_reboot() {
@@ -993,6 +1031,10 @@ void register_endpoints(httpd_handle_t srv) {
                       .method = HTTP_GET,
                       .handler = &root_get,
                       .user_ctx = nullptr};
+  httpd_uri_t favicon = {.uri = "/favicon.svg",
+                         .method = HTTP_GET,
+                         .handler = &favicon_get,
+                         .user_ctx = nullptr};
   httpd_uri_t stats = {.uri = "/stats.json",
                        .method = HTTP_GET,
                        .handler = &stats_get,
@@ -1030,6 +1072,7 @@ void register_endpoints(httpd_handle_t srv) {
                            .user_ctx = nullptr};
 #endif
   httpd_register_uri_handler(srv, &root);
+  httpd_register_uri_handler(srv, &favicon);
   httpd_register_uri_handler(srv, &stats);
 #if CONFIG_NBP_WEB_CONSOLE
   httpd_register_uri_handler(srv, &log);

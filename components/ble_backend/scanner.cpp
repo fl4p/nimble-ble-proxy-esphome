@@ -42,6 +42,7 @@ NimBLEScan *g_scan = nullptr;
 // being a tick behind.
 std::atomic<uint16_t> g_window_ms{proxy::SCAN_WINDOW_MS};
 std::atomic<uint16_t> g_interval_ms{proxy::SCAN_INTERVAL_MS};
+std::atomic<bool> g_active_scan{true};
 
 SemaphoreHandle_t g_mutex = nullptr;
 Batch g_pending;
@@ -222,7 +223,9 @@ void init() {
 
   g_scan = NimBLEDevice::getScan();
   g_scan->setScanCallbacks(&g_cb, /*wantDuplicates=*/true);
-  g_scan->setActiveScan(false);  // passive matches v1 feature flags
+  // Default active (pulls scan responses for full names); runtime-mutable
+  // via set_active() — atomic seeds the NimBLE-side flag below.
+  g_scan->setActiveScan(g_active_scan.load(std::memory_order_relaxed));
   g_scan->setInterval(g_interval_ms.load(std::memory_order_relaxed));
   g_scan->setWindow(g_window_ms.load(std::memory_order_relaxed));
   g_scan->setMaxResults(0);  // don't cache; we forward live
@@ -268,6 +271,23 @@ void set_duty(uint16_t window_ms, uint16_t interval_ms) {
 void get_duty(uint16_t *window_ms, uint16_t *interval_ms) {
   if (window_ms)   *window_ms   = g_window_ms.load(std::memory_order_relaxed);
   if (interval_ms) *interval_ms = g_interval_ms.load(std::memory_order_relaxed);
+}
+
+void set_active(bool on) {
+  if (!g_scan) return;
+  g_active_scan.store(on, std::memory_order_relaxed);
+  g_scan->setActiveScan(on);
+  // setActiveScan affects the next scan epoch; stop+restart so the new
+  // mode applies immediately, mirroring set_duty().
+  if (g_scan->isScanning()) {
+    g_scan->stop();
+    g_scan->start(0, /*isContinue=*/true);
+  }
+  ESP_LOGI(TAG, "scan mode -> %s", on ? "active" : "passive");
+}
+
+bool get_active() {
+  return g_active_scan.load(std::memory_order_relaxed);
 }
 
 void resume() {
