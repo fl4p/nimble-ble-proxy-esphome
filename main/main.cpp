@@ -7,6 +7,7 @@
 #include "ota.h"
 #include "proxy_config.h"
 #include "publish.h"
+#include "stats.h"
 #include "wifi_sta.h"
 
 #include "esp_event.h"
@@ -32,6 +33,9 @@ extern "C" void app_main() {
   wifi_sta::start_and_wait_for_ip();
   mdns_announce::start();
   ota::start();
+  // Piggyback the stats UI on the OTA httpd so we don't burn an extra
+  // LWIP socket budget on a second listener.
+  api_server::stats::register_endpoints(ota::handle());
   // Wire the ble_backend → api_server publish hook before either starts
   // accepting traffic. Order between start() calls doesn't matter as
   // long as install() happens before any adv callback fires.

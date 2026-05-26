@@ -4,6 +4,7 @@ idf_component_register(
         "api_server.cpp"
         "handshake.cpp"
         "bt_handlers.cpp"
+        "stats.cpp"
     INCLUDE_DIRS
         "."
         "../../include"
@@ -11,6 +12,7 @@ idf_component_register(
         api_proto
         ble_backend
         esp_event
+        esp_http_server
         esp_netif
         log
         lwip

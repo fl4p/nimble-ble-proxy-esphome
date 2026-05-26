@@ -4,6 +4,7 @@
 #include "api_server.h"
 #include "ble_backend.h"
 #include "proxy_config.h"
+#include "stats.h"
 
 // ble_backend internal modules — bt_handlers is the bridge layer so
 // pulling them in is intentional. Keeping the dispatch in api_server
@@ -154,6 +155,7 @@ void notify_cb(NimBLERemoteCharacteristic *chr, uint8_t *data, size_t len,
   if (copy > sizeof(msg.data.bytes)) copy = sizeof(msg.data.bytes);
   std::memcpy(msg.data.bytes, data, copy);
   msg.data.size = copy;
+  api_server::stats::record_notify();
   api_server::send_async(proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE,
                          &encode_notify_data, &msg);
 }
@@ -313,6 +315,7 @@ bool handle_read(uint16_t msg_type, const uint8_t *payload, size_t payload_len) 
   if (copy > sizeof(rsp.data.bytes)) copy = sizeof(rsp.data.bytes);
   std::memcpy(rsp.data.bytes, value.data(), copy);
   rsp.data.size = copy;
+  api_server::stats::record_read();
   api_server::send_async(proxyapi::MSG_BLUETOOTH_GATT_READ_RESPONSE,
                          &encode_read_response, &rsp);
   return true;
@@ -344,6 +347,7 @@ bool handle_write_char(const uint8_t *payload, size_t payload_len) {
       proxyapi_BluetoothGATTWriteResponse_init_zero;
   rsp.address = req.address;
   rsp.handle = req.handle;
+  api_server::stats::record_write();
   api_server::send_async(proxyapi::MSG_BLUETOOTH_GATT_WRITE_RESPONSE,
                          &encode_write_response, &rsp);
   return true;
@@ -378,6 +382,7 @@ bool handle_write_desc(const uint8_t *payload, size_t payload_len) {
       proxyapi_BluetoothGATTWriteResponse_init_zero;
   rsp.address = req.address;
   rsp.handle = req.handle;
+  api_server::stats::record_write();
   api_server::send_async(proxyapi::MSG_BLUETOOTH_GATT_WRITE_RESPONSE,
                          &encode_write_response, &rsp);
   return true;

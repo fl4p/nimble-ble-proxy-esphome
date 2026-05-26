@@ -6,9 +6,16 @@
 
 #pragma once
 
+#include "esp_http_server.h"
+
 namespace ota {
 
 // Start the HTTP server. Call once after WiFi has an IP.
 void start();
+
+// Shared httpd handle (nullptr until start() succeeds). Other
+// components piggyback URIs on this so we only open one listener —
+// LWIP_MAX_SOCKETS is tight on ESP32.
+httpd_handle_t handle();
 
 }  // namespace ota

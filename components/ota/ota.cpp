@@ -23,18 +23,7 @@ constexpr const char *TAG = "ota";
 // esp_ota_write internally aligns to.
 constexpr size_t CHUNK = 4096;
 
-esp_err_t root_get(httpd_req_t *req) {
-  // Plain-text help page. Keeping it tiny avoids the multipart-form
-  // parsing we'd need for browser file uploads.
-  static const char body[] =
-      "nimble-ble-proxy OTA endpoint\n"
-      "POST a raw firmware image (.bin) to /update.\n"
-      "\n"
-      "  curl --data-binary @nimble_ble_proxy.bin \\\n"
-      "       http://<host>/update\n";
-  httpd_resp_set_type(req, "text/plain");
-  return httpd_resp_send(req, body, sizeof(body) - 1);
-}
+httpd_handle_t g_srv = nullptr;
 
 esp_err_t update_post(httpd_req_t *req) {
   ESP_LOGI(TAG, "OTA upload starting, content_len=%d", req->content_len);
@@ -130,24 +119,21 @@ void start() {
   // concurrent client.
   cfg.max_open_sockets = 3;
 
-  httpd_handle_t srv = nullptr;
-  if (httpd_start(&srv, &cfg) != ESP_OK) {
+  if (httpd_start(&g_srv, &cfg) != ESP_OK) {
     ESP_LOGE(TAG, "httpd_start failed");
+    g_srv = nullptr;
     return;
   }
 
-  httpd_uri_t root = {.uri = "/",
-                      .method = HTTP_GET,
-                      .handler = &root_get,
-                      .user_ctx = nullptr};
   httpd_uri_t update = {.uri = "/update",
                         .method = HTTP_POST,
                         .handler = &update_post,
                         .user_ctx = nullptr};
-  httpd_register_uri_handler(srv, &root);
-  httpd_register_uri_handler(srv, &update);
+  httpd_register_uri_handler(g_srv, &update);
 
   ESP_LOGI(TAG, "OTA endpoint at http://%s.local/update", proxy::HOSTNAME);
 }
+
+httpd_handle_t handle() { return g_srv; }
 
 }  // namespace ota
