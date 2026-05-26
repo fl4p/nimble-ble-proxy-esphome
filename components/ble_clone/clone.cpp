@@ -63,7 +63,9 @@ const char *state_name(upstream::State s) {
   return "?";
 }
 
-esp_err_t clone_get(httpd_req_t *req) {
+}  // namespace
+
+size_t build_clone_json(char *buf, size_t cap) {
   config::Target t = config::snapshot();
   upstream::Status us = upstream::status();
   mirror::Stats ms = mirror::stats();
@@ -71,9 +73,8 @@ esp_err_t clone_get(httpd_req_t *req) {
   char mac_s[20];
   fmt_mac(t.address, mac_s, sizeof(mac_s));
 
-  char body[384];
   int n = std::snprintf(
-      body, sizeof(body),
+      buf, cap,
       "{"
       "\"enabled\":%s,"
       "\"addr\":\"%s\","
@@ -102,16 +103,13 @@ esp_err_t clone_get(httpd_req_t *req) {
       static_cast<unsigned long>(us.writes_dropped),
       ms.services, ms.characteristics, ms.connected_centrals,
       ms.advertising ? "true" : "false");
-
-  httpd_resp_set_type(req, "application/json");
-  return httpd_resp_send(req, body, n);
+  if (n < 0) return 0;
+  return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
 
-esp_err_t clone_post(httpd_req_t *req) {
-  char query[160];
-  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
-  }
+const char *handle_clone_set(const char *query, bool *reboot_required) {
+  if (reboot_required) *reboot_required = false;
+  if (query == nullptr) return "missing query";
 
   config::Target prev = config::snapshot();
   config::Target next = prev;
@@ -121,18 +119,14 @@ esp_err_t clone_post(httpd_req_t *req) {
   if (httpd_query_key_value(query, "addr", buf, sizeof(buf)) == ESP_OK) {
     uint64_t parsed = 0;
     if (!parse_mac(buf, &parsed)) {
-      return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                                 "addr must be AA:BB:CC:DD:EE:FF");
+      return "addr must be AA:BB:CC:DD:EE:FF";
     }
     if (parsed != prev.address) addr_changed = true;
     next.address = parsed;
   }
   if (httpd_query_key_value(query, "type", buf, sizeof(buf)) == ESP_OK) {
     long v = std::strtol(buf, nullptr, 10);
-    if (v < 0 || v > 3) {
-      return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                                 "type must be 0..3");
-    }
+    if (v < 0 || v > 3) return "type must be 0..3";
     next.address_type = static_cast<uint8_t>(v);
   }
   if (httpd_query_key_value(query, "enabled", buf, sizeof(buf)) == ESP_OK) {
@@ -144,16 +138,35 @@ esp_err_t clone_post(httpd_req_t *req) {
     next.name_suffix[sizeof(next.name_suffix) - 1] = 0;
   }
 
-  if (!config::set(next)) {
-    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                               "nvs write failed");
-  }
+  if (!config::set(next)) return "nvs write failed";
 
   // NimBLE's GATT DB is one-shot: changing the target MAC after the
   // mirror has been built means the next session's services may differ,
   // but we can't re-register. Surface this to the caller so the UI can
   // prompt for a reboot.
-  bool reboot_required = addr_changed && (mirror::stats().services > 0);
+  if (reboot_required) {
+    *reboot_required = addr_changed && (mirror::stats().services > 0);
+  }
+  return nullptr;
+}
+
+namespace {
+
+esp_err_t clone_get(httpd_req_t *req) {
+  char body[384];
+  size_t n = build_clone_json(body, sizeof(body));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, body, n);
+}
+
+esp_err_t clone_post(httpd_req_t *req) {
+  char query[160];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
+  }
+  bool reboot_required = false;
+  const char *err = handle_clone_set(query, &reboot_required);
+  if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
 
   char body[64];
   int n = std::snprintf(body, sizeof(body),

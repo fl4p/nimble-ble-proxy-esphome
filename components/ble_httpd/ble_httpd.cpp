@@ -12,6 +12,10 @@
 #include "scanner.h"
 #include "stats.h"
 
+#if CONFIG_NBP_CLONE
+#include "clone.h"
+#endif
+
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -194,7 +198,27 @@ size_t dispatch(const char *method, char *path, char *out, size_t cap) {
     return static_cast<size_t>(std::snprintf(out, cap, "{\"ok\":true}"));
   }
 
-  return static_cast<size_t>(std::snprintf(out, cap, "no route"));
+#if CONFIG_NBP_CLONE
+  if (is_get && std::strcmp(path, "/clone") == 0) {
+    return ble_clone::build_clone_json(out, cap);
+  }
+  if (is_post && std::strcmp(path, "/clone") == 0) {
+    bool reboot = false;
+    const char *err = ble_clone::handle_clone_set(query, &reboot);
+    if (err) {
+      return static_cast<size_t>(
+          std::snprintf(out, cap, "{\"error\":\"%s\"}", err));
+    }
+    return static_cast<size_t>(std::snprintf(
+        out, cap, "{\"ok\":true,\"reboot_required\":%s}",
+        reboot ? "true" : "false"));
+  }
+#endif
+
+  // Unknown path: JSON-format so apiJson on the client can parse + throw,
+  // instead of choking on bare text. apiText callers see the same body.
+  return static_cast<size_t>(
+      std::snprintf(out, cap, "{\"error\":\"no route %s\"}", path));
 }
 
 class ReqCb : public NimBLECharacteristicCallbacks {

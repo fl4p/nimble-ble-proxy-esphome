@@ -3,9 +3,12 @@
 #     -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.bletest" ...
 CONFIG_NBP_WIFI=n
 CONFIG_NBP_BLE_HTTPD=y
-# Clone hits the same gatts-mutable assert during upstream-connected
-# GATT registration. Out of scope for this smoke test; disable.
-CONFIG_NBP_CLONE=n
+# Clone enabled so /clone is routable over the BLE dispatcher. NimBLE's
+# GATT registration is one-shot, so once both ble_httpd's service and
+# clone's mirror have registered, advertising is single-context — only
+# one set of UUIDs is advertised at a time. Fine for now: dashboard
+# uses the ble_httpd UUID, clone advertises after build_from() runs.
+CONFIG_NBP_CLONE=y
 
 # Thermal: make light_sleep_enable actually effective. Without
 # tickless idle the 1 ms FreeRTOS tick interrupt wakes both cores

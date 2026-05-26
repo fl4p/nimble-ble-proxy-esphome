@@ -11,6 +11,7 @@ idf_component_register(
     REQUIRES
         api_server
         ble_backend
+        ble_clone
         bt
         log
         freertos

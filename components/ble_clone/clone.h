@@ -26,12 +26,24 @@
 
 #ifdef CONFIG_NBP_CLONE
 
+#include <cstddef>
 #include <cstdint>
 
 namespace ble_clone {
 
 void init();
 void register_endpoints(void *httpd_handle);
+
+// Transport-agnostic helpers, shared by clone_get / clone_post and by
+// the BLE dispatcher in components/ble_httpd. Same JSON shape as the
+// /clone HTTP endpoint.
+size_t build_clone_json(char *buf, size_t cap);
+// Apply `key=value&…` updates from `query` (same params as the HTTP
+// POST). Returns nullptr on success and sets `*reboot_required` to
+// true when the target MAC changed after the mirror has already been
+// built (NimBLE GATT DB is one-shot). Returns a short error message
+// on validation / persistence failures.
+const char *handle_clone_set(const char *query, bool *reboot_required);
 
 }  // namespace ble_clone
 

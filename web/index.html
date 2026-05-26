@@ -237,7 +237,14 @@ async function bleJson(line) {
     const lastClose = Math.max(txt.lastIndexOf('}'), txt.lastIndexOf(']'));
     if (lastClose > 0) txt = txt.slice(0, lastClose + 1) + ']}';
   }
-  return JSON.parse(txt);
+  const obj = JSON.parse(txt);
+  // Handler-level errors come back as {error: "msg"} (BLE side has no
+  // separate status channel). Surface them as a rejection so callers'
+  // try/catch behaves the same as the HTTP path's !r.ok branch.
+  if (obj && typeof obj === 'object' && typeof obj.error === 'string') {
+    throw new Error(obj.error);
+  }
+  return obj;
 }
 
 // ---- transport selection ---------------------------------------------
@@ -290,7 +297,11 @@ async function apiJson(line) {
     const t = await r.text().catch(() => '');
     throw new Error(t || `${path}: ${r.status}`);
   }
-  return r.json();
+  const obj = await r.json();
+  if (obj && typeof obj === 'object' && typeof obj.error === 'string') {
+    throw new Error(obj.error);
+  }
+  return obj;
 }
 
 async function connect() {
