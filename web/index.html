@@ -102,6 +102,7 @@ table#devices tr.stale{opacity:.4}
       <option value=5>VERBOSE</option>
     </select></label>
     <label>WiFi TX: <select id=wtx>
+      <option value=0>off</option>
       <option value=8>8</option><option value=11>11</option>
       <option value=14>14</option><option value=17>17</option>
       <option value=20>20</option><option value=21>21</option>
@@ -447,6 +448,7 @@ async function loadInitialValues() {
   try {
     const l = await bleJson('GET /level');   lvl.value = l.nimble;
     const p = await bleJson('GET /txpower'); wtx.value = p.wifi; btx.value = p.ble;
+    wtx.disabled = p.wifi === 0;
     const f = await bleJson('GET /cpufreq'); cpu.value = f.mhz;
     document.getElementById('ls').checked = !!f.ls;
     const sc = await bleJson('GET /scan');
@@ -465,7 +467,10 @@ function wireControls() {
     bleFetch('POST /level?nimble=' + e.target.value).catch(err => alert(err));
   };
   document.getElementById('wtx').onchange = e => {
-    bleFetch('POST /txpower?wifi=' + e.target.value).catch(err => alert(err));
+    const v = e.target.value;
+    bleFetch('POST /txpower?wifi=' + v)
+      .then(() => { if (v === '0') e.target.disabled = true; })
+      .catch(err => alert(err));
   };
   document.getElementById('btx').onchange = e => {
     bleFetch('POST /txpower?ble=' + e.target.value).catch(err => alert(err));

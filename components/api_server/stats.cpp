@@ -295,6 +295,11 @@ int g_cpu_freq_mhz = DEFAULT_CPU_FREQ_MHZ;
 
 bool g_light_sleep = false;
 
+// Runtime-only: set by handle_txpower_set when wifi=0. Not persisted —
+// a reboot brings WiFi back at the NVS-stored dBm so the device can't
+// be bricked over BLE.
+bool g_wifi_off = false;
+
 esp_err_t apply_cpu_freq_mhz(int mhz, bool light_sleep) {
   // Pin min=max so the CPU is clamped exactly. light_sleep lets the
   // SoC coast between bursts of work — measurable temp drop on the
@@ -330,6 +335,21 @@ esp_err_t apply_wifi_tx_dbm(int dbm) {
   return esp_wifi_set_max_tx_power(static_cast<int8_t>(dbm * 4));
 #else
   (void)dbm;
+  return ESP_OK;
+#endif
+}
+
+// Stop the WiFi radio entirely. Tears down the STA connection and turns
+// the PHY off — the dashboard becomes unreachable over HTTP, but a BLE
+// client (ble_httpd) keeps working. Idempotent.
+esp_err_t apply_wifi_off() {
+#if CONFIG_NBP_WIFI
+  esp_err_t err = esp_wifi_stop();
+  if (err == ESP_ERR_WIFI_NOT_INIT || err == ESP_ERR_WIFI_NOT_STARTED) {
+    return ESP_OK;
+  }
+  return err;
+#else
   return ESP_OK;
 #endif
 }
@@ -604,6 +624,7 @@ esp_err_t root_get(httpd_req_t *req) {
       "<option value=5>VERBOSE</option>"
       "</select></label>"
       "<label>WiFi TX: <select id=wtx>"
+      "<option value=0>off</option>"
       "<option value=8>8</option><option value=11>11</option>"
       "<option value=14>14</option><option value=17>17</option>"
       "<option value=20>20</option><option value=21>21</option>"
@@ -734,10 +755,12 @@ esp_err_t root_get(httpd_req_t *req) {
       "const wtx=document.getElementById('wtx');"
       "const btx=document.getElementById('btx');"
       "fetch('/txpower').then(r=>r.json()).then(j=>{"
-      "wtx.value=j.wifi;btx.value=j.ble;});"
+      "wtx.value=j.wifi;btx.value=j.ble;wtx.disabled=j.wifi===0;});"
       "wtx.onchange=()=>{"
-      "fetch('/txpower?wifi='+wtx.value,{method:'POST'})"
-      ".then(r=>{if(!r.ok)alert('wifi tx update failed');});};"
+      "const v=wtx.value;"
+      "fetch('/txpower?wifi='+v,{method:'POST'})"
+      ".then(r=>{if(!r.ok)alert('wifi tx update failed');"
+      "else if(v==='0')wtx.disabled=true;});};"
       "btx.onchange=()=>{"
       "fetch('/txpower?ble='+btx.value,{method:'POST'})"
       ".then(r=>{if(!r.ok)alert('ble tx update failed');});};"
@@ -880,7 +903,7 @@ const char *handle_level_set(const char *query) {
 
 size_t build_txpower_json(char *buf, size_t cap) {
   int n = std::snprintf(buf, cap, "{\"wifi\":%d,\"ble\":%d}",
-                        static_cast<int>(g_wifi_tx_dbm),
+                        g_wifi_off ? 0 : static_cast<int>(g_wifi_tx_dbm),
                         static_cast<int>(g_ble_tx_dbm));
   if (n < 0) return 0;
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
@@ -891,15 +914,25 @@ const char *handle_txpower_set(const char *query) {
   bool changed = false;
   if (httpd_query_key_value(query, "wifi", val, sizeof(val)) == ESP_OK) {
     int dbm = std::atoi(val);
-    if (dbm < 2 || dbm > 21) return "wifi 2..21";
-    if (dbm != g_wifi_tx_dbm) {
-      int8_t new_dbm = static_cast<int8_t>(dbm);
-      if (apply_wifi_tx_dbm(new_dbm) != ESP_OK) return "wifi tx apply failed";
-      g_wifi_tx_dbm = new_dbm;
-      nvs_write_i8(NVS_WIFI_TX_KEY, g_wifi_tx_dbm);
-      ESP_LOGI(TAG, "wifi tx -> %d dBm (persisted)",
-               static_cast<int>(g_wifi_tx_dbm));
-      changed = true;
+    if (dbm == 0) {
+      if (!g_wifi_off) {
+        if (apply_wifi_off() != ESP_OK) return "wifi stop failed";
+        g_wifi_off = true;
+        ESP_LOGI(TAG, "wifi off (runtime; reboot to re-enable)");
+        changed = true;
+      }
+    } else {
+      if (dbm < 2 || dbm > 21) return "wifi 0 or 2..21";
+      if (g_wifi_off) return "wifi off; reboot to re-enable";
+      if (dbm != g_wifi_tx_dbm) {
+        int8_t new_dbm = static_cast<int8_t>(dbm);
+        if (apply_wifi_tx_dbm(new_dbm) != ESP_OK) return "wifi tx apply failed";
+        g_wifi_tx_dbm = new_dbm;
+        nvs_write_i8(NVS_WIFI_TX_KEY, g_wifi_tx_dbm);
+        ESP_LOGI(TAG, "wifi tx -> %d dBm (persisted)",
+                 static_cast<int>(g_wifi_tx_dbm));
+        changed = true;
+      }
     }
   }
   if (httpd_query_key_value(query, "ble", val, sizeof(val)) == ESP_OK) {
