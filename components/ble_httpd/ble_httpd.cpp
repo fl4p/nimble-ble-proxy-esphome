@@ -38,9 +38,11 @@ constexpr uint8_t PROTO_VERSION = 1;
 std::atomic<bool> g_started{false};
 NimBLECharacteristic *g_resp_chr = nullptr;
 
-// One response buffer reused across requests. Stub assumes a single
-// connection serialising one in-flight request — fine for a dashboard.
-constexpr size_t RESP_BUF_BYTES = 1024;
+// One response buffer reused across requests. Single connection
+// serialises one in-flight request — fine for a dashboard. 4 KB fits
+// /devices for ~30 entries (well above the scanner's 64-row cap of
+// useful data given typical 120 bytes per device JSON).
+constexpr size_t RESP_BUF_BYTES = 4096;
 char g_resp_buf[RESP_BUF_BYTES];
 
 void send_response(uint8_t reqId, const char *payload, size_t len,

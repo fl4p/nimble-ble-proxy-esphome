@@ -951,8 +951,15 @@ size_t build_devices_json(char *buf, size_t cap) {
   char *p = buf;
   char *const end = buf + cap;
   auto rem = [&]() -> size_t { return end > p ? size_t(end - p) : 0; };
+  // snprintf writes a NUL terminator at position size-1 when the input
+  // is longer than `size`. Advancing p by rem() in that case would
+  // land us on the NUL — and we'd return it to the caller. Cap the
+  // advance at rem()-1 on truncation so the NUL never gets counted.
   auto bump = [&](int w) {
-    if (w > 0) p += size_t(w) < rem() ? size_t(w) : rem();
+    if (w <= 0) return;
+    size_t r = rem();
+    if (r == 0) return;
+    p += static_cast<size_t>(w) < r ? static_cast<size_t>(w) : r - 1;
   };
 
   bump(std::snprintf(p, rem(), "{\"devices\":["));
