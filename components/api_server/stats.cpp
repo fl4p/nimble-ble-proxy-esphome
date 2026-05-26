@@ -1,6 +1,9 @@
 #include "stats.h"
 
+#include "connection.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "proxy_config.h"
 #include "scanner.h"
 
 #include <atomic>
@@ -18,14 +21,19 @@ std::atomic<uint32_t> g_writes{0};
 std::atomic<uint32_t> g_notifies{0};
 
 esp_err_t stats_get(httpd_req_t *req) {
-  char buf[128];
+  char buf[192];
+  unsigned in_use = proxy::MAX_CONNECTIONS -
+                    ble_backend::connection::free_slots();
   int n = std::snprintf(
       buf, sizeof(buf),
-      "{\"reads\":%lu,\"writes\":%lu,\"notifies\":%lu,\"adverts\":%lu}",
+      "{\"reads\":%lu,\"writes\":%lu,\"notifies\":%lu,\"adverts\":%lu,"
+      "\"connections\":%u,\"heap\":%lu}",
       static_cast<unsigned long>(g_reads.load(std::memory_order_relaxed)),
       static_cast<unsigned long>(g_writes.load(std::memory_order_relaxed)),
       static_cast<unsigned long>(g_notifies.load(std::memory_order_relaxed)),
-      static_cast<unsigned long>(ble_backend::scanner::adv_count()));
+      static_cast<unsigned long>(ble_backend::scanner::adv_count()),
+      in_use,
+      static_cast<unsigned long>(esp_get_free_heap_size()));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
 }
@@ -53,30 +61,36 @@ esp_err_t root_get(httpd_req_t *req) {
       "<script src=\"https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/"
       "uPlot.iife.min.js\"></script>"
       "<script>"
-      "const N=120,t=[],r=[],w=[],n=[],a=[];"
-      "for(let i=0;i<N;i++){t.push(i-N+1);"
-      "r.push(null);w.push(null);n.push(null);a.push(null);}"
+      "const N=120,t=[],r=[],w=[],n=[],a=[],c=[],h=[];"
+      "for(let i=0;i<N;i++){t.push(i-N+1);r.push(null);w.push(null);"
+      "n.push(null);a.push(null);c.push(null);h.push(null);}"
       "const u=new uPlot({width:900,height:320,"
-      "scales:{x:{time:false},y:{}},"
+      "scales:{x:{time:false},y:{},kb:{}},"
       "axes:[{stroke:'#aaa',grid:{stroke:'#333'}},"
-      "{stroke:'#aaa',grid:{stroke:'#333'}}],"
+      "{stroke:'#aaa',grid:{stroke:'#333'}},"
+      "{side:1,scale:'kb',stroke:'#9ca3af',grid:{show:false},"
+      "values:(u,vs)=>vs.map(v=>v+' KB')}],"
       "series:[{label:'t (s ago)'},"
       "{label:'reads/s',stroke:'#4ade80',width:2},"
       "{label:'writes/s',stroke:'#60a5fa',width:2},"
       "{label:'notifies/s',stroke:'#f472b6',width:2},"
-      "{label:'adverts/s',stroke:'#fbbf24',width:2}]},"
-      "[t,r,w,n,a],document.getElementById('chart'));"
+      "{label:'adverts/s',stroke:'#fbbf24',width:2},"
+      "{label:'connections',stroke:'#a78bfa',width:2},"
+      "{label:'heap',scale:'kb',stroke:'#9ca3af',width:2,dash:[4,4]}]},"
+      "[t,r,w,n,a,c,h],document.getElementById('chart'));"
       "let prev=null,prevT=null;"
       "async function tick(){"
       "try{const now=performance.now()/1000;"
       "const s=await(await fetch('/stats.json')).json();"
       "if(prev){const dt=now-prevT;"
-      "r.shift();w.shift();n.shift();a.shift();"
+      "r.shift();w.shift();n.shift();a.shift();c.shift();h.shift();"
       "r.push((s.reads-prev.reads)/dt);"
       "w.push((s.writes-prev.writes)/dt);"
       "n.push((s.notifies-prev.notifies)/dt);"
       "a.push((s.adverts-prev.adverts)/dt);"
-      "u.setData([t,r,w,n,a]);}"
+      "c.push(s.connections);"
+      "h.push(Math.round(s.heap/1024));"
+      "u.setData([t,r,w,n,a,c,h]);}"
       "prev=s;prevT=now;}catch(e){}}"
       "setInterval(tick,1000);tick();"
       "</script></body></html>";
