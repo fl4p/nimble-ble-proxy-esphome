@@ -1,41 +1,75 @@
 # Web UI spec
 
-The proxy ships a small web dashboard alongside the OTA endpoint. Both share
-the single `httpd_handle_t` exposed by `ota::handle()` — there is no second
-HTTP listener. All endpoints are unauthenticated on the assumption of a
-trusted LAN.
+The proxy ships a small web dashboard. The HTML/JS live in
+`web/index.html` — a single file that is the source of truth for both
+transports:
+
+- **HTTP mode** (default `CONFIG_NBP_WIFI=y` build): the file is
+  embedded via `EMBED_FILES` and served by `stats.cpp::root_get` on
+  the OTA httpd at `http://<proxy>/`. All other endpoints below
+  (`/stats.json`, `/log`, …) are siblings on the same listener — no
+  second HTTP socket.
+- **Web Bluetooth mode** (`CONFIG_NBP_BLE_HTTPD=y`, typically with
+  `CONFIG_NBP_WIFI=n`): the same file is loaded off-device (open it
+  as `file://`, or host it on a static URL) and talks to the device
+  over a GATT request/response service. See *BLE transport* below.
+
+The page auto-detects which transport to use at boot: it probes
+`GET /level`; if that succeeds it stays in HTTP mode, otherwise it
+falls back to BLE and shows a **Connect** button. The query flag
+`?ble` forces BLE explicitly when the page is hosted by a server that
+happens to answer `/level` with something unrelated.
+
+All endpoints are unauthenticated on the assumption of a trusted LAN.
 
 The layout is responsive: the page declares
 `<meta name=viewport content="width=device-width,initial-scale=1">`, uses
 `box-sizing: border-box` globally, lays out the control row with
 `flex-wrap`, and sizes both uPlot canvases from each chart wrapper's live
 `clientWidth` (clamped to 900). A media query at `max-width:640px` tightens
-padding and font size for phones.
+padding and font size for phones. Scrollbars and form controls are dark
+to match the chart/console panels.
 
 ## Build-time gates
 
-Two Kconfig flags toggle the heavier optional panels. Both default `y`. Edit
-in `idf.py menuconfig` → `nimble-ble-proxy`, or set in `sdkconfig.defaults`.
+Four Kconfig flags shape what gets compiled in. Edit in
+`idf.py menuconfig` → `nimble-ble-proxy`, or set in
+`sdkconfig.defaults` / `sdkconfig.defaults.bletest`.
 
 | Kconfig | Default | Cost when ON | What it gates |
 |---|---|---|---|
+| `CONFIG_NBP_WIFI` | `y` | ~500 KB flash (WiFi stack + httpd + mDNS + OTA) | STA bring-up, mDNS, OTA, aioesphomeapi server, the HTTP dashboard endpoints, embedded `web/index.html` |
+| `CONFIG_NBP_BLE_HTTPD` | `n` | ~4 KB flash | GATT request/response service that lets Web Bluetooth talk to the same handlers |
 | `CONFIG_NBP_DEVICES_PANEL` | `y` | ~12 KB BSS | scanner device table, `/devices`, dashboard table |
 | `CONFIG_NBP_WEB_CONSOLE` | `y` | 64 KB BSS (NimBLE DEBUG) / 8 KB BSS | `esp_log_set_vprintf` hook, ring buffer, `/log`, on-page console |
 
-The rate chart, the system chart, the control row (NimBLE log, WiFi TX, BLE
-TX, CPU MHz, reboot), and `/trace` / `/txpower` / `/cpufreq` endpoints are
-always compiled in — they cost <100 B BSS combined.
+A BLE-only build flips `NBP_WIFI=n` + `NBP_BLE_HTTPD=y` — see
+`sdkconfig.defaults.bletest`. With `NBP_WIFI=n` the linker GCs the
+entire HTTP handler set, so the BLE-only build is ~75 KB smaller than
+the WiFi build even though both expose the same dashboard.
+
+The rate chart, the system chart, the tunables panel (NimBLE log,
+WiFi TX, BLE TX, CPU MHz, BLE scan duty, light sleep, reboot), and
+`/trace` / `/txpower` / `/cpufreq` / `/scan` endpoints are always
+compiled in — they cost <100 B BSS combined.
 
 ## Endpoints
 
-All under `http://<proxy>/`. Default port: 80 (ESP-IDF httpd default).
+In HTTP mode the paths below are at `http://<proxy>/<path>` (port 80,
+ESP-IDF httpd default). In Web Bluetooth mode the same `<method>
+<path>?<query>` line is sent as a single GATT write (see *BLE
+transport*); responses arrive on the notify characteristic. The
+client-side `apiText` / `apiJson` helpers in `web/index.html` paper
+over the difference.
 
 ### `GET /` — dashboard HTML
 
-Single self-contained page. Pulls uPlot 1.6.31 CSS+JS and ansi\_up v5 from
-jsdelivr. CSS, HTML, and inline JS are embedded as one C++ string literal in
-`stats.cpp`. Sections conditional on `CONFIG_NBP_*` are wrapped with `#if`
-inside the literal.
+Single self-contained page sourced from `web/index.html`, embedded
+into the WiFi build via `EMBED_FILES` in
+`components/api_server/CMakeLists.txt` and served by `root_get`. The
+embed is conditional on `CONFIG_NBP_WIFI` so BLE-only builds don't
+carry the ~21 KB of HTML they can't serve. Pulls uPlot 1.6.31 CSS+JS
+and ansi\_up v5 from jsdelivr.
 
 Layout (top → bottom):
 
@@ -57,9 +91,14 @@ Layout (top → bottom):
    the `.stale` class (40 % opacity). Wrapped in `<div class=devwrap>`
    with `overflow-x:auto` so the table can scroll horizontally on phones
    without forcing the rest of the page wider.
-4. **Control row** — wrapping flex row with four `<select>` dropdowns
-   (NimBLE log, WiFi TX, BLE TX, CPU MHz) and a red "reboot device"
-   button (`confirm()` guard).
+4. **Tunables row** — wrapping flex row with `<select>` dropdowns for
+   NimBLE log, WiFi TX, BLE TX, CPU MHz, and BLE scan duty; a "light
+   sleep" checkbox; and a red "reboot device" button (`confirm()`
+   guard). WiFi TX is auto-disabled when the device reports `wifi:0`
+   (either runtime off via `?wifi=0`, or the BLE-only build where
+   WiFi is compiled out). On first connect the page issues one GET
+   per endpoint to preselect every control from the live state, then
+   wires onchange handlers that POST single-field updates.
 5. **Console pane** *(if `CONFIG_NBP_WEB_CONSOLE`)* — ~900 × 300
    monospace pane, `width:100%; max-width:920px`. ansi\_up renders
    ESP-IDF color escapes. New bytes from `/log` are appended via
@@ -183,7 +222,7 @@ INFO+ would flood the console with "New advertiser: \<mac\>" on every
 advert. They only become more verbose via `/trace ON`'s explicit
 override.
 
-### `GET /txpower` &nbsp;·&nbsp; `POST /txpower?wifi=<dBm>&ble=<dBm>`
+### `GET /txpower` &nbsp;·&nbsp; `POST /txpower?wifi=<dBm|0>&ble=<dBm>`
 
 Get / set the WiFi and BLE TX power (dBm). Either query param may be
 omitted; only the supplied one is updated. Persisted to NVS namespace
@@ -193,31 +232,69 @@ omitted; only the supplied one is updated. Persisted to NVS namespace
 GET returns `{"wifi":N,"ble":M}`.
 
 - WiFi maps to `esp_wifi_set_max_tx_power(dbm × 4)` (chip wants
-  0.25 dBm units). Dashboard exposes 8/11/14/17/20/21 dBm. Lower
-  values (2, 5) were removed after observing that 2 dBm doesn't drop
-  the AP association but kills throughput — the device becomes
-  reachable-but-unusable.
+  0.25 dBm units). Dashboard exposes off / 8 / 11 / 14 / 17 / 20 / 21
+  dBm. Lower values (2, 5) were removed after observing that 2 dBm
+  doesn't drop the AP association but kills throughput — the device
+  becomes reachable-but-unusable.
+
+  `wifi=0` is the **off** sentinel: it calls `esp_wifi_stop()`, marks
+  the radio off for the rest of the boot, and is **not** persisted to
+  NVS — a reboot restores WiFi at the previously stored dBm. This
+  keeps a BLE-only client from being able to brick the device. While
+  off, the GET response reports `wifi:0` and further `?wifi=<n>` POSTs
+  return `"wifi off; reboot to re-enable"`. When `CONFIG_NBP_WIFI` is
+  not set, GET also reports `wifi:0` (compile-time absent).
 - BLE maps to `esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, lvl)`,
   with `lvl` from a `dbm → ESP_PWR_LVL_*` lookup in 3 dBm steps.
   Dashboard exposes -12/-9/-6/-3/0/3/6/9 dBm.
 
 Defaults if no NVS entry: WiFi 20 dBm, BLE +9 dBm (chip maxes).
 
-### `GET /cpufreq` &nbsp;·&nbsp; `POST /cpufreq?mhz=<80|160|240>`
+### `GET /cpufreq` &nbsp;·&nbsp; `POST /cpufreq?mhz=<80|160|240>&ls=<0|1>`
 
-Get / set the CPU clock via `esp_pm_configure` (max_freq = min_freq,
-light_sleep_enable = false — a continuously-active BLE scanner makes
-sleep entry/exit overhead not worth the modest savings).
+Get / set the CPU clock and `esp_pm` light-sleep gate. Either query
+param may be omitted. Pinned `max_freq = min_freq` so the clock is
+clamped exactly; `ls=1` enables `light_sleep_enable` so the SoC can
+coast between bursts of work — useful when scan duty is low.
 
-Stored in NVS namespace `stats`, key `cpu_freq` (int8 = MHz/10).
-Applied at boot by `apply_cpu_freq_from_nvs()` early in `app_main`
-(before WiFi/BLE init) so the radios initialise at the chosen clock.
+Light sleep is only effective with `CONFIG_FREERTOS_USE_TICKLESS_IDLE`
+on; otherwise the 1 ms FreeRTOS tick wakes both cores every ms and
+the longest nap is ~1 ms. The bletest defaults turn that on plus BT
+controller modem sleep (`CONFIG_BT_CTRL_MODEM_SLEEP_MODE_1`); the
+default WiFi build leaves them off because the active TCP listener
+makes the wake-up overhead not worth it.
 
-GET returns `{"mhz":N}`. Default if no NVS entry: 240 MHz.
+Stored in NVS namespace `stats`: `cpu_freq` (int8 = MHz/10) and
+`cpu_ls` (int8 boolean). Applied at boot by
+`apply_cpu_freq_from_nvs()` early in `app_main` (before WiFi/BLE
+init) so the radios initialise at the chosen clock.
+
+GET returns `{"mhz":N,"ls":bool}`. Defaults if no NVS entry:
+240 MHz, light sleep off.
 
 Requires `CONFIG_PM_ENABLE=y` (set in `sdkconfig.defaults`). Dropping
 to 80 MHz visibly slows GATT discovery — fine for a quiet observer,
 maybe not for fast pairing.
+
+### `GET /scan` &nbsp;·&nbsp; `POST /scan?window=<ms>&interval=<ms>`
+
+Get / set the NimBLE scanner duty cycle. `interval` is the epoch
+length (when the next scan starts); `window` is how much of that
+epoch the radio is on. Both in ms, both writable. Lowering the duty
+is the biggest single thermal lever: a 30 ms window inside a 1000 ms
+interval drops the chip temperature by ~10 °C versus a 30/60 (50 %)
+duty.
+
+Stored in NVS namespace `stats`, keys `scan_w` / `scan_i` (uint16).
+Applied at boot by `apply_scan_from_nvs()` after `ble_backend::start()`
+(scanner::set\_duty is a no-op before scanner::init runs). The
+underlying `scanner::set_duty` calls NimBLE's `setInterval` /
+`setWindow`, then stop+restart the scan so the new timings take
+effect immediately.
+
+GET returns `{"window":N,"interval":M}`. Defaults from
+`proxy_config.h`. The dashboard exposes four presets:
+`30/60` (50 %), `30/120` (25 %), `30/300` (10 %), `30/1000` (3 %).
 
 ### `POST /trace?on=<0|1>`
 
@@ -247,9 +324,51 @@ endpoint with a `confirm()` guard.
 Owned by the SMP feature, not by this UI work. See
 `CONFIG_NBP_SMP` in `main/Kconfig.projbuild`.
 
+## BLE transport (`CONFIG_NBP_BLE_HTTPD`)
+
+A NimBLE peripheral service with three characteristics:
+
+| UUID suffix | Property | Direction | Purpose |
+|---|---|---|---|
+| `…0001` | WRITE | client → device | REQUEST: one `<METHOD> <PATH>?<QUERY>` line per write |
+| `…0002` | NOTIFY | device → client | RESPONSE: fragmented body of the matching request |
+| `…0003` | READ | client → device | INFO: `[u8 version][u8 reserved][u16 max_frag_le]` |
+
+Base UUID: `6e627062-7072-7879-0001-000000000000` (`'nbpb' 'prxy'` +
+slot bytes).
+
+Both REQUEST and RESPONSE are fragmented with a 2-byte header per
+fragment:
+
+```
+byte 0   flags  bit0 = FIN (last fragment), bit1 = ERR
+byte 1   reqId  echoed by server so the client can multiplex
+bytes 2+ payload
+```
+
+The server allocates a 4 KiB response buffer reused across requests
+(single-connection serialization is fine for a dashboard). Fragment
+size is `MTU − 3 − 2` bytes; with the chip-wide MTU set to 247 this
+is 242 payload bytes per fragment.
+
+The httpd dispatcher inside `ble_httpd.cpp` is a thin router that
+calls the same `build_*_json` / `handle_*_set` helpers used by the
+HTTP handlers in `stats.cpp`. The only protocol-level transform is
+`/log`: the BLE response prepends a 10-digit-decimal sequence number
+plus newline so the client can reassemble across fragments without
+needing a separate header channel. The HTTP path synthesizes the
+same envelope on the client side (from the `X-Log-Seq` header) so
+`apiText` returns identical bytes either way.
+
+Once the GATT server is registered, `NimBLEDevice::getAdvertising()`
+gets the service UUID added and starts advertising. A scan
+pause/resume guards the registration to dodge a `BLE_HS_EBUSY` from
+NimBLE refusing GATT mutations while the scanner is active.
+
 ## Boot wiring
 
-`main/main.cpp` orders the dashboard initialisation as follows:
+`main/main.cpp` orders initialisation as follows. Steps marked
+*(WiFi)* run only when `CONFIG_NBP_WIFI=y`.
 
 1. `api_server::stats::install_log_hook()` — first, so NVS / WiFi / mDNS
    init logs are captured. (Gated on `CONFIG_NBP_WEB_CONSOLE`.)
@@ -259,15 +378,21 @@ Owned by the SMP feature, not by this UI work. See
    any NimBLE component initialises.
 5. `api_server::stats::apply_cpu_freq_from_nvs()` — early so WiFi/BLE
    init runs at the chosen clock.
-6. `wifi_sta::start_and_wait_for_ip()`.
-7. `mdns_announce::start()`.
-8. `ota::start()` — creates the shared httpd.
-9. `api_server::stats::register_endpoints(ota::handle())` — adds all
-   dashboard URIs to the OTA httpd.
-10. `ble_backend::publish::install(...)` and `ble_backend::start()`.
-11. `api_server::start()` — opens the aioesphomeapi listener on port 6053.
-12. `api_server::stats::apply_tx_power_from_nvs()` — last; both radios
-    must be up before set-power calls succeed.
+6. *(WiFi)* `wifi_sta::start_and_wait_for_ip()`.
+7. *(WiFi)* `mdns_announce::start()`.
+8. *(WiFi)* `ota::start()` — creates the shared httpd.
+9. *(WiFi)* `api_server::stats::register_endpoints(ota::handle())` —
+   adds all dashboard URIs to the OTA httpd.
+10. *(WiFi)* `ble_backend::publish::install(...)`.
+11. `ble_backend::start()`.
+12. *(WiFi)* `api_server::start()` — aioesphomeapi listener on port 6053.
+13. `ble_httpd::start()` — gated on `CONFIG_NBP_BLE_HTTPD`. Registers the
+    GATT service after the NimBLE host is up, pausing the scanner across
+    `server->start()` to avoid `BLE_HS_EBUSY`.
+14. `api_server::stats::apply_tx_power_from_nvs()` — both radios must be
+    up before set-power calls succeed.
+15. `api_server::stats::apply_scan_from_nvs()` — last; `scanner::set_duty`
+    is a no-op before `scanner::init` runs.
 
 ## Concurrency
 
@@ -290,11 +415,20 @@ Owned by the SMP feature, not by this UI work. See
 
 | Component | Flash | BSS RAM |
 |---|---|---|
-| Dashboard skeleton (charts + controls + `/stats.json`) | ~4 KB | <100 B |
+| Embedded `web/index.html` (charts + tunables + controls JS) | ~21 KB | 0 |
+| `/stats.json` + `/level` + `/txpower` + `/cpufreq` + `/scan` + `/trace` + `/reboot` handlers | ~3 KB | <200 B |
 | `CONFIG_NBP_DEVICES_PANEL` | ~3 KB | ~12 KB |
 | `CONFIG_NBP_WEB_CONSOLE` | ~2 KB | 64 KB (or 8 KB without NimBLE DEBUG) |
-| `/trace` + `/reboot` + `/level` + `/txpower` + `/cpufreq` (always on) | ~2.5 KB | <200 B |
+| `CONFIG_NBP_BLE_HTTPD` (GATT service + dispatcher) | ~4 KB | ~4 KB |
 
 CDN payload (per page load, not on-device): uPlot ≈ 50 KB gzipped + ansi\_up
 ≈ 8 KB gzipped. Both cached aggressively by jsdelivr; no payload cost when
 the LAN client has them cached.
+
+Reference binary sizes on ESP32-S3 with the full WiFi build vs. the
+BLE-only `sdkconfig.defaults.bletest`:
+
+| Build | Size | Notes |
+|---|---|---|
+| WiFi (`CONFIG_NBP_WIFI=y`) | ~1.18 MB | WiFi stack + httpd + OTA + aioesphomeapi + embedded HTML |
+| BLE-only (`CONFIG_NBP_WIFI=n`, `CONFIG_NBP_BLE_HTTPD=y`) | ~0.62 MB | GATT dashboard transport only; HTTP handlers GC'd by the linker because `register_endpoints` is `#if CONFIG_NBP_WIFI` |
