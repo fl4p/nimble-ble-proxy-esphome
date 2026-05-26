@@ -12,7 +12,13 @@ void record_read();
 void record_write();
 void record_notify();
 
-// Registers `/` (HTML dashboard) and `/stats.json` on the given httpd.
+// Install the esp_log vprintf hook so device logs mirror into an
+// in-memory ring buffer. Call as early as possible in app_main so we
+// catch boot-time logs. The original vprintf (UART/JTAG) is still
+// invoked, so console output is preserved.
+void install_log_hook();
+
+// Registers `/`, `/stats.json`, and `/log` on the given httpd.
 void register_endpoints(httpd_handle_t srv);
 
 }  // namespace api_server::stats

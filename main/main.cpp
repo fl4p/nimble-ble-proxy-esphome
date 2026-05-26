@@ -19,6 +19,10 @@ constexpr const char *TAG = "main";
 }
 
 extern "C" void app_main() {
+  // First thing: tee esp_log into the in-memory ring so the web console
+  // captures NVS / WiFi / mDNS init lines too. UART output continues.
+  api_server::stats::install_log_hook();
+
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     ESP_ERROR_CHECK(nvs_flash_erase());
