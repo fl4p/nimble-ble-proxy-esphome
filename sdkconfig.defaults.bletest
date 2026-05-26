@@ -1,0 +1,8 @@
+# Overlay used only by the BLE-only smoke test build:
+#   idf.py -B build-bletest \
+#     -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.bletest" ...
+CONFIG_NBP_WIFI=n
+CONFIG_NBP_BLE_HTTPD=y
+# Clone hits the same gatts-mutable assert during upstream-connected
+# GATT registration. Out of scope for this smoke test; disable.
+CONFIG_NBP_CLONE=n
