@@ -4,8 +4,24 @@ CONFIG_BT_BLUEDROID_ENABLED=n
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
-CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
-CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+# Broadcaster role compiled in only to satisfy NimBLE-Cpp's
+# NimBLEServer.cpp: it unconditionally references m_advertiseOnDisconnect,
+# which is gated on BLE_ROLE_BROADCASTER && !BLE_EXT_ADV. We never call
+# ble_gap_adv_start, so the radio stays in central-only mode at runtime.
+# Peripheral role MUST be on even though we never advertise — NimBLE's
+# ATT opcode dispatch table guards BLE_ATT_OP_NOTIFY_REQ (0x1B) +
+# INDICATE_REQ behind `#if MYNEWT_VAL(BLE_GATTS)`. The "SVR" handler
+# is what processes notifications received *by the central from the
+# peripheral*. With peripheral=n, BT_NIMBLE_GATT_SERVER's kconfig is
+# hidden → MYNEWT_VAL_BLE_GATTS=0 → dispatch table strips the 0x1B
+# entry → incoming notify ACL packets are silently dropped at the
+# ATT layer, never reaching ble_gap_notify_rx_event or any listener.
+# (See ble_att.c:62-80, ble_att_svr.c:2972.)
+# Discovered 2026-05-26 by capturing raw ACL RX bytes — notify PDUs
+# arrived from fugu-fry but BLE_GAP_EVENT_NOTIFY_RX never fired.
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_GATT_SERVER=y
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=9
 # BLE controller activity slots must accommodate connections + scan/adv;
 # default is 6 on S3 which caps NimBLE's effective concurrency.
@@ -15,6 +31,29 @@ CONFIG_BT_NIMBLE_EXT_ADV=n
 CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=5120
 CONFIG_BT_NIMBLE_HOST_BASED_PRIVACY=n
 CONFIG_BT_NIMBLE_NVS_PERSIST=n
+# Disable BLE 5 PHY features in LL_FEATURE_REQ. With them on, BLE-4.x
+# peers (ANT BMS family) hit BLE_ERR_UNSUPP_REM_FEATURE during MTU
+# exchange — non-fatal but noisy. Tested in
+# scripts/ant-probe/proxy-trace-phy-debug.log: re-enabling did not
+# change notify behavior on ANT, just put the error back.
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
+CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_2M_PHY=n
+CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_CODED_PHY=n
+
+# Compile NimBLE-host + NimBLE-Cpp at DEBUG so /log streams raw HCI ACL
+# bytes during /trace captures. Runtime esp_log_level_set (/level)
+# silences other tags by default; bump via /level?nimble=4 to inspect.
+# Required for scripts/ant-probe/capture_proxy.py to produce a useful
+# trace — otherwise the bytes are compiled out.
+CONFIG_BT_NIMBLE_LOG_LEVEL_DEBUG=y
+CONFIG_NIMBLE_CPP_LOG_LEVEL_DEBUG=y
+
+# Experiment "host pinning + mbuf bump" reverted — see FINDINGS.md.
+# Setting BT_NIMBLE_PINNED_TO_CORE_1 + doubling MSYS pools caused ANT
+# BMS supervision timeout (0x208) mid-discovery. NimBLE host on CPU 1
+# competes with httpd + api_client tasks; controller stays on CPU 0
+# but the host-controller IPC across cores adds latency that the
+# ANT BMS doesn't tolerate.
 
 # Networking: enough sockets for HA control + lwip housekeeping.
 CONFIG_LWIP_MAX_SOCKETS=8
@@ -25,6 +64,13 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 
 # Logging: info level by default; bump to debug while bringing up.
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# But compile in DEBUG so runtime /level?nimble=4 can actually surface
+# NimBLE host's DEBUG output (raw HCI ACL byte dumps etc.). Without
+# this, LOG_LEVEL_MAX caps esp_log_level_set("NimBLE", DEBUG) at INFO
+# even though CONFIG_BT_NIMBLE_LOG_LEVEL_DEBUG=y compiled the LOGD
+# calls in. Symptom: capture_proxy.py runs produce ~3 KB log files
+# instead of ~110 KB; ACL RX bytes never visible.
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 # ANSI color escapes in log lines — rendered by the web console via
 # ansi_up. Harmless on a serial terminal that ignores escapes.
 CONFIG_LOG_COLORS=y

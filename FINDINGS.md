@@ -379,13 +379,403 @@ What was tested and how, in order:
    inactive partition, device rebooted into it, ping-ponging between
    ota_0 and ota_1.
 
+## Update 2026-05-26 (Session 3) — Direct A/B with esphome-ant-bms on the same chip
+
+Built `scripts/ant-probe/ant-probe.yaml` — an ESPHome firmware using
+syssi/esphome-ant-bms@main as an external component, baked with our
+8 MB partition table so it OTA-flashes cleanly into `ota_1` via the
+proxy's existing `/update` endpoint. Return path is a template button
+in the esphome YAML whose lambda calls
+`esp_ota_set_boot_partition(<ota_0>)` + `esp_restart()`. Proxy in
+ota_0 is never overwritten — round-trip is just two button presses
+worth of partition flips.
+
+**Result on the same chip, same WiFi+API load, same RF, same BMS:**
+
+| Firmware | Stack | Notify PDUs in 25 s | Status |
+|---|---|---|---|
+| nimble-ble-proxy | NimBLE-Arduino | **0** | ❌ |
+| syssi/esphome-ant-bms | Bluedroid | dozens, steady | ✅ |
+
+esphome's log shows the BMS pushing 20-byte notify PDUs with
+`7E.A1.11.…` status frames and cell voltages around `0x0D2C` (3.36 V
+per cell). That **eliminates** the most-cited hypotheses from earlier
+sessions:
+
+- ❌ Not WiFi+BT coexistence (esphome runs identical coex)
+- ❌ Not the BMS being stuck (it speaks fine from esphome ~30 s later)
+- ❌ Not RF (-60 dBm both sessions)
+- ❌ Not "the proxy abstraction alone" — ESPHome's Bluedroid
+  bluetooth_proxy was tested earlier in this matrix and *also* fails,
+  so the wedge is "stack + flow", not flow alone
+
+The variable that flips between ✅ and ❌ on identical hardware is:
+**NimBLE-Arduino + the proxy's discovery/CCCD/timing flow** vs
+**Bluedroid with targeted `register_for_notify`**.
+
+### Diagnostic infrastructure added this session
+
+- `/trace?on={0,1}` on the proxy — stops the radio scan + silences
+  scanner log tags + resets `/log` ring cursor, so a clean ATT-byte
+  trace fits in the 64 KiB ring during a single BMS bring-up.
+- `scripts/ant-probe/capture_proxy.py` — drives `/trace`, connects
+  via aioesphomeapi, walks
+  connect → get_services → start_notify → **write_descriptor(CCCD)**
+  → write device-info query → wait 25 s, then `/trace off`. Polls
+  `/log` to a file throughout.
+- `scripts/ant-probe/capture_esphome.py` — subscribes to esphome's
+  native API logs at `VERY_VERBOSE`.
+
+Captures + write-up live in `scripts/ant-probe/` (see
+`COMPARISON.md`).
+
+### Test-orchestration bug found while iterating
+
+`start_notify` on our proxy uses the `setNotifyCallback` shim from
+the earlier patches — it registers the callback but does **not**
+write the CCCD; the caller must send a separate
+`write_descriptor`. The first iteration of `capture_proxy.py`
+forgot that step, so the proxy session was running without CCCD
+enabled. After fixing — single ATT_WRITE_REQ on handle 17 with
+value `0x0001`, BMS ACKs with WRITE_RESP — **still 0 notifies**.
+The bug existed in the test harness, not the proxy.
+
+### Experiment: NimBLE fast conn params (7.5 ms / 10 s supervision)
+
+Hypothesis: matching ESPHome's `FAST_MIN/MAX_CONN_INTERVAL = 0x06` +
+`FAST_CONN_TIMEOUT = 1000` during the connect+discovery window would
+let the BMS start notifying. Wired
+`client->setConnectionParams(6, 6, 0, 1000)` into
+`connection.cpp::connect`. Verified on the HCI Create Connection
+bytes: `itvl_min=6 itvl_max=6 supervision_timeout=1000`.
+
+**Result: still 0 notifies.** Discovery time dropped (3.7 s → 2.1 s),
+time-to-first-query dropped (4.5 s → 3.0 s), but the BMS still
+sends only a L2CAP CPU request and zero notify PDUs over 25 s.
+
+Conn params during discovery are **not** the cause. The kept change
+is harmless — matches what bluetooth_proxy peers expect — and stays
+in.
+
+### Experiment: `chr->subscribe(true)` + suppress bleak-esphome's CCCD write_descriptor (single on-air CCCD, still 0 notifies)
+
+Iteration 2 of the subscribe-experiment. Code shipped:
+
+- `handle_notify` calls `chr->subscribe(true, &notify_cb, true)` —
+  CCCD written via NimBLE's gattc state machine, handle marked in
+  NimBLE's local subscription table.
+- A `(address, char_handle)` set tracks chars we subscribed to.
+- `handle_write_descriptor` looks up the target descriptor's UUID;
+  if it's CCCD (0x2902) and the parent char is in the set,
+  synthesize a `BluetoothGATTWriteResponse` without touching the
+  wire. Cleared on disconnect so a reconnect re-enables real CCCD
+  writes.
+
+Wire trace (`scripts/ant-probe/proxy-trace-suppressed.log`):
+
+```
+t=11250  ATT_WRITE_REQ handle=0x0011 value=0x0001  (single CCCD, subscribe(true))
+t=11410  api.bt: suppressed redundant CCCD write_descriptor
+t=11440  ATT_WRITE_CMD handle=0x0010 …             device-info query
+t=14490  L2CAP CPU from BMS → accepted
+t=37460  terminate connection (HA-side, end of 25 s wait)
+```
+
+Connection stayed up the full 25 s window (no supervision timeout —
+confirms single-CCCD-write removes the regression from iteration 1).
+**Notify_rx still 0.** ACL RX events post-write: 4 — CCCD WRITE_RESP,
+L2CAP CPU req, L2CAP CPU resp, HCI subevent. **No notify ACL.**
+
+So **the BMS still does not transmit notifies to NimBLE-Arduino even
+with a single, gattc-layer-registered CCCD write that byte-matches
+what aioble (working) does.**
+
+This rules out ATT byte sequence and CCCD-write-count as the cause.
+The shipped change (`subscribe(true)` + suppression in
+`handle_write_descriptor`) is kept because:
+- It's strictly closer to aioble's working flow
+- It removes the iteration-1 supervision-timeout regression
+- It's a correctness improvement for any peripheral that's
+  sensitive to double-CCCD-writes
+
+Hypothesis: `setNotifyCallback` only registers the dispatch callback
+in NimBLE-Arduino's wrapper; `subscribe(true)` writes the CCCD
+*through NimBLE's gattc state machine* — the same path Bluedroid's
+`register_for_notify` takes. Maybe the BMS only emits notifies when
+the central's GATT layer has flagged the handle as "subscribed"
+internally, not just because CCCD=0x0001 lives on the peer.
+
+**Result: regressed — the link dies.** Wire sequence captured in
+`scripts/ant-probe/proxy-trace-subscribe.log`:
+
+```
+t=13581  att_handle=17 len=2   first CCCD write (subscribe(true))
+t=13771  att_handle=17 len=2   second CCCD write (bleak-esphome's write_descriptor)
+t=14091  att_handle=16 len=10  device-info query (WRITE_CMD)
+t=16851  L2CAP CPU request → NimBLE accepts (15–25 ms, 6 s sv-tmo)
+t=23011  onDisconnect reason=0x208  HCI supervision timeout (8.9 s)
+```
+
+After the **second CCCD write 190 ms after the first**, the BMS goes
+radio-silent — no notifies, no LL ACKs, no empty PDUs — for 6 s
+straight, which blows the post-CPU 6000 ms supervision window and
+the controller drops the connection.
+
+So the BMS *actively dislikes* the double CCCD write. Reverted to
+`setNotifyCallback`. Aligns with FINDINGS § "Things tried" entry
+"Duplicate CCCD write…" — the workaround was already in place, this
+experiment just re-confirmed it's load-bearing.
+
+The followup probe that comes out of this: **bleak-esphome sends the
+CCCD write separately because that's how a generic BLE proxy
+works**. Our only options for "single CCCD write driven inside
+NimBLE's gattc layer" require *intercepting* bleak-esphome's
+`write_descriptor` request when it targets a CCCD we already
+subscribed locally. Coupling those two requests is doable in
+`bt_handlers::handle_write_descriptor` (detect CCCD descriptors,
+no-op the write if `subscribe(true)` already enabled it), but it's
+fragile — easy to break for peripherals that need the explicit
+CCCD-write path.
+
+### Experiment: re-enable BLE-5 PHY features (2M + Coded) in LL_FEATURE_REQ
+
+Hypothesis: Bluedroid advertises 2M + Coded PHY support in
+LL_FEATURE_REQ; we'd disabled both to silence a benign
+`BLE_ERR_UNSUPP_REM_FEATURE` HCI error on MTU exchange. Maybe the
+BMS gates notify-emission on something it sees in our feature set.
+
+Set in `sdkconfig.defaults`:
+
+```
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
+CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_2M_PHY=y
+CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_CODED_PHY=y
+```
+
+Capture: `scripts/ant-probe/proxy-trace-phy.log` (plus
+`proxy-trace-phy-debug.log` after restoring DEBUG runtime level).
+
+**Result:**
+- `BLE_ERR_UNSUPP_REM_FEATURE` returns on MTU exchange — BMS is
+  BLE-4.x and rejects the broader feature set, as expected.
+- mtu=136 still negotiates, connect+discovery still succeeds.
+- **0 notify_rx in 25 s.** No effect on the failure mode.
+
+Reverted: PHY flags back to `n` to keep MTU exchange clean.
+
+### sdkconfig hygiene fix (this session)
+
+Two compile-time settings that *had* been set interactively via
+`idf.py menuconfig` got silently lost when `sdkconfig` was
+regenerated for the PHY experiment:
+
+```
+CONFIG_BT_NIMBLE_LOG_LEVEL_DEBUG=y
+CONFIG_NIMBLE_CPP_LOG_LEVEL_DEBUG=y
+```
+
+Symptom was `final_seq=3383` from a 25 s capture (vs 110 KB
+previously). At INFO level, NimBLE-host's per-byte HCI debug
+`ESP_LOGD` calls are *compiled out*, so runtime `/level?nimble=4`
+has nothing to surface — `/log` collected only the high-level
+state-machine lines.
+
+Both flags are now pinned in `sdkconfig.defaults` so they survive
+any future `idf.py reconfigure`. Compile size: ~5 KB extra over
+INFO; runtime cost: zero unless `/level?nimble=4` is active.
+
+### Experiment: notify-probe against fugu-fry (NUS peripheral, different vendor)
+
+Until this session every "0 notify_rx" result came from the ANT
+BMS. To check whether the proxy's notify-RX path works on
+*anything*, ran `scripts/ant-probe/capture_notify_probe.py` against
+fugu-fry at `70:04:1D:A6:AB:32` — Nordic UART Service, Apple
+manufacturer ID, completely different device:
+
+```
+connect → mtu=247 → full discovery (GAP+GATT+NUS) → single CCCD
+write on FFE3 RX-char @h17 → Write complete; status=0 → 20 s silence
+```
+
+`notify_rx = 0` here too. Inconclusive in isolation: NUS RX-char is
+the read-direction, peripherals only notify on it when triggered by
+a write to the TX char. But it does mean: no run of the proxy has
+ever surfaced a notify-RX event from any peripheral, **on any
+peripheral, ever**. The "works for everything except ANT" line in
+the v1 bring-up notes is misleading — connect + discovery have been
+verified, notify reception has not.
+
+Capture: `scripts/ant-probe/fugu-fry-trace.log`.
+
+### Experiment: NimBLE host task pinned to CPU 1 + doubled MSYS pools (FAILED, ACTIVELY HARMFUL)
+
+Hypothesis: WiFi traffic on CPU 0 preempts NimBLE host dispatch long
+enough to drop notify ACL packets at `os_mbuf_alloc`. Moving host to
+CPU 1 + giving it more mbufs (24×256 + 48×320 ≈ 21 KB total) would
+relieve that.
+
+Set in `sdkconfig.defaults`:
+
+```
+CONFIG_BT_NIMBLE_PINNED_TO_CORE_1=y
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24
+CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=48
+```
+
+**Result: regressed ANT.** Connection completes, GATT discovery
+*starts*, then drops with HCI reason 0x208 (supervision timeout)
+before the `BluetoothGATTGetServicesResponse` reaches HA. Symptom on
+the aioesphomeapi side: `BluetoothConnectionDroppedError`.
+fugu-fry still 0 notify_rx.
+
+Theory: NimBLE host on CPU 1 competes with `httpd`, `api_client`,
+`ble_adv_flush`, and the FreeRTOS app task. Controller stays on
+CPU 0. The host↔controller IPC across cores adds latency the BMS's
+2.5 s initial supervision window doesn't tolerate during discovery.
+
+Reverted in `sdkconfig.defaults`. Captures:
+`scripts/ant-probe/proxy-trace-pinned.log`,
+`fugu-fry-pinned.log`.
+
+### ✅ ROOT CAUSE FOUND + FIXED (2026-05-26)
+
+**`BT_NIMBLE_ROLE_PERIPHERAL=n` silently disables NimBLE's
+ATT-layer `BLE_ATT_OP_NOTIFY_REQ` (opcode 0x1B) dispatch handler.
+Incoming notifications were being dropped at the ATT layer before
+`ble_gap_notify_rx_event` could ever fire.**
+
+The hunt that found it: capture_notify_probe.py against fugu-fry
+(NUS, MAC `70:04:1D:A6:AB:32`) consistently produced `notify_rx=0`,
+matching ANT. Direct bleak Mac→fugu-flat (same firmware family,
+different device) returned 5 notifies in 8 s with the exact
+"> uptime\r\n..." reply we'd been trying to elicit through the
+proxy. So peers were genuinely transmitting notifies; the proxy
+was silently dropping them somewhere between controller and host.
+
+A DEBUG-level proxy log (with `CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y`
+finally pinned in defaults so `/level?nimble=4` actually surfaces
+the bytes) showed `ble_hs_hci_evt_acl_process()` firing with
+**ACL RX packets containing the exact ATT notification payload**:
+
+```
+ACL RX pb=2 len=251 data:
+  f7 00   ← L2CAP length 247
+  04 00   ← L2CAP CID 4 (ATT)
+  1b      ← ATT opcode = HANDLE_VALUE_NOTIFICATION (0x1B)
+  10 00   ← attr handle 16 (FFE1 / NUS RX)
+  3e 20 75 70 74 69 6d 65 0d 0a 49 …  ← "> uptime\r\nI…"
+```
+
+So the notify ACL was reaching the host. Yet our
+`BLE_GAP_EVENT_NOTIFY_RX` listener (registered via
+`ble_gap_event_listener_register`) never fired. That ruled out
+"controller dropping" and pointed at host-side ATT dispatch.
+
+`components/bt/host/nimble/nimble/nimble/host/src/ble_att.c:45-81`:
+
+```c
+static const struct ble_att_rx_dispatch_entry ble_att_rx_dispatch[] = {
+#if MYNEWT_VAL(BLE_GATTC)
+    { BLE_ATT_OP_ERROR_RSP,            ble_att_clt_rx_error },
+    { BLE_ATT_OP_WRITE_RSP,            ble_att_clt_rx_write },
+    { BLE_ATT_OP_INDICATE_RSP,         ble_att_clt_rx_indicate },
+    ...
+#endif
+#if MYNEWT_VAL(BLE_GATTS)
+    ...
+    { BLE_ATT_OP_NOTIFY_REQ,           ble_att_svr_rx_notify },   ← here
+    { BLE_ATT_OP_INDICATE_REQ,         ble_att_svr_rx_indicate },
+    ...
+#endif
+};
+```
+
+NimBLE puts the `NOTIFY_REQ` (opcode 0x1B) dispatch handler under
+**`#if MYNEWT_VAL(BLE_GATTS)`** — the GATT-*server* block — despite
+the fact that opcode 0x1B is what the peer-side server sends *to the
+central client*. The function it dispatches to (`ble_att_svr_rx_notify`)
+has a misleading "svr" prefix; it is the central's-eyes
+notify-receive path.
+
+Our kconfig had `BT_NIMBLE_ROLE_PERIPHERAL=n` (central-only proxy →
+no need to advertise). `BT_NIMBLE_GATT_SERVER`'s Kconfig
+`depends on BT_NIMBLE_ROLE_PERIPHERAL`, so the option was hidden →
+defaulted off → `MYNEWT_VAL_BLE_GATTS=0` → the dispatch entry was
+compiled out → every notification we ever received in the entire
+investigation was silently discarded at
+`ble_att_rx_dispatch_lookup()`.
+
+**Fix:**
+
+```
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_GATT_SERVER=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y  # for NimBLE-Cpp to compile
+```
+
+We never call `ble_gap_adv_start`, so the radio still operates as
+central-only at runtime. Only the ATT dispatch table is affected.
+
+Verified after rebuild + OTA:
+
+- **fugu-fry** (NUS) → 6 notifies in 6 s, including the
+  `"> uptime\r\n..."` response and 5 telemetry frames. Decoded
+  voltages, currents, MPPT state all match.
+- **ANT BMS** (`20:A1:11:02:23:45`) → 3 notifies, payload
+  `7e a1 12 6c 02 20 30 50 48 42 30 54 42 31 32 30 41 …` —
+  byte-for-byte identical to the working aioble-micropython
+  capture documented in this file. Device-info reply with model
+  `"0PHB0TB120A"` and firmware version `"20PHUB00-211026A"`.
+
+`notify_rx_total` counter no longer reads 0. NimBLE-Arduino's
+per-char `setNotifyCallback` dispatches correctly. The proxy is
+finally end-to-end functional.
+
+### Lessons + future-proofing
+
+- The misleading `svr` prefix on `ble_att_svr_rx_notify` cost
+  multiple sessions of debugging. Don't trust function names —
+  trace from on-wire bytes upward.
+- The single most important debugging change was pinning
+  `CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y` in `sdkconfig.defaults`.
+  Without it, runtime `esp_log_level_set("NimBLE", DEBUG)` is
+  silently clipped at INFO. The earlier captures that "lost" the
+  raw HCI byte dumps after a `sdkconfig` regenerate were doing
+  exactly that. The DEBUG log of the ACL RX bytes is what finally
+  proved notifies reached the host.
+- All the *experimental* knobs probed during the hunt
+  (fast conn params via `setConnectionParams(6, 6, 0, 1000)` in
+  `connection.cpp`, `chr->subscribe(true)` + CCCD-write_descriptor
+  suppression in `bt_handlers.cpp`, NimBLE host pinning + mbuf
+  bumps, BLE-5 PHY toggling) turned out to be unnecessary once
+  the GATTS dispatch was enabled, and were reverted before the
+  commit. Only the three `sdkconfig.defaults` flags + the log-level
+  compile-time settings + the `/trace` diagnostic harness stayed.
+- Future audit: if any future kconfig change touches
+  `BT_NIMBLE_ROLE_PERIPHERAL` or `BT_NIMBLE_GATT_SERVER`,
+  re-verify notify-RX with `capture_notify_probe.py`.
+
+### What's still untested (lower priority now)
+
+1. **Air sniffer (nRF52840).** Still the cleanest answer — directly
+   shows whether the BMS transmits notify PDUs at all during a
+   failing NimBLE session. The subscribe(true) experiment also
+   showed the BMS *can* unilaterally go silent for 6 s+ on this
+   stack, which means "0 notify ACL" really might mean "0
+   transmitted by peer."
+2. **Trigger fugu-fry's TX path with a known-good payload.** If
+   we can get *any* notify_rx from *any* peripheral, the proxy's
+   notify-RX path is verified and ANT can be cleanly attributed
+   to a peer-side issue. Without a verified working notify
+   reception, we cannot rule out a general proxy bug.
+
 ## Known limitations / unfinished
 
-- **Successful GATT connect / discovery never tested end-to-end.** All
-  the code paths exist but the only candidate peripheral (ANT-BLE20PHUB
-  at MAC `20:A1:11:02:23:45`) is at -88 dBm via another proxy and
-  invisible to us. Move the proxy closer or pick a peripheral in range
-  to validate.
+- **Successful GATT connect / discovery tested end-to-end.** The
+  ANT BMS at `20:A1:11:02:23:45` connects + discovers fine through
+  the proxy; only the data path (notify PDUs from BMS → controller)
+  is broken. Other peripherals tested (smoke peripherals from the
+  earlier session) work end-to-end.
 - **No real GATT service cache.** REMOTE_CACHING is advertised but every
   connect runs a fresh `discoverAttributes()`. HA never checks; works
   in practice but slower than ESPHome's actual caching proxies.

@@ -1,0 +1,126 @@
+substitutions:
+  device_name: ant-probe
+  bms_mac: 20:A1:11:02:23:45
+
+esphome:
+  name: ${device_name}
+  friendly_name: ANT probe
+  platformio_options:
+    board_build.partitions: partitions.csv
+  includes:
+    - boot_switch.h
+  on_boot:
+    priority: 600
+    then:
+      - logger.log: "ant-probe boot: Bluedroid ble_client targeting ${bms_mac}"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESPTOOLPY_FLASHSIZE_8MB: "y"
+      CONFIG_PARTITION_TABLE_CUSTOM: "y"
+      CONFIG_PARTITION_TABLE_CUSTOM_FILENAME: '"partitions.csv"'
+      # Bluedroid + BLE central; matches what syssi/esphome-ant-bms expects.
+      CONFIG_BT_BLUEDROID_ENABLED: "y"
+      CONFIG_BT_NIMBLE_ENABLED: "n"
+
+external_components:
+  - source: github://syssi/esphome-ant-bms@main
+    refresh: 0s
+    components: [ant_bms_ble]
+
+wifi:
+  ssid: REDACTED
+  password: REDACTED
+  ap:
+    ssid: "ant-probe-fallback"
+
+logger:
+  level: VERY_VERBOSE
+  baud_rate: 115200
+  logs:
+    ant_bms_ble: VERY_VERBOSE
+    esp32_ble_tracker: VERY_VERBOSE
+    esp32_ble_client: VERY_VERBOSE
+    bluetooth_proxy: NONE
+
+api:
+
+# web_server lets us press the "Boot proxy" button from a browser without
+# needing HA paired. /update endpoint exposed by web_server uses ESPHome's
+# native OTA path — we DO NOT want to use that, since it would overwrite
+# the proxy in ota_0. Set ota disabled and rely on the manual button.
+web_server:
+  port: 80
+  ota: false
+
+# Standalone esp32_ble_tracker — needed by ble_client. Default scan
+# parameters; verbose log will show all adv callbacks anyway.
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: false
+
+ble_client:
+  - id: ant_bms_client
+    mac_address: ${bms_mac}
+
+ant_bms_ble:
+  - id: ant_bms0
+    ble_client_id: ant_bms_client
+    update_interval: 5s
+
+# A couple of sensors to confirm end-to-end frame decoding works.
+# Full sensor coverage isn't needed for the comparison.
+sensor:
+  - platform: ant_bms_ble
+    ant_bms_ble_id: ant_bms0
+    soc:
+      name: SoC
+    total_voltage:
+      name: Total voltage
+    current:
+      name: Current
+    min_cell_voltage:
+      name: Min cell voltage
+    max_cell_voltage:
+      name: Max cell voltage
+
+binary_sensor:
+  - platform: ant_bms_ble
+    ant_bms_ble_id: ant_bms0
+    online_status:
+      name: Online
+
+# Manual escape hatch: pressing this in the esphome web UI swaps the
+# bootloader to ota_0 (where the proxy lives) and resets. The proxy
+# firmware is untouched throughout — this is just a boot-partition swap.
+button:
+  - platform: template
+    name: "Boot proxy (ota_0)"
+    id: boot_proxy_btn
+    on_press:
+      - lambda: |-
+          const esp_partition_t *p = esp_partition_find_first(
+              ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+          if (!p) {
+            ESP_LOGE("boot", "ota_0 partition not found!");
+            return;
+          }
+          ESP_LOGI("boot", "switching boot to ota_0 (%s @ 0x%x)",
+                   p->label, (unsigned)p->address);
+          esp_err_t err = esp_ota_set_boot_partition(p);
+          if (err != ESP_OK) {
+            ESP_LOGE("boot", "esp_ota_set_boot_partition: %s",
+                     esp_err_to_name(err));
+            return;
+          }
+      - delay: 200ms
+      - lambda: 'esp_restart();'
+
+  - platform: restart
+    name: "Restart"

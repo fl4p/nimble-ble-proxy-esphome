@@ -422,9 +422,9 @@ bool handle_notify(const uint8_t *payload, size_t payload_len) {
   // Register the notify callback but DON'T write the CCCD here —
   // bleak-esphome's bluetooth_gatt_start_notify is immediately followed
   // by an explicit bluetooth_gatt_write_descriptor that writes the same
-  // CCCD value. Writing it twice (200 ms apart) appears to confuse some
-  // BMS firmware (ANT-BLE20PHUB observed) into never sending notifies.
-  // BlueZ writes the CCCD exactly once and ANT notifies fine.
+  // CCCD value. Writing it twice (200 ms apart) breaks ANT-BLE20PHUB:
+  // the BMS goes radio-silent after the second CCCD write and our
+  // controller supervision-times-out ~6 s later (reason 0x208).
   chr->setNotifyCallback(req.enable ? &notify_cb : nullptr);
   bool ok = true;
   if (!ok) {

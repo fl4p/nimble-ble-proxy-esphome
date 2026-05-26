@@ -173,19 +173,30 @@ constexpr const char *NVS_LEVEL_KEY = "nimble_lvl";
 constexpr esp_log_level_t DEFAULT_NIMBLE_LEVEL = ESP_LOG_WARN;
 
 // Every NimBLE-Cpp log tag we've observed. Adding more is harmless;
-// esp_log_level_set just stores the mapping.
-constexpr const char *NIMBLE_TAGS[] = {
-    "NimBLE", "NimBLEScan", "NimBLEDevice", "NimBLEClient",
-    "NimBLEAdvertisedDevice", "NimBLERemoteCharacteristic",
+// esp_log_level_set just stores the mapping. Split into "scan" and
+// "core" so /trace can silence scanner noise while keeping host/client
+// debug output flowing to the log ring.
+constexpr const char *NIMBLE_SCAN_TAGS[] = {
+    "NimBLEScan", "NimBLEAdvertisedDevice",
+};
+constexpr const char *NIMBLE_CORE_TAGS[] = {
+    "NimBLE", "NimBLEDevice", "NimBLEClient",
+    "NimBLERemoteCharacteristic",
 };
 
 esp_log_level_t g_current_nimble_level = DEFAULT_NIMBLE_LEVEL;
 
 void apply_level(esp_log_level_t lvl) {
-  for (const char *tag : NIMBLE_TAGS) {
-    esp_log_level_set(tag, lvl);
-  }
+  for (const char *tag : NIMBLE_CORE_TAGS) esp_log_level_set(tag, lvl);
+  for (const char *tag : NIMBLE_SCAN_TAGS) esp_log_level_set(tag, lvl);
   g_current_nimble_level = lvl;
+}
+
+void log_ring_reset() {
+  if (g_log_mutex == nullptr) return;
+  xSemaphoreTake(g_log_mutex, portMAX_DELAY);
+  g_log_seq = 0;
+  xSemaphoreGive(g_log_mutex);
 }
 
 esp_err_t nvs_read_level(esp_log_level_t *out) {
@@ -248,6 +259,36 @@ esp_err_t level_post(httpd_req_t *req) {
            static_cast<int>(lvl));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+
+// Diagnostic capture mode. /trace?on=1 silences scanner noise and
+// pauses scanning so the 64 KiB log ring isn't flooded with "New
+// advertiser" lines during a BMS bring-up, then resets log_seq so the
+// next `/log?since=0` returns a clean trace starting after `on=1`.
+// /trace?on=0 restores the persisted NimBLE level and resumes scanning.
+esp_err_t trace_post(httpd_req_t *req) {
+  char query[32];
+  char val[8];
+  bool on = true;
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+      httpd_query_key_value(query, "on", val, sizeof(val)) == ESP_OK) {
+    on = (std::atoi(val) != 0);
+  }
+  if (on) {
+    for (const char *tag : NIMBLE_SCAN_TAGS) esp_log_level_set(tag, ESP_LOG_ERROR);
+    for (const char *tag : NIMBLE_CORE_TAGS) esp_log_level_set(tag, ESP_LOG_DEBUG);
+    ble_backend::scanner::pause();
+    log_ring_reset();
+    ESP_LOGI(TAG, "trace ON: scan paused, core=DEBUG, scan-tags=ERROR");
+  } else {
+    apply_level(g_current_nimble_level);
+    ble_backend::scanner::resume();
+    ESP_LOGI(TAG, "trace OFF: scan resumed, levels restored to %d",
+             static_cast<int>(g_current_nimble_level));
+  }
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, on ? "{\"trace\":true}" : "{\"trace\":false}",
+                         HTTPD_RESP_USE_STRLEN);
 }
 
 esp_err_t reboot_post(httpd_req_t *req) {
@@ -458,12 +499,17 @@ void register_endpoints(httpd_handle_t srv) {
                         .method = HTTP_POST,
                         .handler = &reboot_post,
                         .user_ctx = nullptr};
+  httpd_uri_t trace = {.uri = "/trace",
+                       .method = HTTP_POST,
+                       .handler = &trace_post,
+                       .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &root);
   httpd_register_uri_handler(srv, &stats);
   httpd_register_uri_handler(srv, &log);
   httpd_register_uri_handler(srv, &level_g);
   httpd_register_uri_handler(srv, &level_p);
   httpd_register_uri_handler(srv, &reboot);
+  httpd_register_uri_handler(srv, &trace);
   ESP_LOGI(TAG, "stats UI at /");
 }
 

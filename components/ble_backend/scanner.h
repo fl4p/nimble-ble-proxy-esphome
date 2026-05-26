@@ -23,6 +23,11 @@ void start();
 // procedure ends so the scanner doesn't stay dead between connects.
 void resume();
 
+// Stop scanning entirely (for diagnostic traces). Adv callbacks stop
+// firing and `onConnect`/`onDisconnect` will not auto-resume. Pair
+// with resume() to come back online.
+void pause();
+
 // Toggle whether each adv callback is queued for forwarding to HA.
 // When off, ads are dropped on the floor.
 void start_forwarding();

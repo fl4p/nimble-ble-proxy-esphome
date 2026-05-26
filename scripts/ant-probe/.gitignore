@@ -1,0 +1,13 @@
+# Build artifacts from `esphome compile ant-probe.yaml`
+/.esphome/
+/secrets.yaml
+
+# Python venv for capture scripts
+/venv/
+
+# Captured /log + esphome-logs sessions — derived artifacts, easy to
+# regenerate via capture_proxy.py / capture_notify_probe.py / capture_esphome.py
+*.log
+
+# sed -i.bak leftover
+*.bak

@@ -189,6 +189,13 @@ void resume() {
   ESP_LOGI(TAG, "scan resumed");
 }
 
+void pause() {
+  if (!g_scan) return;
+  if (!g_scan->isScanning()) return;
+  g_scan->stop();
+  ESP_LOGI(TAG, "scan paused (trace)");
+}
+
 void start_forwarding() {
   g_forwarding.store(true, std::memory_order_release);
   ESP_LOGI(TAG, "forwarding ON");

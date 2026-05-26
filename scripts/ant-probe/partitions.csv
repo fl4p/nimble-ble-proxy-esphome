@@ -1,0 +1,10 @@
+# Name,   Type, SubType, Offset,   Size,     Flags
+# Dual-OTA layout on 8 MB flash. otadata picks the active slot; bootloader
+# falls back to ota_0 when otadata is uninitialised (first boot after
+# serial flash). No factory partition — re-flash via serial if both
+# slots are bricked.
+nvs,      data, nvs,     0x9000,   0x6000,
+otadata,  data, ota,     0xf000,   0x2000,
+phy_init, data, phy,     0x11000,  0x1000,
+ota_0,    app,  ota_0,   0x20000,  0x300000,
+ota_1,    app,  ota_1,   0x320000, 0x300000,
