@@ -1,6 +1,7 @@
 #include "stats.h"
 
 #include "esp_log.h"
+#include "scanner.h"
 
 #include <atomic>
 #include <cstdint>
@@ -17,13 +18,14 @@ std::atomic<uint32_t> g_writes{0};
 std::atomic<uint32_t> g_notifies{0};
 
 esp_err_t stats_get(httpd_req_t *req) {
-  char buf[96];
+  char buf[128];
   int n = std::snprintf(
       buf, sizeof(buf),
-      "{\"reads\":%lu,\"writes\":%lu,\"notifies\":%lu}",
+      "{\"reads\":%lu,\"writes\":%lu,\"notifies\":%lu,\"adverts\":%lu}",
       static_cast<unsigned long>(g_reads.load(std::memory_order_relaxed)),
       static_cast<unsigned long>(g_writes.load(std::memory_order_relaxed)),
-      static_cast<unsigned long>(g_notifies.load(std::memory_order_relaxed)));
+      static_cast<unsigned long>(g_notifies.load(std::memory_order_relaxed)),
+      static_cast<unsigned long>(ble_backend::scanner::adv_count()));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
 }
@@ -44,15 +46,16 @@ esp_err_t root_get(httpd_req_t *req) {
       "footer{margin-top:1em;color:#888;font-size:.85em}"
       "code{color:#bbb}"
       "</style></head><body>"
-      "<h1>nimble-ble-proxy &mdash; GATT transactions/s</h1>"
+      "<h1>nimble-ble-proxy &mdash; BLE activity/s</h1>"
       "<div id=chart></div>"
       "<footer>OTA: <code>curl --data-binary @firmware.bin "
       "http://&lt;host&gt;/update</code></footer>"
       "<script src=\"https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/"
       "uPlot.iife.min.js\"></script>"
       "<script>"
-      "const N=120,t=[],r=[],w=[],n=[];"
-      "for(let i=0;i<N;i++){t.push(i-N+1);r.push(null);w.push(null);n.push(null);}"
+      "const N=120,t=[],r=[],w=[],n=[],a=[];"
+      "for(let i=0;i<N;i++){t.push(i-N+1);"
+      "r.push(null);w.push(null);n.push(null);a.push(null);}"
       "const u=new uPlot({width:900,height:320,"
       "scales:{x:{time:false},y:{}},"
       "axes:[{stroke:'#aaa',grid:{stroke:'#333'}},"
@@ -60,18 +63,20 @@ esp_err_t root_get(httpd_req_t *req) {
       "series:[{label:'t (s ago)'},"
       "{label:'reads/s',stroke:'#4ade80',width:2},"
       "{label:'writes/s',stroke:'#60a5fa',width:2},"
-      "{label:'notifies/s',stroke:'#f472b6',width:2}]},"
-      "[t,r,w,n],document.getElementById('chart'));"
+      "{label:'notifies/s',stroke:'#f472b6',width:2},"
+      "{label:'adverts/s',stroke:'#fbbf24',width:2}]},"
+      "[t,r,w,n,a],document.getElementById('chart'));"
       "let prev=null,prevT=null;"
       "async function tick(){"
       "try{const now=performance.now()/1000;"
       "const s=await(await fetch('/stats.json')).json();"
       "if(prev){const dt=now-prevT;"
-      "r.shift();w.shift();n.shift();"
+      "r.shift();w.shift();n.shift();a.shift();"
       "r.push((s.reads-prev.reads)/dt);"
       "w.push((s.writes-prev.writes)/dt);"
       "n.push((s.notifies-prev.notifies)/dt);"
-      "u.setData([t,r,w,n]);}"
+      "a.push((s.adverts-prev.adverts)/dt);"
+      "u.setData([t,r,w,n,a]);}"
       "prev=s;prevT=now;}catch(e){}}"
       "setInterval(tick,1000);tick();"
       "</script></body></html>";

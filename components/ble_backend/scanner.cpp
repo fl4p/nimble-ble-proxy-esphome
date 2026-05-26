@@ -33,6 +33,7 @@ struct Batch {
 };
 
 std::atomic<bool> g_forwarding{false};
+std::atomic<uint32_t> g_adv_count{0};
 NimBLEScan *g_scan = nullptr;
 
 SemaphoreHandle_t g_mutex = nullptr;
@@ -96,6 +97,7 @@ void flush_task(void *) {
 class AdvCallbacks : public NimBLEScanCallbacks {
  public:
   void onResult(const NimBLEAdvertisedDevice *dev) override {
+    g_adv_count.fetch_add(1, std::memory_order_relaxed);
     if (!g_forwarding.load(std::memory_order_acquire)) return;
     if (!publish::has_client()) return;
 
@@ -169,6 +171,10 @@ void stop_forwarding() {
   g_pending.count = 0;
   xSemaphoreGive(g_mutex);
   ESP_LOGI(TAG, "forwarding OFF");
+}
+
+uint32_t adv_count() {
+  return g_adv_count.load(std::memory_order_relaxed);
 }
 
 }  // namespace ble_backend::scanner

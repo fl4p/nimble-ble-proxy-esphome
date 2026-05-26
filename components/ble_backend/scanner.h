@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 namespace ble_backend::scanner {
 
 // One-time NimBLE scan object setup and flush-task spawn. Call before start().
@@ -20,5 +22,10 @@ void start();
 // When off, ads are dropped on the floor.
 void start_forwarding();
 void stop_forwarding();
+
+// Cumulative count of advertisements seen by the radio since boot.
+// Bumped from the NimBLE host task in every onResult, before any
+// forwarding/subscription gating.
+uint32_t adv_count();
 
 }  // namespace ble_backend::scanner
