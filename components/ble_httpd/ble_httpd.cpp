@@ -87,6 +87,16 @@ bool find_query_u32(const char *query, const char *key, uint32_t *out) {
   return false;
 }
 
+// Render either {"ok":true} or {"error":"<msg>"} into `out`. `err` is
+// the return value from a handle_*_set helper (nullptr on success).
+size_t render_ok_or_error(char *out, size_t cap, const char *err) {
+  if (err == nullptr) {
+    return static_cast<size_t>(std::snprintf(out, cap, "{\"ok\":true}"));
+  }
+  return static_cast<size_t>(
+      std::snprintf(out, cap, "{\"error\":\"%s\"}", err));
+}
+
 size_t dispatch(const char *method, char *path, char *out, size_t cap) {
   // Split off query string at '?'. Leaves path with NUL where '?' was;
   // path is the caller's mutable scratch buffer, so this is fine.
@@ -94,13 +104,15 @@ size_t dispatch(const char *method, char *path, char *out, size_t cap) {
   const char *query = "";
   if (qmark) { *qmark = '\0'; query = qmark + 1; }
 
-  if (std::strcmp(method, "GET") == 0 &&
-      std::strcmp(path, "/stats.json") == 0) {
+  const bool is_get = std::strcmp(method, "GET") == 0;
+  const bool is_post = std::strcmp(method, "POST") == 0;
+
+  if (is_get && std::strcmp(path, "/stats.json") == 0) {
     return api_server::stats::build_stats_json(out, cap);
   }
 
 #if CONFIG_NBP_WEB_CONSOLE
-  if (std::strcmp(method, "GET") == 0 && std::strcmp(path, "/log") == 0) {
+  if (is_get && std::strcmp(path, "/log") == 0) {
     // Response payload: "<next_since>\n<log bytes>".
     // Fixed-width 10-digit decimal + newline = 11-byte header so we can
     // reserve space and back-fill without shifting the log content.
@@ -120,6 +132,57 @@ size_t dispatch(const char *method, char *path, char *out, size_t cap) {
     return PREFIX + n;
   }
 #endif
+
+  if (is_get && std::strcmp(path, "/level") == 0) {
+    return api_server::stats::build_level_json(out, cap);
+  }
+  if (is_post && std::strcmp(path, "/level") == 0) {
+    return render_ok_or_error(out, cap,
+                              api_server::stats::handle_level_set(query));
+  }
+
+  if (is_get && std::strcmp(path, "/txpower") == 0) {
+    return api_server::stats::build_txpower_json(out, cap);
+  }
+  if (is_post && std::strcmp(path, "/txpower") == 0) {
+    return render_ok_or_error(out, cap,
+                              api_server::stats::handle_txpower_set(query));
+  }
+
+  if (is_get && std::strcmp(path, "/cpufreq") == 0) {
+    return api_server::stats::build_cpufreq_json(out, cap);
+  }
+  if (is_post && std::strcmp(path, "/cpufreq") == 0) {
+    return render_ok_or_error(out, cap,
+                              api_server::stats::handle_cpufreq_set(query));
+  }
+
+#ifdef CONFIG_NBP_SMP
+  if (is_get && std::strcmp(path, "/passkey") == 0) {
+    return api_server::stats::build_passkey_json(out, cap);
+  }
+  if (is_post && std::strcmp(path, "/passkey") == 0) {
+    return render_ok_or_error(out, cap,
+                              api_server::stats::handle_passkey_set(query));
+  }
+#endif
+
+#if CONFIG_NBP_DEVICES_PANEL
+  if (is_get && std::strcmp(path, "/devices") == 0) {
+    return api_server::stats::build_devices_json(out, cap);
+  }
+#endif
+
+  if (is_post && std::strcmp(path, "/trace") == 0) {
+    bool on = api_server::stats::handle_trace_set(query);
+    return static_cast<size_t>(std::snprintf(
+        out, cap, on ? "{\"trace\":true}" : "{\"trace\":false}"));
+  }
+
+  if (is_post && std::strcmp(path, "/reboot") == 0) {
+    api_server::stats::schedule_reboot();
+    return static_cast<size_t>(std::snprintf(out, cap, "{\"ok\":true}"));
+  }
 
   return static_cast<size_t>(std::snprintf(out, cap, "no route"));
 }

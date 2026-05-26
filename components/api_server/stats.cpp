@@ -214,40 +214,18 @@ esp_err_t nvs_write_level(esp_log_level_t lvl) {
 
 esp_err_t level_get(httpd_req_t *req) {
   char buf[32];
-  int n = std::snprintf(buf, sizeof(buf), "{\"nimble\":%d}",
-                        static_cast<int>(g_current_nimble_level));
+  size_t n = build_level_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
 }
 
 esp_err_t level_post(httpd_req_t *req) {
-  // Accept the level in a query string: POST /level?nimble=2 .
-  // Keeps the handler trivial — no body parsing needed.
   char query[64];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                               "missing query");
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
   }
-  char val[8];
-  if (httpd_query_key_value(query, "nimble", val, sizeof(val)) != ESP_OK) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                               "missing nimble=");
-  }
-  int parsed = std::atoi(val);
-  if (parsed < ESP_LOG_NONE || parsed > ESP_LOG_VERBOSE) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                               "level out of range");
-  }
-  auto lvl = static_cast<esp_log_level_t>(parsed);
-  esp_err_t err = nvs_write_level(lvl);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "nvs write failed: %s", esp_err_to_name(err));
-    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                               "nvs write failed");
-  }
-  apply_level(lvl);
-  ESP_LOGI(TAG, "NimBLE log level set to %d (persisted)",
-           static_cast<int>(lvl));
+  const char *err = handle_level_set(query);
+  if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
@@ -277,9 +255,7 @@ esp_err_t nvs_write_passkey(uint32_t pin) {
 
 esp_err_t passkey_get(httpd_req_t *req) {
   char buf[32];
-  int n = std::snprintf(buf, sizeof(buf), "{\"passkey\":%06lu}",
-                        static_cast<unsigned long>(
-                            ble_backend::connection::get_passkey()));
+  size_t n = build_passkey_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
 }
@@ -289,24 +265,8 @@ esp_err_t passkey_post(httpd_req_t *req) {
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
   }
-  char val[8];
-  if (httpd_query_key_value(query, "val", val, sizeof(val)) != ESP_OK) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing val=");
-  }
-  long parsed = std::strtol(val, nullptr, 10);
-  if (parsed < 0 || parsed > 999999) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                               "passkey must be 0..999999");
-  }
-  uint32_t pin = static_cast<uint32_t>(parsed);
-  esp_err_t err = nvs_write_passkey(pin);
-  if (err != ESP_OK) {
-    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                               "nvs write failed");
-  }
-  ble_backend::connection::set_passkey(pin);
-  ESP_LOGI(TAG, "BLE passkey set to %06lu (persisted)",
-           static_cast<unsigned long>(pin));
+  const char *err = handle_passkey_set(query);
+  if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
@@ -390,16 +350,14 @@ esp_err_t nvs_write_i8(const char *key, int8_t v) {
 
 esp_err_t txpower_get(httpd_req_t *req) {
   char buf[32];
-  int n = std::snprintf(buf, sizeof(buf), "{\"wifi\":%d,\"ble\":%d}",
-                        static_cast<int>(g_wifi_tx_dbm),
-                        static_cast<int>(g_ble_tx_dbm));
+  size_t n = build_txpower_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
 }
 
 esp_err_t cpufreq_get(httpd_req_t *req) {
   char buf[32];
-  int n = std::snprintf(buf, sizeof(buf), "{\"mhz\":%d}", g_cpu_freq_mhz);
+  size_t n = build_cpufreq_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
 }
@@ -409,24 +367,8 @@ esp_err_t cpufreq_post(httpd_req_t *req) {
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
   }
-  char val[8];
-  if (httpd_query_key_value(query, "mhz", val, sizeof(val)) != ESP_OK) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing mhz=");
-  }
-  int mhz = std::atoi(val);
-  if (mhz != 80 && mhz != 160 && mhz != 240) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                               "mhz must be 80, 160, or 240");
-  }
-  esp_err_t err = apply_cpu_freq_mhz(mhz);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "esp_pm_configure failed: %s", esp_err_to_name(err));
-    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                               "cpu freq apply failed");
-  }
-  g_cpu_freq_mhz = mhz;
-  nvs_write_i8(NVS_CPU_FREQ_KEY, static_cast<int8_t>(mhz / 10));
-  ESP_LOGI(TAG, "cpu freq -> %d MHz (persisted)", mhz);
+  const char *err = handle_cpufreq_set(query);
+  if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
@@ -436,78 +378,18 @@ esp_err_t txpower_post(httpd_req_t *req) {
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
   }
-  char val[8];
-  bool changed = false;
-  if (httpd_query_key_value(query, "wifi", val, sizeof(val)) == ESP_OK) {
-    int dbm = std::atoi(val);
-    if (dbm < 2 || dbm > 21) {
-      return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "wifi 2..21");
-    }
-    if (dbm != g_wifi_tx_dbm) {
-      int8_t new_dbm = static_cast<int8_t>(dbm);
-      if (apply_wifi_tx_dbm(new_dbm) != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                   "wifi tx apply failed");
-      }
-      g_wifi_tx_dbm = new_dbm;
-      nvs_write_i8(NVS_WIFI_TX_KEY, g_wifi_tx_dbm);
-      ESP_LOGI(TAG, "wifi tx -> %d dBm (persisted)",
-               static_cast<int>(g_wifi_tx_dbm));
-      changed = true;
-    }
-  }
-  if (httpd_query_key_value(query, "ble", val, sizeof(val)) == ESP_OK) {
-    int dbm = std::atoi(val);
-    if (dbm < -12 || dbm > 9) {
-      return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ble -12..9");
-    }
-    if (dbm != g_ble_tx_dbm) {
-      if (apply_ble_tx_dbm(dbm) != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                   "ble tx apply failed");
-      }
-      g_ble_tx_dbm = static_cast<int8_t>(dbm);
-      nvs_write_i8(NVS_BLE_TX_KEY, g_ble_tx_dbm);
-      ESP_LOGI(TAG, "ble tx -> %d dBm (persisted)",
-               static_cast<int>(g_ble_tx_dbm));
-      changed = true;
-    }
-  }
-  if (!changed) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                               "no params or no change");
-  }
+  const char *err = handle_txpower_set(query);
+  if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
 
-// Diagnostic capture mode. /trace?on=1 silences scanner noise and
-// pauses scanning so the 64 KiB log ring isn't flooded with "New
-// advertiser" lines during a BMS bring-up, then resets log_seq so the
-// next `/log?since=0` returns a clean trace starting after `on=1`.
-// /trace?on=0 restores the persisted NimBLE level and resumes scanning.
 esp_err_t trace_post(httpd_req_t *req) {
   char query[32];
-  char val[8];
-  bool on = true;
-  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
-      httpd_query_key_value(query, "on", val, sizeof(val)) == ESP_OK) {
-    on = (std::atoi(val) != 0);
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    query[0] = '\0';
   }
-  if (on) {
-    for (const char *tag : NIMBLE_SCAN_TAGS) esp_log_level_set(tag, ESP_LOG_ERROR);
-    for (const char *tag : NIMBLE_CORE_TAGS) esp_log_level_set(tag, ESP_LOG_DEBUG);
-    ble_backend::scanner::pause();
-#if CONFIG_NBP_WEB_CONSOLE
-    log_ring_reset();
-#endif
-    ESP_LOGI(TAG, "trace ON: scan paused, core=DEBUG, scan-tags=ERROR");
-  } else {
-    apply_level(g_current_nimble_level);
-    ble_backend::scanner::resume();
-    ESP_LOGI(TAG, "trace OFF: scan resumed, levels restored to %d",
-             static_cast<int>(g_current_nimble_level));
-  }
+  bool on = handle_trace_set(query);
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, on ? "{\"trace\":true}" : "{\"trace\":false}",
                          HTTPD_RESP_USE_STRLEN);
@@ -516,11 +398,7 @@ esp_err_t trace_post(httpd_req_t *req) {
 esp_err_t reboot_post(httpd_req_t *req) {
   httpd_resp_set_type(req, "text/plain");
   httpd_resp_send(req, "rebooting\n", HTTPD_RESP_USE_STRLEN);
-  ESP_LOGI(TAG, "reboot requested via /reboot");
-  // Let the response drain and the TCP FIN reach the client before we
-  // yank the rug — same pattern as the OTA handler.
-  vTaskDelay(pdMS_TO_TICKS(500));
-  esp_restart();
+  schedule_reboot();
   return ESP_OK;
 }
 
@@ -617,52 +495,12 @@ esp_err_t stats_get(httpd_req_t *req) {
 
 #if CONFIG_NBP_DEVICES_PANEL
 esp_err_t devices_get(httpd_req_t *req) {
-  // Snapshot under the scanner mutex, then format outside it.
-  static ble_backend::scanner::DeviceRow snap[64];
-  size_t n = ble_backend::scanner::snapshot_devices(snap, 64);
-  uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-
   // httpd serializes requests on a single worker, so a static buffer
   // is safe and avoids putting 6 KiB on the worker stack.
   static char out[6144];
-  char *p = out;
-  char *const end = out + sizeof(out);
-  auto rem = [&]() -> size_t { return end > p ? size_t(end - p) : 0; };
-  auto bump = [&](int w) {
-    if (w > 0) p += size_t(w) < rem() ? size_t(w) : rem();
-  };
-
-  bump(std::snprintf(p, rem(), "{\"devices\":["));
-  for (size_t i = 0; i < n; ++i) {
-    const auto &r = snap[i];
-    uint8_t b[6];
-    for (int k = 0; k < 6; ++k) b[k] = (r.addr >> ((5 - k) * 8)) & 0xff;
-    bump(std::snprintf(
-        p, rem(),
-        "%s{\"addr\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
-        "\"type\":%u,\"rssi\":%d,\"count\":%lu,\"age\":%lu,\"name\":\"",
-        i ? "," : "", b[0], b[1], b[2], b[3], b[4], b[5],
-        static_cast<unsigned>(r.addr_type), static_cast<int>(r.rssi),
-        static_cast<unsigned long>(r.adv_count),
-        static_cast<unsigned long>(now_ms - r.last_ms)));
-    // JSON-escape the name: backslash " and \, \u-escape controls.
-    for (const char *q = r.name; *q && rem() > 8; ++q) {
-      char c = *q;
-      if (c == '"' || c == '\\') {
-        *p++ = '\\'; *p++ = c;
-      } else if (static_cast<unsigned char>(c) < 0x20) {
-        bump(std::snprintf(p, rem(), "\\u%04x",
-                           static_cast<unsigned>(static_cast<unsigned char>(c))));
-      } else {
-        *p++ = c;
-      }
-    }
-    if (rem() >= 2) { *p++ = '"'; *p++ = '}'; }
-  }
-  if (rem() >= 2) { *p++ = ']'; *p++ = '}'; }
-
+  size_t n = build_devices_json(out, sizeof(out));
   httpd_resp_set_type(req, "application/json");
-  return httpd_resp_send(req, out, p - out);
+  return httpd_resp_send(req, out, n);
 }
 #endif  // CONFIG_NBP_DEVICES_PANEL
 
@@ -990,6 +828,204 @@ size_t build_log_slice(uint32_t *since_inout, char *buf, size_t cap,
   return take;
 }
 #endif
+
+// ---- Per-endpoint helpers (shared by httpd + BLE transports) ----
+
+size_t build_level_json(char *buf, size_t cap) {
+  int n = std::snprintf(buf, cap, "{\"nimble\":%d}",
+                        static_cast<int>(g_current_nimble_level));
+  if (n < 0) return 0;
+  return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+
+const char *handle_level_set(const char *query) {
+  char val[8];
+  if (httpd_query_key_value(query, "nimble", val, sizeof(val)) != ESP_OK) {
+    return "missing nimble=";
+  }
+  int parsed = std::atoi(val);
+  if (parsed < ESP_LOG_NONE || parsed > ESP_LOG_VERBOSE) {
+    return "level out of range";
+  }
+  auto lvl = static_cast<esp_log_level_t>(parsed);
+  if (nvs_write_level(lvl) != ESP_OK) return "nvs write failed";
+  apply_level(lvl);
+  ESP_LOGI(TAG, "NimBLE log level set to %d (persisted)",
+           static_cast<int>(lvl));
+  return nullptr;
+}
+
+size_t build_txpower_json(char *buf, size_t cap) {
+  int n = std::snprintf(buf, cap, "{\"wifi\":%d,\"ble\":%d}",
+                        static_cast<int>(g_wifi_tx_dbm),
+                        static_cast<int>(g_ble_tx_dbm));
+  if (n < 0) return 0;
+  return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+
+const char *handle_txpower_set(const char *query) {
+  char val[8];
+  bool changed = false;
+  if (httpd_query_key_value(query, "wifi", val, sizeof(val)) == ESP_OK) {
+    int dbm = std::atoi(val);
+    if (dbm < 2 || dbm > 21) return "wifi 2..21";
+    if (dbm != g_wifi_tx_dbm) {
+      int8_t new_dbm = static_cast<int8_t>(dbm);
+      if (apply_wifi_tx_dbm(new_dbm) != ESP_OK) return "wifi tx apply failed";
+      g_wifi_tx_dbm = new_dbm;
+      nvs_write_i8(NVS_WIFI_TX_KEY, g_wifi_tx_dbm);
+      ESP_LOGI(TAG, "wifi tx -> %d dBm (persisted)",
+               static_cast<int>(g_wifi_tx_dbm));
+      changed = true;
+    }
+  }
+  if (httpd_query_key_value(query, "ble", val, sizeof(val)) == ESP_OK) {
+    int dbm = std::atoi(val);
+    if (dbm < -12 || dbm > 9) return "ble -12..9";
+    if (dbm != g_ble_tx_dbm) {
+      if (apply_ble_tx_dbm(dbm) != ESP_OK) return "ble tx apply failed";
+      g_ble_tx_dbm = static_cast<int8_t>(dbm);
+      nvs_write_i8(NVS_BLE_TX_KEY, g_ble_tx_dbm);
+      ESP_LOGI(TAG, "ble tx -> %d dBm (persisted)",
+               static_cast<int>(g_ble_tx_dbm));
+      changed = true;
+    }
+  }
+  if (!changed) return "no params or no change";
+  return nullptr;
+}
+
+size_t build_cpufreq_json(char *buf, size_t cap) {
+  int n = std::snprintf(buf, cap, "{\"mhz\":%d}", g_cpu_freq_mhz);
+  if (n < 0) return 0;
+  return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+
+const char *handle_cpufreq_set(const char *query) {
+  char val[8];
+  if (httpd_query_key_value(query, "mhz", val, sizeof(val)) != ESP_OK) {
+    return "missing mhz=";
+  }
+  int mhz = std::atoi(val);
+  if (mhz != 80 && mhz != 160 && mhz != 240) {
+    return "mhz must be 80, 160, or 240";
+  }
+  if (apply_cpu_freq_mhz(mhz) != ESP_OK) return "cpu freq apply failed";
+  g_cpu_freq_mhz = mhz;
+  nvs_write_i8(NVS_CPU_FREQ_KEY, static_cast<int8_t>(mhz / 10));
+  ESP_LOGI(TAG, "cpu freq -> %d MHz (persisted)", mhz);
+  return nullptr;
+}
+
+#ifdef CONFIG_NBP_SMP
+size_t build_passkey_json(char *buf, size_t cap) {
+  int n = std::snprintf(buf, cap, "{\"passkey\":%06lu}",
+                        static_cast<unsigned long>(
+                            ble_backend::connection::get_passkey()));
+  if (n < 0) return 0;
+  return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+
+const char *handle_passkey_set(const char *query) {
+  char val[8];
+  if (httpd_query_key_value(query, "val", val, sizeof(val)) != ESP_OK) {
+    return "missing val=";
+  }
+  long parsed = std::strtol(val, nullptr, 10);
+  if (parsed < 0 || parsed > 999999) return "passkey must be 0..999999";
+  uint32_t pin = static_cast<uint32_t>(parsed);
+  if (nvs_write_passkey(pin) != ESP_OK) return "nvs write failed";
+  ble_backend::connection::set_passkey(pin);
+  ESP_LOGI(TAG, "BLE passkey set to %06lu (persisted)",
+           static_cast<unsigned long>(pin));
+  return nullptr;
+}
+#endif  // CONFIG_NBP_SMP
+
+#if CONFIG_NBP_DEVICES_PANEL
+size_t build_devices_json(char *buf, size_t cap) {
+  static ble_backend::scanner::DeviceRow snap[64];
+  size_t n = ble_backend::scanner::snapshot_devices(snap, 64);
+  uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+  char *p = buf;
+  char *const end = buf + cap;
+  auto rem = [&]() -> size_t { return end > p ? size_t(end - p) : 0; };
+  auto bump = [&](int w) {
+    if (w > 0) p += size_t(w) < rem() ? size_t(w) : rem();
+  };
+
+  bump(std::snprintf(p, rem(), "{\"devices\":["));
+  for (size_t i = 0; i < n; ++i) {
+    const auto &r = snap[i];
+    uint8_t b[6];
+    for (int k = 0; k < 6; ++k) b[k] = (r.addr >> ((5 - k) * 8)) & 0xff;
+    bump(std::snprintf(
+        p, rem(),
+        "%s{\"addr\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
+        "\"type\":%u,\"rssi\":%d,\"count\":%lu,\"age\":%lu,\"name\":\"",
+        i ? "," : "", b[0], b[1], b[2], b[3], b[4], b[5],
+        static_cast<unsigned>(r.addr_type), static_cast<int>(r.rssi),
+        static_cast<unsigned long>(r.adv_count),
+        static_cast<unsigned long>(now_ms - r.last_ms)));
+    for (const char *q = r.name; *q && rem() > 8; ++q) {
+      char c = *q;
+      if (c == '"' || c == '\\') {
+        *p++ = '\\'; *p++ = c;
+      } else if (static_cast<unsigned char>(c) < 0x20) {
+        bump(std::snprintf(p, rem(), "\\u%04x",
+                           static_cast<unsigned>(static_cast<unsigned char>(c))));
+      } else {
+        *p++ = c;
+      }
+    }
+    if (rem() >= 2) { *p++ = '"'; *p++ = '}'; }
+  }
+  if (rem() >= 2) { *p++ = ']'; *p++ = '}'; }
+  return static_cast<size_t>(p - buf);
+}
+#endif
+
+bool handle_trace_set(const char *query) {
+  char val[8];
+  bool on = true;
+  if (httpd_query_key_value(query, "on", val, sizeof(val)) == ESP_OK) {
+    on = (std::atoi(val) != 0);
+  }
+  if (on) {
+    for (const char *tag : NIMBLE_SCAN_TAGS) esp_log_level_set(tag, ESP_LOG_ERROR);
+    for (const char *tag : NIMBLE_CORE_TAGS) esp_log_level_set(tag, ESP_LOG_DEBUG);
+    ble_backend::scanner::pause();
+#if CONFIG_NBP_WEB_CONSOLE
+    log_ring_reset();
+#endif
+    ESP_LOGI(TAG, "trace ON: scan paused, core=DEBUG, scan-tags=ERROR");
+  } else {
+    apply_level(g_current_nimble_level);
+    ble_backend::scanner::resume();
+    ESP_LOGI(TAG, "trace OFF: scan resumed, levels restored to %d",
+             static_cast<int>(g_current_nimble_level));
+  }
+  return on;
+}
+
+void schedule_reboot() {
+  // One-shot esp_timer so the caller can finish sending its response
+  // (HTTP TCP FIN / BLE notify drain) before the radio goes down.
+  static esp_timer_handle_t timer = nullptr;
+  if (timer == nullptr) {
+    esp_timer_create_args_t args = {
+        .callback = [](void *) { esp_restart(); },
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "reboot",
+        .skip_unhandled_events = false,
+    };
+    esp_timer_create(&args, &timer);
+  }
+  ESP_LOGI(TAG, "reboot scheduled in 500 ms");
+  esp_timer_start_once(timer, 500000);
+}
 
 void apply_log_overrides_from_nvs() {
   esp_log_level_t lvl;
