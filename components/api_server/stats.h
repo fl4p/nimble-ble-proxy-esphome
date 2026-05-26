@@ -75,6 +75,16 @@ bool handle_trace_set(const char *query);
 // esp_timer so the caller can finish sending its response first.
 void schedule_reboot();
 
+// Scan duty cycle: GET returns {"window":W,"interval":I}; POST takes
+// "window=N&interval=N" (ms each). window <= interval, both 20..10000.
+size_t build_scan_json(char *buf, size_t cap);
+const char *handle_scan_set(const char *query);
+
+// Read persisted scan window/interval (NVS keys "scan_win"/"scan_int")
+// and apply to the live scanner. Call AFTER ble_backend::start so
+// scanner::init has set up the NimBLEScan object.
+void apply_scan_from_nvs();
+
 #if CONFIG_NBP_WEB_CONSOLE
 // Install the esp_log vprintf hook so device logs mirror into an
 // in-memory ring buffer. Call as early as possible in app_main so we

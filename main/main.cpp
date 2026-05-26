@@ -104,5 +104,10 @@ extern "C" void app_main() {
   // chip-default power before being potentially throttled down.
   api_server::stats::apply_tx_power_from_nvs();
 
+  // Scanner is running with proxy:: defaults; reapply any persisted
+  // window/interval override now (uses scanner::set_duty which is a
+  // no-op until init() has been called by ble_backend::start).
+  api_server::stats::apply_scan_from_nvs();
+
   ESP_LOGI(TAG, "boot complete; main task exiting");
 }

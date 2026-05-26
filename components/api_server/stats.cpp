@@ -293,16 +293,21 @@ int8_t g_wifi_tx_dbm = DEFAULT_WIFI_TX_DBM;
 int8_t g_ble_tx_dbm = DEFAULT_BLE_TX_DBM;
 int g_cpu_freq_mhz = DEFAULT_CPU_FREQ_MHZ;
 
-esp_err_t apply_cpu_freq_mhz(int mhz) {
-  // Pin min=max so the CPU is clamped exactly. light_sleep off — a
-  // continuously-active scanner makes the sleep entry/exit overhead
-  // not worth its modest win.
+bool g_light_sleep = false;
+
+esp_err_t apply_cpu_freq_mhz(int mhz, bool light_sleep) {
+  // Pin min=max so the CPU is clamped exactly. light_sleep lets the
+  // SoC coast between bursts of work — measurable temp drop on the
+  // scanner workload, no behavioural change since any peripheral
+  // interrupt wakes the cores.
   esp_pm_config_t cfg = {
       .max_freq_mhz = mhz,
       .min_freq_mhz = mhz,
-      .light_sleep_enable = false,
+      .light_sleep_enable = light_sleep,
   };
-  return esp_pm_configure(&cfg);
+  esp_err_t err = esp_pm_configure(&cfg);
+  if (err == ESP_OK) g_light_sleep = light_sleep;
+  return err;
 }
 
 esp_power_level_t dbm_to_ble_lvl(int dbm) {
@@ -491,6 +496,24 @@ esp_err_t stats_get(httpd_req_t *req) {
   size_t n = build_stats_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
+}
+
+esp_err_t scan_get(httpd_req_t *req) {
+  char buf[48];
+  size_t n = build_scan_json(buf, sizeof(buf));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, n);
+}
+
+esp_err_t scan_post(httpd_req_t *req) {
+  char query[64];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
+  }
+  const char *err = handle_scan_set(query);
+  if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
 
 #if CONFIG_NBP_DEVICES_PANEL
@@ -896,24 +919,36 @@ const char *handle_txpower_set(const char *query) {
 }
 
 size_t build_cpufreq_json(char *buf, size_t cap) {
-  int n = std::snprintf(buf, cap, "{\"mhz\":%d}", g_cpu_freq_mhz);
+  int n = std::snprintf(buf, cap, "{\"mhz\":%d,\"ls\":%s}",
+                        g_cpu_freq_mhz, g_light_sleep ? "true" : "false");
   if (n < 0) return 0;
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
 
 const char *handle_cpufreq_set(const char *query) {
   char val[8];
-  if (httpd_query_key_value(query, "mhz", val, sizeof(val)) != ESP_OK) {
-    return "missing mhz=";
+  int mhz = g_cpu_freq_mhz;
+  bool light_sleep = g_light_sleep;
+  bool any = false;
+  if (httpd_query_key_value(query, "mhz", val, sizeof(val)) == ESP_OK) {
+    mhz = std::atoi(val);
+    if (mhz != 80 && mhz != 160 && mhz != 240) {
+      return "mhz must be 80, 160, or 240";
+    }
+    any = true;
   }
-  int mhz = std::atoi(val);
-  if (mhz != 80 && mhz != 160 && mhz != 240) {
-    return "mhz must be 80, 160, or 240";
+  if (httpd_query_key_value(query, "ls", val, sizeof(val)) == ESP_OK) {
+    light_sleep = (std::atoi(val) != 0);
+    any = true;
   }
-  if (apply_cpu_freq_mhz(mhz) != ESP_OK) return "cpu freq apply failed";
+  if (!any) return "missing mhz= or ls=";
+  if (apply_cpu_freq_mhz(mhz, light_sleep) != ESP_OK) {
+    return "cpu freq apply failed";
+  }
   g_cpu_freq_mhz = mhz;
   nvs_write_i8(NVS_CPU_FREQ_KEY, static_cast<int8_t>(mhz / 10));
-  ESP_LOGI(TAG, "cpu freq -> %d MHz (persisted)", mhz);
+  nvs_write_i8("cpu_ls", light_sleep ? 1 : 0);
+  ESP_LOGI(TAG, "cpu -> %d MHz ls=%d (persisted)", mhz, light_sleep ? 1 : 0);
   return nullptr;
 }
 
@@ -1016,6 +1051,62 @@ bool handle_trace_set(const char *query) {
   return on;
 }
 
+size_t build_scan_json(char *buf, size_t cap) {
+  uint16_t window = 0, interval = 0;
+  ble_backend::scanner::get_duty(&window, &interval);
+  int n = std::snprintf(buf, cap, "{\"window\":%u,\"interval\":%u}",
+                        static_cast<unsigned>(window),
+                        static_cast<unsigned>(interval));
+  if (n < 0) return 0;
+  return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+
+const char *handle_scan_set(const char *query) {
+  char val[8];
+  uint16_t cur_win = 0, cur_int = 0;
+  ble_backend::scanner::get_duty(&cur_win, &cur_int);
+  long window = cur_win, interval = cur_int;
+  bool any = false;
+  if (httpd_query_key_value(query, "window", val, sizeof(val)) == ESP_OK) {
+    window = std::strtol(val, nullptr, 10);
+    any = true;
+  }
+  if (httpd_query_key_value(query, "interval", val, sizeof(val)) == ESP_OK) {
+    interval = std::strtol(val, nullptr, 10);
+    any = true;
+  }
+  if (!any) return "missing window= or interval=";
+  if (window < 20 || window > 10000) return "window 20..10000 ms";
+  if (interval < 20 || interval > 10000) return "interval 20..10000 ms";
+  if (window > interval) return "window must be <= interval";
+
+  // NVS persist (one u16 per key) BEFORE applying so a bad apply
+  // doesn't leave stale state behind.
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+    nvs_set_u16(h, "scan_win", static_cast<uint16_t>(window));
+    nvs_set_u16(h, "scan_int", static_cast<uint16_t>(interval));
+    nvs_commit(h);
+    nvs_close(h);
+  }
+  ble_backend::scanner::set_duty(static_cast<uint16_t>(window),
+                                 static_cast<uint16_t>(interval));
+  return nullptr;
+}
+
+void apply_scan_from_nvs() {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+  uint16_t window = 0, interval = 0;
+  bool have_w = (nvs_get_u16(h, "scan_win", &window) == ESP_OK);
+  bool have_i = (nvs_get_u16(h, "scan_int", &interval) == ESP_OK);
+  nvs_close(h);
+  if (!have_w || !have_i) return;  // keep proxy:: defaults
+  if (window < 20 || window > interval || interval > 10000) return;
+  ble_backend::scanner::set_duty(window, interval);
+  ESP_LOGI(TAG, "scan duty from NVS: window=%u interval=%u", window, interval);
+}
+
 void schedule_reboot() {
   // One-shot esp_timer so the caller can finish sending its response
   // (HTTP TCP FIN / BLE notify drain) before the radio goes down.
@@ -1075,13 +1166,16 @@ void apply_cpu_freq_from_nvs() {
     int mhz = static_cast<int>(stored) * 10;
     if (mhz == 80 || mhz == 160 || mhz == 240) g_cpu_freq_mhz = mhz;
   }
-  esp_err_t err = apply_cpu_freq_mhz(g_cpu_freq_mhz);
+  int8_t ls = 0;
+  if (nvs_read_i8("cpu_ls", &ls) == ESP_OK) g_light_sleep = (ls != 0);
+  esp_err_t err = apply_cpu_freq_mhz(g_cpu_freq_mhz, g_light_sleep);
   if (err != ESP_OK) {
-    ESP_LOGW(TAG, "esp_pm_configure(%d MHz) failed: %s",
-             g_cpu_freq_mhz, esp_err_to_name(err));
+    ESP_LOGW(TAG, "esp_pm_configure(%d MHz ls=%d) failed: %s",
+             g_cpu_freq_mhz, g_light_sleep ? 1 : 0, esp_err_to_name(err));
     return;
   }
-  ESP_LOGI(TAG, "CPU freq applied: %d MHz", g_cpu_freq_mhz);
+  ESP_LOGI(TAG, "CPU applied: %d MHz, light sleep=%d",
+           g_cpu_freq_mhz, g_light_sleep ? 1 : 0);
 }
 
 #if CONFIG_NBP_WEB_CONSOLE
@@ -1169,6 +1263,16 @@ void register_endpoints(httpd_handle_t srv) {
                            .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &cpufreq_g);
   httpd_register_uri_handler(srv, &cpufreq_p);
+  httpd_uri_t scan_g = {.uri = "/scan",
+                        .method = HTTP_GET,
+                        .handler = &scan_get,
+                        .user_ctx = nullptr};
+  httpd_uri_t scan_p = {.uri = "/scan",
+                        .method = HTTP_POST,
+                        .handler = &scan_post,
+                        .user_ctx = nullptr};
+  httpd_register_uri_handler(srv, &scan_g);
+  httpd_register_uri_handler(srv, &scan_p);
 #ifdef CONFIG_NBP_SMP
   httpd_register_uri_handler(srv, &passkey_g);
   httpd_register_uri_handler(srv, &passkey_p);

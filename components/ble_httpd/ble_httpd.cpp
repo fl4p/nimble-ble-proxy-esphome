@@ -159,6 +159,14 @@ size_t dispatch(const char *method, char *path, char *out, size_t cap) {
                               api_server::stats::handle_cpufreq_set(query));
   }
 
+  if (is_get && std::strcmp(path, "/scan") == 0) {
+    return api_server::stats::build_scan_json(out, cap);
+  }
+  if (is_post && std::strcmp(path, "/scan") == 0) {
+    return render_ok_or_error(out, cap,
+                              api_server::stats::handle_scan_set(query));
+  }
+
 #ifdef CONFIG_NBP_SMP
   if (is_get && std::strcmp(path, "/passkey") == 0) {
     return api_server::stats::build_passkey_json(out, cap);
