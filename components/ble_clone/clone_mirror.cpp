@@ -286,14 +286,26 @@ bool finalize_server() {
   g_built.store(true, std::memory_order_release);
 
   g_adv = NimBLEDevice::getAdvertising();
-  for (size_t i = 0; i < g_char_count; ++i) {
-    auto *svc = g_chars[i].local->getService();
-    if (svc != nullptr) g_adv->addServiceUUID(svc->getUUID());
-  }
-  g_adv->enableScanResponse(true);
+  // NOTE: service UUIDs + scan-response enable are deferred to
+  // start_advertising() so the name lands in the *main* AD payload.
+  // NimBLE-CPP's setName() routes into scan response when
+  // m_scanResp=true was set first, and passive scanners (default on
+  // macOS / iOS) never request scan responses — they'd then see only
+  // flags + UUIDs and report a cached / GAP-default name instead.
   ESP_LOGI(TAG, "GATT DB registered (services=%u chars=%u)",
            g_service_count.load(std::memory_order_relaxed),
            static_cast<unsigned>(g_char_count));
+  // Dump the assigned local handles + properties so we can correlate
+  // with the upstream layout and with CoreBluetooth's "service N" errors.
+  for (size_t i = 0; i < g_char_count; ++i) {
+    auto *svc = g_chars[i].local->getService();
+    ESP_LOGI(TAG, "  local[%u] svc=%s chr=%s val_handle=%u props=0x%04x",
+             static_cast<unsigned>(i),
+             svc ? svc->getUUID().toString().c_str() : "?",
+             g_chars[i].local->getUUID().toString().c_str(),
+             g_chars[i].local->getHandle(),
+             g_chars[i].upstream_props);
+  }
   return true;
 }
 
@@ -436,8 +448,28 @@ void start_advertising(const char *base_name) {
 
   // NimBLEDevice was init'd with proxy::HOSTNAME — override the adv
   // name so vendor apps find the cloned device by the expected name.
+  // (resetGATT()/ble_svc_gap_init() in finalize_server resets the GAP
+  // 0x2A00 char back to the Kconfig default, so this call has to come
+  // AFTER the server is registered.)
   NimBLEDevice::setDeviceName(name);
+
+  // Clean slate so we don't inherit stale fields (e.g. an earlier
+  // start_advertising attempt before name was known).
+  g_adv->reset();
+
+  // Order matters:
+  //   1. setName BEFORE enableScanResponse → name lands in MAIN adv
+  //      payload (so passive scanners see it).
+  //   2. enableScanResponse(true) + addServiceUUID → service UUIDs
+  //      spill into the scan response if they don't fit alongside the
+  //      name in the 31-byte main payload. Active scanners (vendor
+  //      apps that filter by UUID) still find us via scan-response.
   g_adv->setName(name);
+  g_adv->enableScanResponse(true);
+  for (size_t i = 0; i < g_char_count; ++i) {
+    auto *svc = g_chars[i].local->getService();
+    if (svc != nullptr) g_adv->addServiceUUID(svc->getUUID());
+  }
 
   if (g_adv->start()) {
     g_advertising.store(true, std::memory_order_release);
