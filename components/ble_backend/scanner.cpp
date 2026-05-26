@@ -36,6 +36,13 @@ std::atomic<bool> g_forwarding{false};
 std::atomic<uint32_t> g_adv_count{0};
 NimBLEScan *g_scan = nullptr;
 
+// Live scan duty cycle. Initialised to proxy:: defaults, mutated at
+// runtime via set_duty(). Read with relaxed ordering — both writers
+// (httpd worker / BLE dispatch task) and readers (UI poll) tolerate
+// being a tick behind.
+std::atomic<uint16_t> g_window_ms{proxy::SCAN_WINDOW_MS};
+std::atomic<uint16_t> g_interval_ms{proxy::SCAN_INTERVAL_MS};
+
 SemaphoreHandle_t g_mutex = nullptr;
 Batch g_pending;
 TaskHandle_t g_flush_task = nullptr;
@@ -216,8 +223,8 @@ void init() {
   g_scan = NimBLEDevice::getScan();
   g_scan->setScanCallbacks(&g_cb, /*wantDuplicates=*/true);
   g_scan->setActiveScan(false);  // passive matches v1 feature flags
-  g_scan->setInterval(proxy::SCAN_INTERVAL_MS);
-  g_scan->setWindow(proxy::SCAN_WINDOW_MS);
+  g_scan->setInterval(g_interval_ms.load(std::memory_order_relaxed));
+  g_scan->setWindow(g_window_ms.load(std::memory_order_relaxed));
   g_scan->setMaxResults(0);  // don't cache; we forward live
 
   xTaskCreate(&flush_task, "ble_adv_flush", FLUSH_TASK_STACK, nullptr,
@@ -235,7 +242,32 @@ void start() {
     return;
   }
   ESP_LOGI(TAG, "scanning (interval=%ums window=%ums passive)",
-           proxy::SCAN_INTERVAL_MS, proxy::SCAN_WINDOW_MS);
+           g_interval_ms.load(std::memory_order_relaxed),
+           g_window_ms.load(std::memory_order_relaxed));
+}
+
+void set_duty(uint16_t window_ms, uint16_t interval_ms) {
+  if (!g_scan) return;
+  // BLE scanner-window must be <= interval; caller already validates.
+  g_scan->setInterval(interval_ms);
+  g_scan->setWindow(window_ms);
+  g_window_ms.store(window_ms, std::memory_order_relaxed);
+  g_interval_ms.store(interval_ms, std::memory_order_relaxed);
+  // setInterval/setWindow change the on-the-air timings on the next
+  // scan epoch, but a stop+restart makes the change visible to peer
+  // RSSI/age stats immediately and keeps the log line in sync.
+  if (g_scan->isScanning()) {
+    g_scan->stop();
+    g_scan->start(0, /*isContinue=*/true);
+  }
+  ESP_LOGI(TAG, "scan duty -> window=%ums interval=%ums (%u%%)",
+           window_ms, interval_ms,
+           interval_ms > 0 ? (window_ms * 100u) / interval_ms : 0u);
+}
+
+void get_duty(uint16_t *window_ms, uint16_t *interval_ms) {
+  if (window_ms)   *window_ms   = g_window_ms.load(std::memory_order_relaxed);
+  if (interval_ms) *interval_ms = g_interval_ms.load(std::memory_order_relaxed);
 }
 
 void resume() {

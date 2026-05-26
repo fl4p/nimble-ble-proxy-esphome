@@ -36,6 +36,14 @@ void pause();
 void start_forwarding();
 void stop_forwarding();
 
+// Set the BLE scan duty cycle. Both args are in milliseconds; caller
+// must ensure window_ms <= interval_ms. Applies live (stops + restarts
+// the scan so the new params take effect immediately). NimBLE's
+// underlying setInterval/setWindow take 1ms-resolution uint16s; the
+// BLE spec allows 2.5..10240 ms but practical lower bound is ~20 ms.
+void set_duty(uint16_t window_ms, uint16_t interval_ms);
+void get_duty(uint16_t *window_ms, uint16_t *interval_ms);
+
 // Cumulative count of advertisements seen by the radio since boot.
 // Bumped from the NimBLE host task in every onResult, before any
 // forwarding/subscription gating.
