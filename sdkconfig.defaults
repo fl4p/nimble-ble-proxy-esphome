@@ -25,6 +25,9 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 
 # Logging: info level by default; bump to debug while bringing up.
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# ANSI color escapes in log lines — rendered by the web console via
+# ansi_up. Harmless on a serial terminal that ignores escapes.
+CONFIG_LOG_COLORS=y
 
 # Custom partition table (factory app, nvs only — no OTA in v1).
 CONFIG_PARTITION_TABLE_CUSTOM=y
