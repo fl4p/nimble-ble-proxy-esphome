@@ -244,20 +244,12 @@ bool build_from(void *upstream_client_v) {
       row.cache_len = 0;
       row.primed = false;
 
-      // Mirror descriptors (except CCCD, which NimBLE auto-creates for
-      // NOTIFY/INDICATE chars).
-      const auto &descs = chr->getDescriptors(/*refresh=*/false);
-      for (auto *d : descs) {
-        NimBLEUUID d_uuid = d->getUUID();
-        if (d_uuid.bitSize() == 16) {
-          const uint8_t *v = d_uuid.getValue();
-          uint16_t u16 = static_cast<uint16_t>(v[0]) |
-                         (static_cast<uint16_t>(v[1]) << 8);
-          if (u16 == CCCD_UUID16) continue;
-        }
-        local_chr->createDescriptor(d_uuid, BLE_GATT_CHR_F_READ);
-        ++total_descs;
-      }
+      // Don't mirror descriptors. The reference micropython clone.py
+      // skips them too. Empirically, mirroring the 0x2901 User
+      // Description descriptor without a value (we don't read its
+      // upstream content) makes macOS CoreBluetooth fail the entire
+      // service's characteristic discovery with "Unknown error". The
+      // CCCD that NOTIFY/INDICATE chars need is auto-added by NimBLE.
 
       ESP_LOGD(TAG, "  char %s handle=%u props=0x%04x",
                chr_uuid.toString().c_str(), chr->getHandle(), up_props);

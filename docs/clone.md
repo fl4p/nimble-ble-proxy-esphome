@@ -443,6 +443,16 @@ you replicate the upstream's CCCD with `createDescriptor`, the local
 char ends up with two CCCDs and NimBLE rejects the second. Filter
 out 0x2902 explicitly in the descriptor walk.
 
+**Beyond CCCD: don't mirror non-CCCD descriptors either.** Empirically,
+mirroring upstream's 0x2901 User Description descriptor (without
+reading and replicating its value) makes macOS / iOS CoreBluetooth
+fail the ENTIRE service's `discoverCharacteristics` with `CBErrorDomain
+Code=0 "Unknown error."` — no further detail. Bleak surfaces this as
+`Failed to discover characteristics for service N`. The reference
+micropython `clone.py` simply doesn't mirror descriptors and works.
+Following suit is the right call unless you also fetch each
+descriptor's value at clone-time and replicate it.
+
 ### 13.8 Compile-time vs runtime NimBLE log level
 
 `CONFIG_BT_NIMBLE_LOG_LEVEL_DEBUG=y` adds ~40 KB of BSS (string
