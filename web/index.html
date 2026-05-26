@@ -1,24 +1,22 @@
 <!doctype html>
 <!--
-  nimble-ble-proxy dashboard, Web Bluetooth edition.
+  nimble-ble-proxy dashboard. Single source of truth for both:
 
-  Talks GATT to the firmware's ble_httpd service instead of HTTP. The
-  dashboard layout, charts, and controls match the on-device version
-  served from stats.cpp::root_get when WiFi is on; only the transport
-  changed.
+    * served by the on-device httpd at `/` when CONFIG_NBP_WIFI=y
+      (loaded via http://device.local/ — transport=fetch).
+    * loaded from disk or a static host against a BLE-only build
+      (transport=Web Bluetooth over the ble_httpd GATT service).
 
-  Wire format (per fragment):
+  Transport is auto-detected from location.protocol; append `?ble`
+  to force BLE mode when the page is served via http/https off-device.
+
+  BLE wire format (per fragment):
     byte 0   flags  bit0=FIN, bit1=ERR
     byte 1   reqId  echoed by server; used here for response multiplex
     bytes 2+ payload
 
-  Requests are written to the REQUEST characteristic; responses arrive
-  as notifications on RESPONSE. Multi-fragment responses are
-  reassembled on the FIN bit before the bleFetch() promise resolves.
-
   Web Bluetooth is supported on Chrome / Edge / Opera (desktop) and
-  Chrome (Android). Not available on iOS / Safari. Requires a user
-  gesture for the initial scan — hence the Connect button.
+  Chrome (Android). Not available on iOS / Safari.
 -->
 <html>
 <head>
@@ -134,8 +132,8 @@ table#devices tr.stale{opacity:.4}
   <pre id=console></pre>
 </div>
 
-<footer>Web Bluetooth client &mdash; mirrors the on-device dashboard
-served at <code>/</code> when WiFi is enabled.</footer>
+<footer>nimble-ble-proxy dashboard &mdash; HTTP or Web Bluetooth, same
+HTML. OTA: <code>curl --data-binary @firmware.bin http://&lt;host&gt;/update</code></footer>
 
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/ansi_up@5/ansi_up.js"></script>
@@ -223,6 +221,50 @@ async function bleJson(line) {
     if (lastClose > 0) txt = txt.slice(0, lastClose + 1) + ']}';
   }
   return JSON.parse(txt);
+}
+
+// ---- transport selection ---------------------------------------------
+//
+// HTTP mode: page is served by the on-device httpd (WiFi build), so we
+// hit the same URIs with fetch(). BLE mode: page loaded from disk or a
+// static host; talk to ble_httpd via GATT. URL flag `?ble` forces BLE
+// in case auto-detection picks wrong (e.g. dashboard hosted off-device).
+const TRANSPORT = (location.protocol === 'file:' ||
+                   /\bble\b/.test(location.search))
+                    ? 'ble' : 'http';
+
+function parseLine(line) {
+  const sp = line.indexOf(' ');
+  return [line.slice(0, sp), line.slice(sp + 1)];
+}
+
+// Returns raw response text. For /log, both transports yield the same
+// envelope "<seq>\n<bytes>" — HTTP synthesizes it from the X-Log-Seq
+// header so the caller is transport-agnostic.
+async function apiText(line) {
+  if (TRANSPORT === 'ble') return bleFetch(line);
+  const [method, path] = parseLine(line);
+  const r = await fetch(path, { method });
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    throw new Error(t || `${path}: ${r.status}`);
+  }
+  if (path.startsWith('/log')) {
+    const seq = r.headers.get('X-Log-Seq') || '0';
+    return seq + '\n' + (await r.text());
+  }
+  return r.text();
+}
+
+async function apiJson(line) {
+  if (TRANSPORT === 'ble') return bleJson(line);
+  const [method, path] = parseLine(line);
+  const r = await fetch(path, { method });
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    throw new Error(t || `${path}: ${r.status}`);
+  }
+  return r.json();
 }
 
 async function connect() {
@@ -338,7 +380,7 @@ const delta = (cur, p, dt) => { const v = (cur - p) / dt; return v < 0 ? null : 
 async function tickStats() {
   try {
     const now = performance.now() / 1000;
-    const s = await bleJson('GET /stats.json');
+    const s = await apiJson('GET /stats.json');
     if (g_prev) {
       const dt = now - g_prevT;
       shiftPush(r, delta(s.reads,    g_prev.reads,    dt));
@@ -369,7 +411,7 @@ const au = new AnsiUp(); au.use_classes = false;
 
 async function tickLog() {
   try {
-    const body = await bleFetch('GET /log?since=' + g_logSeq);
+    const body = await apiText('GET /log?since=' + g_logSeq);
     // Envelope: "<10-digit seq>\n<bytes>"
     const nl = body.indexOf('\n');
     if (nl < 0) return;
@@ -390,7 +432,7 @@ async function tickLog() {
 let g_devPrev = {};
 async function tickDevices() {
   try {
-    const data = await bleJson('GET /devices');
+    const data = await apiJson('GET /devices');
     const d = data.devices;
     const now = performance.now() / 1000;
     const next = {};
@@ -446,12 +488,12 @@ async function loadInitialValues() {
   const btx = document.getElementById('btx');
   const cpu = document.getElementById('cpu');
   try {
-    const l = await bleJson('GET /level');   lvl.value = l.nimble;
-    const p = await bleJson('GET /txpower'); wtx.value = p.wifi; btx.value = p.ble;
+    const l = await apiJson('GET /level');   lvl.value = l.nimble;
+    const p = await apiJson('GET /txpower'); wtx.value = p.wifi; btx.value = p.ble;
     wtx.disabled = p.wifi === 0;
-    const f = await bleJson('GET /cpufreq'); cpu.value = f.mhz;
+    const f = await apiJson('GET /cpufreq'); cpu.value = f.mhz;
     document.getElementById('ls').checked = !!f.ls;
-    const sc = await bleJson('GET /scan');
+    const sc = await apiJson('GET /scan');
     const duty = document.getElementById('duty');
     const key = `${sc.window},${sc.interval}`;
     // Match if one of the presets fits exactly; otherwise leave the
@@ -464,32 +506,32 @@ async function loadInitialValues() {
 
 function wireControls() {
   document.getElementById('lvl').onchange = e => {
-    bleFetch('POST /level?nimble=' + e.target.value).catch(err => alert(err));
+    apiText('POST /level?nimble=' + e.target.value).catch(err => alert(err));
   };
   document.getElementById('wtx').onchange = e => {
     const v = e.target.value;
-    bleFetch('POST /txpower?wifi=' + v)
+    apiText('POST /txpower?wifi=' + v)
       .then(() => { if (v === '0') e.target.disabled = true; })
       .catch(err => alert(err));
   };
   document.getElementById('btx').onchange = e => {
-    bleFetch('POST /txpower?ble=' + e.target.value).catch(err => alert(err));
+    apiText('POST /txpower?ble=' + e.target.value).catch(err => alert(err));
   };
   document.getElementById('cpu').onchange = e => {
-    bleFetch('POST /cpufreq?mhz=' + e.target.value).catch(err => alert(err));
+    apiText('POST /cpufreq?mhz=' + e.target.value).catch(err => alert(err));
   };
   document.getElementById('ls').onchange = e => {
-    bleFetch('POST /cpufreq?ls=' + (e.target.checked ? 1 : 0))
+    apiText('POST /cpufreq?ls=' + (e.target.checked ? 1 : 0))
       .catch(err => alert(err));
   };
   document.getElementById('duty').onchange = e => {
     const [w, i] = e.target.value.split(',');
-    bleFetch(`POST /scan?window=${w}&interval=${i}`).catch(err => alert(err));
+    apiText(`POST /scan?window=${w}&interval=${i}`).catch(err => alert(err));
   };
   document.getElementById('reboot').onclick = async () => {
     if (!confirm('Reboot device?')) return;
     try {
-      await bleFetch('POST /reboot');
+      await apiText('POST /reboot');
       con.appendChild(document.createTextNode(
         '\n[client] reboot requested, waiting for device…\n'));
     } catch (e) { /* expected — link goes down */ }
@@ -509,12 +551,22 @@ function wireControls() {
 
 // ---- boot -------------------------------------------------------------
 
-if (!navigator.bluetooth) {
+initCharts();
+wireControls();
+
+if (TRANSPORT === 'http') {
+  // Served by the on-device httpd — no Connect step. Hide the BLE-only
+  // chrome and start polling immediately.
+  document.getElementById('controls').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
+  if (u_cpu)   u_cpu  .setSize({ width: chartW(chart2El), height: 200 });
+  loadInitialValues();
+  startPolling();
+} else if (!navigator.bluetooth) {
   document.getElementById('unsupported').classList.remove('hidden');
   document.getElementById('connect').disabled = true;
 }
-initCharts();
-wireControls();
 </script>
 </body>
 </html>

@@ -112,7 +112,10 @@ void apply_tx_power_from_nvs();
 void apply_cpu_freq_from_nvs();
 
 // Registers /, /stats.json, /log, /level, /reboot, /trace, /devices,
-// /passkey, /txpower, /cpufreq.
+// /passkey, /txpower, /cpufreq. Only defined when WiFi (and therefore
+// the HTTP server) is in the build.
+#if CONFIG_NBP_WIFI
 void register_endpoints(httpd_handle_t srv);
+#endif
 
 }  // namespace api_server::stats
