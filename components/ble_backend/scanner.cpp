@@ -146,6 +146,12 @@ AdvCallbacks g_cb;
 void init() {
   g_mutex = xSemaphoreCreateMutex();
 
+  // NimBLE-Cpp's scanner logs "New advertiser: <mac>" at INFO for every
+  // advertisement when wantDuplicates=true — that's tens of lines/s of
+  // noise from a library that doesn't actually de-dup. Cap it to WARN
+  // so genuine NimBLE problems still surface.
+  esp_log_level_set("NimBLEScan", ESP_LOG_WARN);
+
   g_scan = NimBLEDevice::getScan();
   g_scan->setScanCallbacks(&g_cb, /*wantDuplicates=*/true);
   g_scan->setActiveScan(false);  // passive matches v1 feature flags
