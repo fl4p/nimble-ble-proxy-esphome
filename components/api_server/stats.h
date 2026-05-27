@@ -58,6 +58,27 @@ const char *handle_txpower_set(const char *query);
 size_t build_cpufreq_json(char *buf, size_t cap);
 const char *handle_cpufreq_set(const char *query);
 
+// Peripheral advertising interval in ms (0 = NimBLE host default,
+// ~30..60 ms range). Persisted in NVS under "adv_itvl"; applied live
+// via ble_backend::set_adv_interval_ms which hot-restarts adv if it's
+// currently active. Validation: 0 or 20..10240 ms (BLE-spec bounds).
+size_t build_advitvl_json(char *buf, size_t cap);
+const char *handle_advitvl_set(const char *query);
+
+// WiFi power-save listen-interval. GET returns {"li":N}; POST takes
+// "li=N" (0..10). 0 = PS_NONE, >0 = PS_MAX_MODEM with that many DTIM
+// beacons between wake-ups. PS-mode flip is live; listen_interval
+// inside wifi_config_t only takes effect on the next AP association,
+// so the dashboard pulses the reboot button as an apply hint.
+size_t build_wifips_json(char *buf, size_t cap);
+const char *handle_wifips_set(const char *query);
+
+// Load persisted listen_interval from NVS into the in-RAM mirror so
+// /wifips GET returns the right value before any POST has happened.
+// Note: wifi_sta.cpp also reads the same NVS key directly at boot to
+// stamp wifi_config_t.sta.listen_interval before esp_wifi_start.
+void apply_wifi_ps_from_nvs();
+
 // Hostname (mDNS / WiFi netif / NimBLE GAP name / aioesphomeapi
 // DeviceInfo). Persisted in NVS as a UTF-8 string under key "hostname";
 // applied at boot via apply_hostname_from_nvs() — runtime POST writes
@@ -71,8 +92,12 @@ size_t build_hostname_json(char *buf, size_t cap);
 const char *handle_hostname_set(const char *query);
 
 #ifdef CONFIG_NBP_SMP
-size_t build_passkey_json(char *buf, size_t cap);
-const char *handle_passkey_set(const char *query);
+// Persist + apply the static SMP passkey used by the proxy when an
+// upstream peer (BMS, cloned device) demands pairing. Single entry
+// point shared with /clone — the standalone /passkey endpoint was
+// folded into /clone so the dashboard collects target MAC + passkey
+// in one POST. Returns nullptr on success, or a short error literal.
+const char *set_passkey(uint32_t pin);
 #endif
 
 #if CONFIG_NBP_DEVICES_PANEL
@@ -122,6 +147,13 @@ void apply_tx_power_from_nvs();
 // early (before WiFi/BLE init) makes the radios' init use the chosen
 // frequency from the start. Default if no NVS entry: 240 MHz.
 void apply_cpu_freq_from_nvs();
+
+// Read persisted advertising interval from NVS and apply it via
+// ble_backend::set_adv_interval_ms. Must run AFTER ble_backend::start
+// so NimBLEDevice::init has created the singleton; runs before the
+// first g_adv->start() in ble_httpd::activate or clone start_advertising
+// so the configured interval lands in the first HCI window.
+void apply_adv_interval_from_nvs();
 
 // Read persisted hostname from NVS into proxy::g_hostname. Must run
 // AFTER nvs_flash_init and BEFORE any consumer (wifi_sta, mdns_announce,

@@ -192,6 +192,22 @@ size_t dispatch(const char *method, char *path, char *out, size_t cap) {
                               api_server::stats::handle_cpufreq_set(query));
   }
 
+  if (is_get && std::strcmp(path, "/advitvl") == 0) {
+    return api_server::stats::build_advitvl_json(out, cap);
+  }
+  if (is_post && std::strcmp(path, "/advitvl") == 0) {
+    return render_ok_or_error(out, cap,
+                              api_server::stats::handle_advitvl_set(query));
+  }
+
+  if (is_get && std::strcmp(path, "/wifips") == 0) {
+    return api_server::stats::build_wifips_json(out, cap);
+  }
+  if (is_post && std::strcmp(path, "/wifips") == 0) {
+    return render_ok_or_error(out, cap,
+                              api_server::stats::handle_wifips_set(query));
+  }
+
   if (is_get && std::strcmp(path, "/hostname") == 0) {
     return api_server::stats::build_hostname_json(out, cap);
   }
@@ -208,15 +224,6 @@ size_t dispatch(const char *method, char *path, char *out, size_t cap) {
                               api_server::stats::handle_scan_set(query));
   }
 
-#ifdef CONFIG_NBP_SMP
-  if (is_get && std::strcmp(path, "/passkey") == 0) {
-    return api_server::stats::build_passkey_json(out, cap);
-  }
-  if (is_post && std::strcmp(path, "/passkey") == 0) {
-    return render_ok_or_error(out, cap,
-                              api_server::stats::handle_passkey_set(query));
-  }
-#endif
 
 #if CONFIG_NBP_DEVICES_PANEL
   if (is_get && std::strcmp(path, "/devices") == 0) {

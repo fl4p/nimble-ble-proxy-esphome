@@ -23,6 +23,11 @@ bool g_started = false;
 std::atomic<uint32_t> g_notify_rx_total{0};
 std::atomic<uint16_t> g_last_notify_handle{0};
 
+// Peripheral adv interval (0.625 ms units). 0 = use NimBLE host default
+// (~30..60 ms range). Set via stats::apply_adv_interval_from_nvs at
+// boot and via POST /advitvl at runtime.
+std::atomic<uint16_t> g_adv_interval_units{0};
+
 struct ble_gap_event_listener g_evt_listener;
 
 int notify_listener_cb(struct ble_gap_event *event, void *arg) {
@@ -53,6 +58,41 @@ uint32_t notify_rx_total() {
 
 uint16_t last_notify_handle() {
   return g_last_notify_handle.load(std::memory_order_relaxed);
+}
+
+uint16_t adv_interval_units() {
+  return g_adv_interval_units.load(std::memory_order_relaxed);
+}
+
+void set_adv_interval_ms(uint16_t ms) {
+  // 0 = host default. Anything else gets clamped to BLE-spec bounds so
+  // we never feed an HCI value the controller would reject (which would
+  // leave us silently not advertising).
+  uint16_t units = 0;
+  if (ms != 0) {
+    if (ms < 20) ms = 20;
+    if (ms > 10240) ms = 10240;
+    units = static_cast<uint16_t>(static_cast<uint32_t>(ms) * 1000u / 625u);
+  }
+  g_adv_interval_units.store(units, std::memory_order_relaxed);
+
+  // Apply to the singleton. NimBLEDevice::getAdvertising() returns null
+  // if init() hasn't run yet — early-boot apply lands here harmlessly
+  // and ble_httpd::activate / clone start_advertising picks the value
+  // up via adv_interval_units().
+  auto *adv = NimBLEDevice::getAdvertising();
+  if (adv == nullptr) return;
+  if (units != 0) {
+    adv->setMinInterval(units);
+    adv->setMaxInterval(units);
+  }
+  // Hot-restart: if we're currently advertising, stop+start so the new
+  // interval lands in the next HCI window. If not advertising, the
+  // configured params will be used on the next start() call.
+  if (adv->isAdvertising()) {
+    adv->stop();
+    adv->start();
+  }
 }
 
 void start() {

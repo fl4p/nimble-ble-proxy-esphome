@@ -2,12 +2,15 @@
 
 #ifdef CONFIG_NBP_CLONE
 
+#include "ble_backend.h"
 #include "clone_config.h"
 #include "clone_upstream.h"
 
 #include "NimBLEAdvertising.h"
 #include "NimBLECharacteristic.h"
+#include "host/ble_gap.h"    // ble_gap_adv_active for idempotent re-start
 #include "host/ble_gatt.h"   // ble_gatts_find_svc, post-start sanity probe
+#include "host/ble_hs_adv.h" // BLE_HS_ADV_TYPE_COMP_UUIDS128 for adv-fit check
 
 #if CONFIG_NBP_BLE_HTTPD
 #include "ble_httpd.h"
@@ -79,13 +82,15 @@ class ServerCb : public NimBLEServerCallbacks {
     ESP_LOGI(TAG, "local central connected, total=%u",
              g_connected_centrals.load(std::memory_order_relaxed));
     // Keep advertising so additional centrals can connect (multiplex).
-    if (g_adv != nullptr) g_adv->start();
+    // NimBLE-CPP's start() logs 'Advertising already active' as a WARN
+    // if adv is still running, so pre-check via the host API.
+    if (g_adv != nullptr && !ble_gap_adv_active()) g_adv->start();
   }
   void onDisconnect(NimBLEServer *, NimBLEConnInfo &info, int reason) override {
     uint8_t prev = g_connected_centrals.fetch_sub(1, std::memory_order_relaxed);
     ESP_LOGI(TAG, "local central disconnected reason=%d, remaining=%u",
              reason, prev > 0 ? prev - 1 : 0);
-    if (g_adv != nullptr) g_adv->start();
+    if (g_adv != nullptr && !ble_gap_adv_active()) g_adv->start();
   }
 };
 ServerCb g_server_cb;
@@ -474,12 +479,14 @@ void start_advertising(const char *base_name) {
   if (g_adv == nullptr) g_adv = NimBLEDevice::getAdvertising();
 
   config::Target t = config::snapshot();
-  // Adv name = base + suffix, truncated to ~28 chars to leave room for
-  // flags + tx power AD records in the 31-byte legacy adv payload.
+  // Adv name = base + suffix, truncated so flags + name AD fit in the
+  // 31-byte legacy adv payload: flags(3B) + name AD header(2B) = 5B, so
+  // name ≤ 26 chars. NimBLE's setName logs 'Data length exceeded' and
+  // drops the name entirely if we go over.
   char name[32] = {0};
   std::snprintf(name, sizeof(name), "%s%s", base_name ? base_name : "clone",
                 t.name_suffix);
-  name[28] = 0;
+  name[26] = 0;
 
   // NimBLEDevice was init'd with proxy::hostname() — override the adv
   // name so vendor apps find the cloned device by the expected name.
@@ -492,30 +499,44 @@ void start_advertising(const char *base_name) {
   // start_advertising attempt before name was known).
   g_adv->reset();
 
-  // Order matters:
-  //   1. setName BEFORE enableScanResponse → name lands in MAIN adv
-  //      payload (so passive scanners see it).
-  //   2. enableScanResponse(true) + addServiceUUID → service UUIDs
-  //      spill into the scan response if they don't fit alongside the
-  //      name in the 31-byte main payload. Active scanners (vendor
-  //      apps that filter by UUID) still find us via scan-response.
+  // reset() wipes the advertising-interval params back to "use host
+  // default" (NimBLEAdvertising::reset() reassigns to a default-
+  // constructed object). Re-apply the user override here so the value
+  // configured via POST /advitvl survives every clone reconnect cycle.
+  uint16_t adv_units = ble_backend::adv_interval_units();
+  if (adv_units != 0) {
+    g_adv->setMinInterval(adv_units);
+    g_adv->setMaxInterval(adv_units);
+  }
+
+  // Name in main payload (so passive scanners see it).
   g_adv->setName(name);
   g_adv->enableScanResponse(true);
 
-#if CONFIG_NBP_BLE_HTTPD
-  // Always advertise the dashboard service UUID so a Web Bluetooth
-  // picker filtering by it finds us regardless of which side last
-  // touched the advertising context. Added FIRST so it lands in the
-  // 31-byte main payload (one 128-bit UUID fits alongside flags +
-  // name); cloned service UUIDs spill into the scan response.
-  g_adv->addServiceUUID(
-      NimBLEUUID("6e627062-7072-7879-0001-000000000000"));
-#endif
+  // NimBLEAdvertising::addServiceUUID tries the main payload first and
+  // logs 'data length exceeded' when the UUID doesn't fit there, even
+  // when it then successfully falls back to scan response. To keep the
+  // log clean we build the scan-response payload directly on a local
+  // NimBLEAdvertisementData (which has no fallback path) and decide per
+  // UUID whether to add it to main or scan based on an exact fit check.
+  // A UUID of B bytes costs B+2 bytes as a new AD record, or B bytes
+  // coalesced into an existing same-type record.
+  auto ad_type_for = [](uint8_t bytes) {
+    return bytes == 2  ? BLE_HS_ADV_TYPE_COMP_UUIDS16
+         : bytes == 4  ? BLE_HS_ADV_TYPE_COMP_UUIDS32
+                       : BLE_HS_ADV_TYPE_COMP_UUIDS128;
+  };
+  auto fits = [&](const NimBLEAdvertisementData &d, uint8_t bytes) {
+    int type = ad_type_for(bytes);
+    size_t need = (d.getDataLocation(type) != -1) ? bytes : bytes + 2;
+    return d.getPayload().size() + need <= 31;
+  };
 
-  // Dedup by NimBLEService pointer (every char of the same service
-  // returns the same pointer from getService()), so we only attempt
-  // each unique UUID once. Was hitting 'data length exceeded' ~40
-  // times before because the loop iterated every char.
+  NimBLEAdvertisementData scan_rsp;
+
+  // Cloned upstream UUIDs first — vendor apps that filter by them need
+  // them advertised. Dedup by NimBLEService pointer (every char of the
+  // same service returns the same pointer from getService()).
   NimBLEService *seen[16] = {};
   size_t seen_n = 0;
   for (size_t i = 0; i < g_char_count; ++i) {
@@ -527,7 +548,36 @@ void start_advertising(const char *base_name) {
     }
     if (dup) continue;
     if (seen_n < sizeof(seen) / sizeof(seen[0])) seen[seen_n++] = svc;
-    g_adv->addServiceUUID(svc->getUUID());
+    auto uuid = svc->getUUID();
+    uint8_t bytes = uuid.bitSize() / 8;
+    if (bytes != 2 && bytes != 4 && bytes != 16) continue;
+    // Prefer main only when it has room; otherwise go directly to scan
+    // response (avoiding NimBLE's main-first error log).
+    if (fits(g_adv->getAdvertisementData(), bytes)) {
+      g_adv->addServiceUUID(uuid);
+    } else if (fits(scan_rsp, bytes)) {
+      scan_rsp.addServiceUUID(uuid);
+    } else {
+      ESP_LOGI(TAG, "adv budget full, dropping cloned UUID");
+    }
+  }
+
+#if CONFIG_NBP_BLE_HTTPD
+  // Dashboard UUID is best-effort. Try main first, then scan, else skip.
+  NimBLEUUID dash("6e627062-7072-7879-0001-000000000000");
+  if (fits(g_adv->getAdvertisementData(), 16)) {
+    g_adv->addServiceUUID(dash);
+  } else if (fits(scan_rsp, 16)) {
+    scan_rsp.addServiceUUID(dash);
+  } else {
+    ESP_LOGI(TAG,
+             "skipping dashboard UUID in adv: budget full "
+             "(picker can still filter by name)");
+  }
+#endif
+
+  if (scan_rsp.getPayload().size() > 0) {
+    g_adv->setScanResponseData(scan_rsp);
   }
 
   if (g_adv->start()) {

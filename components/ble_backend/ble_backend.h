@@ -25,4 +25,18 @@ void on_api_client_disconnect();
 uint32_t notify_rx_total();
 uint16_t last_notify_handle();
 
+// Configured peripheral advertising interval, in 0.625 ms units. 0
+// means "use NimBLE host default" (30..60 ms for connectable undirected
+// adv when CONFIG_BT_NIMBLE_HIGH_DUTY_ADV_ITVL is off). Consumers that
+// call NimBLEAdvertising::reset() must re-apply after reset; the
+// non-reset path picks the value up via the singleton.
+uint16_t adv_interval_units();
+
+// Set the desired advertising interval (in ms). 0 reverts to host
+// default; 20..10240 ms is the BLE-spec range. Updates the singleton
+// NimBLEAdvertising params immediately and hot-restarts adv if it's
+// currently active so a slider change takes effect within one cycle.
+// NVS persistence is the caller's responsibility (api_server::stats).
+void set_adv_interval_ms(uint16_t ms);
+
 }  // namespace ble_backend

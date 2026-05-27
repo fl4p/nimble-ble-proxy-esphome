@@ -164,6 +164,13 @@ constexpr uint32_t DEFAULT_PASSKEY = 123456;
 constexpr const char *NIMBLE_SCAN_TAGS[] = {
     "NimBLEScan", "NimBLEAdvertisedDevice",
 };
+// Per-read/write INFO from NimBLERemoteValueAttribute ('Write complete;
+// status=0' / 'Read complete; status=0') floods the log when clone is
+// proxying traffic. Capped at WARN regardless of the user-picked
+// level — real errors still surface as NIMBLE_LOGE on the same tag.
+constexpr const char *NIMBLE_NOISY_TAGS[] = {
+    "NimBLERemoteValueAttribute",
+};
 constexpr const char *NIMBLE_CORE_TAGS[] = {
     "NimBLE", "NimBLEDevice", "NimBLEClient",
     "NimBLERemoteCharacteristic",
@@ -175,10 +182,12 @@ void apply_level(esp_log_level_t lvl) {
   for (const char *tag : NIMBLE_CORE_TAGS) esp_log_level_set(tag, lvl);
   // NimBLE-Cpp's scanner logs "New advertiser: <mac>" at INFO on every
   // advert with wantDuplicates=true — instantly floods the console at
-  // INFO+. Cap scan tags at WARN regardless of the user-picked level;
-  // they only become more verbose via /trace ON's explicit override.
-  esp_log_level_t scan_lvl = (lvl < ESP_LOG_WARN) ? lvl : ESP_LOG_WARN;
-  for (const char *tag : NIMBLE_SCAN_TAGS) esp_log_level_set(tag, scan_lvl);
+  // INFO+. Cap scan + per-op tags at WARN regardless of the user-picked
+  // level; they only become more verbose via /trace ON's explicit
+  // override.
+  esp_log_level_t capped = (lvl < ESP_LOG_WARN) ? lvl : ESP_LOG_WARN;
+  for (const char *tag : NIMBLE_SCAN_TAGS) esp_log_level_set(tag, capped);
+  for (const char *tag : NIMBLE_NOISY_TAGS) esp_log_level_set(tag, capped);
   g_current_nimble_level = lvl;
 }
 
@@ -254,23 +263,6 @@ esp_err_t nvs_write_passkey(uint32_t pin) {
   return err;
 }
 
-esp_err_t passkey_get(httpd_req_t *req) {
-  char buf[32];
-  size_t n = build_passkey_json(buf, sizeof(buf));
-  httpd_resp_set_type(req, "application/json");
-  return httpd_resp_send(req, buf, n);
-}
-
-esp_err_t passkey_post(httpd_req_t *req) {
-  char query[32];
-  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
-    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
-  }
-  const char *err = handle_passkey_set(query);
-  if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
-  httpd_resp_set_type(req, "application/json");
-  return httpd_resp_send(req, "{\"ok\":true}", 11);
-}
 #endif  // CONFIG_NBP_SMP
 
 // ---- TX power (NVS-persisted) ----
@@ -286,15 +278,27 @@ esp_err_t passkey_post(httpd_req_t *req) {
 constexpr const char *NVS_WIFI_TX_KEY = "wifi_tx";
 constexpr const char *NVS_BLE_TX_KEY = "ble_tx";
 constexpr const char *NVS_CPU_FREQ_KEY = "cpu_freq";
+// WiFi power-save listen_interval (DTIM beacons between RX wakeups).
+// 0 = WIFI_PS_NONE (no sleep), 1..10 = WIFI_PS_MAX_MODEM with that
+// many DTIM beacons between wake-ups. wifi_sta.cpp reads the same NVS
+// key on boot via a private mirror (no cross-component dependency).
+constexpr const char *NVS_WIFI_LI_KEY = "wifi_li";
 constexpr int8_t DEFAULT_WIFI_TX_DBM = 20;
 constexpr int8_t DEFAULT_BLE_TX_DBM = 9;
 constexpr int DEFAULT_CPU_FREQ_MHZ = 240;
+constexpr int DEFAULT_WIFI_LI = 3;
 
 int8_t g_wifi_tx_dbm = DEFAULT_WIFI_TX_DBM;
 int8_t g_ble_tx_dbm = DEFAULT_BLE_TX_DBM;
 int g_cpu_freq_mhz = DEFAULT_CPU_FREQ_MHZ;
+int g_wifi_listen_interval = DEFAULT_WIFI_LI;
 
-bool g_light_sleep = false;
+// Default to on: combined with WIFI_PS_MAX_MODEM (configured in
+// wifi_sta), this lets the SoC coast between bursts of work without
+// affecting outbound TX latency. Existing NVS "cpu_ls" override keeps
+// whatever the user persisted, so flipping the default only affects
+// fresh devices / NVS-erased ones.
+bool g_light_sleep = true;
 
 // Runtime-only: set by handle_txpower_set when wifi=0. Not persisted —
 // a reboot brings WiFi back at the NVS-stored dBm so the device can't
@@ -394,6 +398,42 @@ esp_err_t cpufreq_post(httpd_req_t *req) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
   }
   const char *err = handle_cpufreq_set(query);
+  if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+
+esp_err_t wifips_get(httpd_req_t *req) {
+  char buf[32];
+  size_t n = build_wifips_json(buf, sizeof(buf));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, n);
+}
+
+esp_err_t wifips_post(httpd_req_t *req) {
+  char query[32];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
+  }
+  const char *err = handle_wifips_set(query);
+  if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+
+esp_err_t advitvl_get(httpd_req_t *req) {
+  char buf[32];
+  size_t n = build_advitvl_json(buf, sizeof(buf));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, n);
+}
+
+esp_err_t advitvl_post(httpd_req_t *req) {
+  char query[32];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
+  }
+  const char *err = handle_advitvl_set(query);
   if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, "{\"ok\":true}", 11);
@@ -830,23 +870,91 @@ const char *handle_cpufreq_set(const char *query) {
   return nullptr;
 }
 
-#ifdef CONFIG_NBP_SMP
-size_t build_passkey_json(char *buf, size_t cap) {
-  int n = std::snprintf(buf, cap, "{\"passkey\":%06lu}",
-                        static_cast<unsigned long>(
-                            ble_backend::connection::get_passkey()));
+// Peripheral advertising interval (ms). Stored as uint16 under NVS key
+// "adv_itvl". 0 means "use NimBLE host default" (~30..60 ms range for
+// connectable undirected adv); any other value clamps to the BLE-spec
+// bounds 20..10240 ms in ble_backend::set_adv_interval_ms. The reported
+// rate field is informational — at the controller layer the actual rate
+// depends on the random 0..10 ms delay the spec mandates per adv event.
+constexpr const char *NVS_ADV_ITVL_KEY = "adv_itvl";
+
+size_t build_advitvl_json(char *buf, size_t cap) {
+  // Reconstruct ms from the cached 0.625 ms units in ble_backend. 0
+  // units → 0 ms (= "default"); else round to the nearest ms.
+  uint16_t units = ble_backend::adv_interval_units();
+  uint16_t ms = (units == 0) ? 0 : static_cast<uint16_t>(
+      (static_cast<uint32_t>(units) * 625u + 500u) / 1000u);
+  int n = std::snprintf(buf, cap, "{\"ms\":%u}", static_cast<unsigned>(ms));
   if (n < 0) return 0;
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
 
-const char *handle_passkey_set(const char *query) {
+const char *handle_advitvl_set(const char *query) {
   char val[8];
-  if (httpd_query_key_value(query, "val", val, sizeof(val)) != ESP_OK) {
-    return "missing val=";
+  if (httpd_query_key_value(query, "ms", val, sizeof(val)) != ESP_OK) {
+    return "missing ms=";
   }
   long parsed = std::strtol(val, nullptr, 10);
-  if (parsed < 0 || parsed > 999999) return "passkey must be 0..999999";
-  uint32_t pin = static_cast<uint32_t>(parsed);
+  if (parsed < 0 || parsed > 10240) return "ms must be 0 or 20..10240";
+  if (parsed > 0 && parsed < 20) return "ms must be 0 or 20..10240";
+  uint16_t ms = static_cast<uint16_t>(parsed);
+
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+  if (err != ESP_OK) return "nvs open failed";
+  err = nvs_set_u16(h, NVS_ADV_ITVL_KEY, ms);
+  if (err == ESP_OK) err = nvs_commit(h);
+  nvs_close(h);
+  if (err != ESP_OK) return "nvs write failed";
+
+  ble_backend::set_adv_interval_ms(ms);
+  ESP_LOGI(TAG, "adv interval -> %u ms (persisted, hot-applied)",
+           static_cast<unsigned>(ms));
+  return nullptr;
+}
+
+// WiFi power-save listen interval. Stored as int8 0..10 (0 = PS_NONE,
+// >0 = PS_MAX_MODEM with that many DTIM beacons between wake-ups).
+// Reported as {"li":N} so the dashboard dropdown can show the saved
+// value. POST writes NVS and flips PS mode live; the listen_interval
+// field itself only takes effect on the next association, so the JS
+// pulses the reboot button as an apply hint (same UX as /hostname).
+size_t build_wifips_json(char *buf, size_t cap) {
+  int n = std::snprintf(buf, cap, "{\"li\":%d}", g_wifi_listen_interval);
+  if (n < 0) return 0;
+  return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+
+const char *handle_wifips_set(const char *query) {
+  char val[8];
+  if (httpd_query_key_value(query, "li", val, sizeof(val)) != ESP_OK) {
+    return "missing li=";
+  }
+  int li = std::atoi(val);
+  if (li < 0 || li > 10) return "li 0..10";
+  if (li == g_wifi_listen_interval) return nullptr;
+  if (nvs_write_i8(NVS_WIFI_LI_KEY, static_cast<int8_t>(li)) != ESP_OK) {
+    return "nvs write failed";
+  }
+  g_wifi_listen_interval = li;
+#if CONFIG_NBP_WIFI
+  // PS-mode flip is safe to apply live; listen_interval inside the
+  // wifi_config_t needs a reconnect to take effect on the AP — caller
+  // should reboot for the full change.
+  esp_wifi_set_ps(li > 0 ? WIFI_PS_MAX_MODEM : WIFI_PS_NONE);
+#endif
+  ESP_LOGI(TAG, "wifi li -> %d (persisted; listen_interval applies on reboot)",
+           li);
+  return nullptr;
+}
+
+#ifdef CONFIG_NBP_SMP
+// Persist + apply the static SMP passkey used when the proxy is the
+// initiator and the peer (BMS, cloned upstream, …) requests pairing.
+// Single source of truth — callers from /clone, future endpoints, or
+// boot-time NVS replay all funnel through here.
+const char *set_passkey(uint32_t pin) {
+  if (pin > 999999) return "passkey must be 0..999999";
   if (nvs_write_passkey(pin) != ESP_OK) return "nvs write failed";
   ble_backend::connection::set_passkey(pin);
   ESP_LOGI(TAG, "BLE passkey set to %06lu (persisted)",
@@ -914,6 +1022,7 @@ bool handle_trace_set(const char *query) {
   }
   if (on) {
     for (const char *tag : NIMBLE_SCAN_TAGS) esp_log_level_set(tag, ESP_LOG_ERROR);
+    for (const char *tag : NIMBLE_NOISY_TAGS) esp_log_level_set(tag, ESP_LOG_DEBUG);
     for (const char *tag : NIMBLE_CORE_TAGS) esp_log_level_set(tag, ESP_LOG_DEBUG);
     ble_backend::scanner::pause();
 #if CONFIG_NBP_WEB_CONSOLE
@@ -1031,6 +1140,25 @@ void schedule_reboot() {
   esp_timer_start_once(timer, 500000);
 }
 
+void apply_adv_interval_from_nvs() {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+    ble_backend::set_adv_interval_ms(0);
+    return;
+  }
+  uint16_t ms = 0;
+  esp_err_t err = nvs_get_u16(h, NVS_ADV_ITVL_KEY, &ms);
+  nvs_close(h);
+  if (err != ESP_OK) ms = 0;
+  ble_backend::set_adv_interval_ms(ms);
+  if (ms == 0) {
+    ESP_LOGI(TAG, "adv interval: host default (~30..60 ms)");
+  } else {
+    ESP_LOGI(TAG, "adv interval from NVS: %u ms",
+             static_cast<unsigned>(ms));
+  }
+}
+
 void apply_hostname_from_nvs() {
   nvs_handle_t h;
   if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
@@ -1103,6 +1231,14 @@ void apply_cpu_freq_from_nvs() {
            g_cpu_freq_mhz, g_light_sleep ? 1 : 0);
 }
 
+void apply_wifi_ps_from_nvs() {
+  int8_t v;
+  if (nvs_read_i8(NVS_WIFI_LI_KEY, &v) == ESP_OK && v >= 0 && v <= 10) {
+    g_wifi_listen_interval = v;
+  }
+  ESP_LOGI(TAG, "wifi listen_interval (NVS): %d", g_wifi_listen_interval);
+}
+
 #if CONFIG_NBP_WEB_CONSOLE
 void install_log_hook() {
   if (g_log_mutex != nullptr) return;  // already installed
@@ -1154,16 +1290,6 @@ void register_endpoints(httpd_handle_t srv) {
                        .method = HTTP_POST,
                        .handler = &trace_post,
                        .user_ctx = nullptr};
-#ifdef CONFIG_NBP_SMP
-  httpd_uri_t passkey_g = {.uri = "/passkey",
-                           .method = HTTP_GET,
-                           .handler = &passkey_get,
-                           .user_ctx = nullptr};
-  httpd_uri_t passkey_p = {.uri = "/passkey",
-                           .method = HTTP_POST,
-                           .handler = &passkey_post,
-                           .user_ctx = nullptr};
-#endif
   httpd_register_uri_handler(srv, &root);
   httpd_register_uri_handler(srv, &favicon);
   httpd_register_uri_handler(srv, &stats);
@@ -1194,6 +1320,26 @@ void register_endpoints(httpd_handle_t srv) {
                            .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &cpufreq_g);
   httpd_register_uri_handler(srv, &cpufreq_p);
+  httpd_uri_t advitvl_g = {.uri = "/advitvl",
+                           .method = HTTP_GET,
+                           .handler = &advitvl_get,
+                           .user_ctx = nullptr};
+  httpd_uri_t advitvl_p = {.uri = "/advitvl",
+                           .method = HTTP_POST,
+                           .handler = &advitvl_post,
+                           .user_ctx = nullptr};
+  httpd_register_uri_handler(srv, &advitvl_g);
+  httpd_register_uri_handler(srv, &advitvl_p);
+  httpd_uri_t wifips_g = {.uri = "/wifips",
+                          .method = HTTP_GET,
+                          .handler = &wifips_get,
+                          .user_ctx = nullptr};
+  httpd_uri_t wifips_p = {.uri = "/wifips",
+                          .method = HTTP_POST,
+                          .handler = &wifips_post,
+                          .user_ctx = nullptr};
+  httpd_register_uri_handler(srv, &wifips_g);
+  httpd_register_uri_handler(srv, &wifips_p);
   httpd_uri_t hostname_g = {.uri = "/hostname",
                             .method = HTTP_GET,
                             .handler = &hostname_get,
@@ -1214,10 +1360,6 @@ void register_endpoints(httpd_handle_t srv) {
                         .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &scan_g);
   httpd_register_uri_handler(srv, &scan_p);
-#ifdef CONFIG_NBP_SMP
-  httpd_register_uri_handler(srv, &passkey_g);
-  httpd_register_uri_handler(srv, &passkey_p);
-#endif
 #if CONFIG_NBP_DEVICES_PANEL
   httpd_uri_t devices = {.uri = "/devices",
                          .method = HTTP_GET,

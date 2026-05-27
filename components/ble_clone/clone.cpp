@@ -6,6 +6,18 @@
 #include "clone_mirror.h"
 #include "clone_upstream.h"
 
+#ifdef CONFIG_NBP_SMP
+#include "connection.h"  // ble_backend::connection::get_passkey
+// Forward-declare the api_server::stats helper instead of pulling in
+// stats.h. Components are linked under main so the symbol resolves at
+// link time without adding an api_server REQUIRES edge (which would
+// drag the dashboard's transitive deps — esp_pm, esp_driver_tsens —
+// into the BLE-only build profile).
+namespace api_server::stats {
+const char *set_passkey(uint32_t pin);
+}
+#endif
+
 #include "esp_http_server.h"
 #include "esp_log.h"
 
@@ -73,6 +85,13 @@ size_t build_clone_json(char *buf, size_t cap) {
   char mac_s[20];
   fmt_mac(t.address, mac_s, sizeof(mac_s));
 
+#ifdef CONFIG_NBP_SMP
+  // The SMP passkey applies to ALL outbound GATT pairings — clone
+  // upstream + any ESPHome-proxy peer that demands MITM auth — but it
+  // lives in the same JSON as the clone target because the dashboard
+  // collects them together when the user clones a paired peripheral.
+  uint32_t passkey = ble_backend::connection::get_passkey();
+#endif
   int n = std::snprintf(
       buf, cap,
       "{"
@@ -80,6 +99,9 @@ size_t build_clone_json(char *buf, size_t cap) {
       "\"addr\":\"%s\","
       "\"type\":%u,"
       "\"name_suffix\":\"%s\","
+#ifdef CONFIG_NBP_SMP
+      "\"passkey\":%06lu,"
+#endif
       "\"state\":\"%s\","
       "\"mtu\":%u,"
       "\"reconnects\":%lu,"
@@ -94,6 +116,9 @@ size_t build_clone_json(char *buf, size_t cap) {
       "\"advertising\":%s"
       "}",
       t.enabled ? "true" : "false", mac_s, t.address_type, t.name_suffix,
+#ifdef CONFIG_NBP_SMP
+      static_cast<unsigned long>(passkey),
+#endif
       state_name(us.state), us.mtu,
       static_cast<unsigned long>(us.reconnects),
       static_cast<unsigned long>(us.last_disconnect_reason),
@@ -137,6 +162,19 @@ const char *handle_clone_set(const char *query, bool *reboot_required) {
     std::strncpy(next.name_suffix, buf, sizeof(next.name_suffix) - 1);
     next.name_suffix[sizeof(next.name_suffix) - 1] = 0;
   }
+#ifdef CONFIG_NBP_SMP
+  // Optional passkey — when the upstream is a paired peer (BMS,
+  // SmartShunt, …). Persisted via api_server::stats so the single
+  // source of truth stays there; we just funnel the new value in
+  // because /clone is the user-facing knob.
+  if (httpd_query_key_value(query, "passkey", buf, sizeof(buf)) == ESP_OK) {
+    long pin = std::strtol(buf, nullptr, 10);
+    if (pin < 0 || pin > 999999) return "passkey must be 0..999999";
+    const char *perr = api_server::stats::set_passkey(
+        static_cast<uint32_t>(pin));
+    if (perr != nullptr) return perr;
+  }
+#endif
 
   if (!config::set(next)) return "nvs write failed";
 

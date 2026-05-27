@@ -147,6 +147,10 @@ extern "C" void app_main() {
   api_server::stats::apply_cpu_freq_from_nvs();
 
 #if CONFIG_NBP_WIFI
+  // Load persisted WiFi listen_interval into the in-RAM mirror so the
+  // dashboard GET reflects the saved value. wifi_sta itself reads the
+  // same NVS key independently when stamping wifi_config_t.
+  api_server::stats::apply_wifi_ps_from_nvs();
   wifi_sta::start_and_wait_for_ip();
   mdns_announce::start();
   ota::start();
@@ -160,6 +164,14 @@ extern "C" void app_main() {
                                 &api_server::has_active_client);
 #endif
   ble_backend::start();
+
+  // NimBLE host is up, NimBLEDevice::getAdvertising() returns a valid
+  // singleton. Apply the persisted advertising interval *before* any
+  // adv->start() call below so the configured rate lands in the first
+  // HCI window. clone_mirror::start_advertising re-reads the value
+  // after its g_adv->reset() call.
+  api_server::stats::apply_adv_interval_from_nvs();
+
 #if CONFIG_NBP_WIFI
   api_server::start();
 #endif

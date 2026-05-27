@@ -46,6 +46,12 @@ footer{margin-top:1em;color:#888;font-size:.85em}
 code{color:#bbb}
 #controls,#tunables{margin:1em 0;display:flex;flex-wrap:wrap;
   gap:.6em 1em;align-items:center}
+#tunables{flex-direction:column;align-items:stretch;gap:0}
+.tgroup{display:flex;flex-wrap:wrap;gap:.5em 1em;align-items:center;
+  padding:.4em 0;border-top:1px solid #222}
+.tgroup:first-child{border-top:none;padding-top:0}
+.tgroup .glabel{color:#3b82f6;font-size:.78em;text-transform:uppercase;
+  letter-spacing:.08em;min-width:3.2em;font-weight:600}
 #controls label,#tunables label{color:#aaa;
   display:inline-flex;align-items:center;gap:.3em}
 #controls select,#controls button,
@@ -75,10 +81,16 @@ table#devices th,table#devices td{padding:.2em .6em;
 table#devices th{color:#888;font-weight:normal}
 table#devices .r{text-align:right;font-variant-numeric:tabular-nums}
 table#devices tr.stale{opacity:.4}
+table#devices tr.synthetic td{color:#888;font-style:italic}
+table#devices tr.synthetic.cloned td{color:#a0a0a0}
+table#devices tr.cloned td{background:#0d1f3a;
+  box-shadow:inset 2px 0 0 #3b82f6}
 table#devices button.clone-btn{background:#1a1a1a;border:1px solid #333;
   color:#ddd;font:inherit;padding:.1em .5em;border-radius:3px;cursor:pointer}
 table#devices button.clone-btn:hover{background:#2a2a2a}
 table#devices button.clone-btn:disabled{opacity:.5;cursor:default}
+table#devices button.clone-btn.cloned{border-color:#7f1d1d;color:#fca5a5}
+table#devices button.clone-btn.cloned:hover{background:#3b0a0a}
 .hidden{display:none}
 #unsupported{background:#3b0a0a;color:#fca5a5;padding:1em;border-radius:6px;
   border:1px solid #7f1d1d;margin-bottom:1em}
@@ -111,47 +123,91 @@ table#devices button.clone-btn:disabled{opacity:.5;cursor:default}
     <th></th>
   </tr></thead><tbody></tbody></table></div>
 
+  <!-- Tunables grouped by subsystem: CPU → WiFi → BLE → device.
+       Each group is a flex-wrap row that collapses cleanly on narrow
+       viewports. "BLE scan" here means central-role scanning (advert
+       collection for HA + clone upstream discovery); peripheral-mode
+       advertising parameters aren't currently exposed. -->
   <div id=tunables>
-    <label>NimBLE log: <select id=lvl>
-      <option value=0>NONE</option>
-      <option value=1>ERROR</option>
-      <option value=2>WARN</option>
-      <option value=3>INFO</option>
-      <option value=4>DEBUG</option>
-      <option value=5>VERBOSE</option>
-    </select></label>
-    <label>WiFi TX: <select id=wtx>
-      <option value=0>off</option>
-      <option value=8>8</option><option value=11>11</option>
-      <option value=14>14</option><option value=17>17</option>
-      <option value=20>20</option><option value=21>21</option>
-    </select> dBm</label>
-    <label>BLE TX: <select id=btx>
-      <option value=-12>-12</option><option value=-9>-9</option>
-      <option value=-6>-6</option><option value=-3>-3</option>
-      <option value=0>0</option><option value=3>3</option>
-      <option value=6>6</option><option value=9>9</option>
-    </select> dBm</label>
-    <label>CPU: <select id=cpu>
-      <option value=80>80</option><option value=160>160</option>
-      <option value=240>240</option>
-    </select> MHz</label>
-    <!-- BLE scan duty cycle. Values are "<window_ms>,<interval_ms>";
-         JS splits and POSTs both. Lower duty = cooler chip, slower
-         pickup of new advertisers. -->
-    <label>BLE scan: <select id=duty>
-      <option value="30,60">50% (responsive)</option>
-      <option value="30,120">25%</option>
-      <option value="30,300">10% (balanced)</option>
-      <option value="30,1000">3% (cool)</option>
-    </select></label>
-    <label><input type=checkbox id=ls> light sleep</label>
-    <label><input type=checkbox id=act> active scan</label>
-    <!-- Hostname drives mDNS / WiFi netif / NimBLE GAP name / aioesphomeapi
-         DeviceInfo. Save persists to NVS; takes effect on next reboot. -->
-    <label>name: <input type=text id=hn maxlength=30 spellcheck=false
-                        autocomplete=off></label>
-    <button id=reboot class=danger>reboot device</button>
+    <div class=tgroup>
+      <span class=glabel>CPU</span>
+      <label>freq: <select id=cpu>
+        <option value=80>80</option><option value=160>160</option>
+        <option value=240>240</option>
+      </select> MHz</label>
+      <label><input type=checkbox id=ls> light sleep</label>
+    </div>
+
+    <div class=tgroup>
+      <span class=glabel>WiFi</span>
+      <label>TX: <select id=wtx>
+        <option value=0>off</option>
+        <option value=8>8</option><option value=11>11</option>
+        <option value=14>14</option><option value=17>17</option>
+        <option value=20>20</option><option value=21>21</option>
+      </select> dBm</label>
+      <!-- WiFi power-save listen_interval (DTIM beacons between RX wakeups).
+           0 = no sleep (lowest RX latency, highest current). 1..N = sleep
+           across N DTIMs; TX is always immediate, only inbound packets
+           wait. Change persists to NVS; full effect needs a reboot to
+           restamp the AP association. -->
+      <label>PS: <select id=wps>
+        <option value=0>off</option>
+        <option value=1>1×DTIM</option>
+        <option value=3>3×DTIM</option>
+        <option value=5>5×DTIM</option>
+        <option value=10>10×DTIM</option>
+      </select></label>
+    </div>
+
+    <div class=tgroup>
+      <span class=glabel>BLE</span>
+      <label>TX: <select id=btx>
+        <option value=-12>-12</option><option value=-9>-9</option>
+        <option value=-6>-6</option><option value=-3>-3</option>
+        <option value=0>0</option><option value=3>3</option>
+        <option value=6>6</option><option value=9>9</option>
+      </select> dBm</label>
+      <!-- Peripheral advertising interval. 0 = NimBLE host default
+           (~30..60 ms = ~17..33 adv/s). Larger values are big TX-duty
+           savings since each adv burst transmits on 3 primary channels;
+           cost is slower discovery by phones. -->
+      <label>adv: <select id=advitvl>
+        <option value=0>default (~17–33/s)</option>
+        <option value=100>100 ms (10/s)</option>
+        <option value=200>200 ms (5/s)</option>
+        <option value=500>500 ms (2/s)</option>
+        <option value=1000>1000 ms (1/s)</option>
+        <option value=2000>2000 ms (0.5/s)</option>
+      </select></label>
+      <!-- Central-role scan duty cycle. Values are "<window_ms>,<interval_ms>";
+           JS splits and POSTs both. Lower duty = cooler chip, slower
+           pickup of new advertisers. -->
+      <label>scan: <select id=duty>
+        <option value="30,60">50% (responsive)</option>
+        <option value="30,120">25%</option>
+        <option value="30,300">10% (balanced)</option>
+        <option value="30,1000">3% (cool)</option>
+      </select></label>
+      <label><input type=checkbox id=act> active scan</label>
+      <label>log: <select id=lvl>
+        <option value=0>NONE</option>
+        <option value=1>ERROR</option>
+        <option value=2>WARN</option>
+        <option value=3>INFO</option>
+        <option value=4>DEBUG</option>
+        <option value=5>VERBOSE</option>
+      </select></label>
+    </div>
+
+    <div class=tgroup>
+      <span class=glabel>device</span>
+      <!-- Hostname drives mDNS / WiFi netif / NimBLE GAP name / aioesphomeapi
+           DeviceInfo. Save persists to NVS; takes effect on next reboot. -->
+      <label>name: <input type=text id=hn maxlength=30 spellcheck=false
+                          autocomplete=off></label>
+      <button id=reboot class=danger>reboot device</button>
+    </div>
   </div>
 
   <h2>device log</h2>
@@ -324,6 +380,27 @@ async function apiJson(line) {
 }
 
 async function connect() {
+  // Web Bluetooth requires a secure context (HTTPS or localhost). On
+  // plain http://<ip>/ — the typical way the dashboard is reached
+  // when served by the on-device httpd — navigator.bluetooth is
+  // undefined. In that case the user almost certainly wanted HTTP
+  // mode; reprobe once before giving up so a transient probe failure
+  // (e.g. the post-OTA reboot window) doesn't strand them in BLE mode.
+  if (!navigator.bluetooth) {
+    if (await probeHttpTransport()) {
+      TRANSPORT = 'http';
+      document.getElementById('controls').classList.add('hidden');
+      document.getElementById('app').classList.remove('hidden');
+      if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
+      if (u_cpu)   u_cpu  .setSize({ width: chartW(chart2El), height: 200 });
+      loadInitialValues();
+      startPolling();
+      return;
+    }
+    document.getElementById('unsupported').classList.remove('hidden');
+    setStatus('Web Bluetooth unavailable in this browser/context', 'err');
+    return;
+  }
   setStatus('requesting…');
   const device = await navigator.bluetooth.requestDevice({
     filters: [{ services: [SVC] }],
@@ -486,13 +563,66 @@ async function tickLog() {
 }
 
 let g_devPrev = {};
+// Cached snapshot of the clone target (addr + enabled + supervisor
+// state). Refreshed in tickDevices so the device-row highlight stays
+// in sync with /clone state changes initiated elsewhere (e.g. via the
+// BLE transport). `state` mirrors upstream::State on the device side
+// — used to pick a sensible "name" label for the synthetic row when
+// the scanner can't see the target (BLE peripherals stop advertising
+// during an active connection, so a successfully-cloned peer would
+// otherwise look "not in range").
+let g_cloneTarget = { addr: null, enabled: false, state: 'Idle' };
 async function tickDevices() {
   try {
-    const data = await apiJson('GET /devices');
+    // /clone is small (~250 B) and /devices already runs at 1 Hz, so we
+    // just piggyback on the same tick. Failure of /clone (e.g. clone
+    // feature compiled out) shouldn't block the device table.
+    const [data, clone] = await Promise.all([
+      apiJson('GET /devices'),
+      apiJson('GET /clone').catch(() => null),
+    ]);
+    if (clone) {
+      // build_clone_json renders 00:00:00:00:00:00 when no target has
+      // been set yet — treat that as "no active clone" regardless of
+      // the enabled flag.
+      const hasTarget = clone.addr && clone.addr !== '00:00:00:00:00:00';
+      g_cloneTarget = {
+        addr: hasTarget ? clone.addr.toUpperCase() : null,
+        enabled: !!clone.enabled && hasTarget,
+        state: clone.state || 'Idle',
+      };
+    }
     const d = data.devices;
     const now = performance.now() / 1000;
     const next = {};
     d.sort((a, b) => b.count - a.count);
+    // Always show the configured clone target — even when the scanner
+    // hasn't observed it this window. The user needs the row to remain
+    // reachable so they can unclone or re-pair without waiting for the
+    // peripheral to come back into range. The label depends on the
+    // supervisor state: a connected peer naturally goes silent on adv
+    // (BLE spec — non-connectable mode while in a connection), so we
+    // mustn't call that "not in range".
+    if (g_cloneTarget.addr &&
+        !d.some(x => x.addr.toUpperCase() === g_cloneTarget.addr)) {
+      const synLabels = {
+        Ready: '(connected to upstream)',
+        Discovering: '(discovering upstream…)',
+        Connecting: '(connecting to upstream…)',
+        Reconnecting: '(reconnecting to upstream…)',
+        Scanning: '(searching for upstream…)',
+        Idle: '(clone target, idle)',
+        Disabled: '(clone target, disabled)',
+      };
+      const label = synLabels[g_cloneTarget.state] ||
+                    '(clone target, not in range)';
+      d.unshift({
+        addr: g_cloneTarget.addr,
+        name: label,
+        rssi: '—', count: '—', age: null, type: 0,
+        synthetic: true,
+      });
+    }
     const tb = document.querySelector('#devices tbody');
     tb.textContent = '';
     for (const x of d) {
@@ -505,13 +635,21 @@ async function tickDevices() {
           if (v >= 0) rate = v.toFixed(1);
         }
       }
-      next[x.addr] = { count: x.count, t: now };
+      if (!x.synthetic) next[x.addr] = { count: x.count, t: now };
       const tr = document.createElement('tr');
-      if (x.age > 10000) tr.className = 'stale';
+      const isCloned = g_cloneTarget.enabled &&
+                       g_cloneTarget.addr === x.addr.toUpperCase();
+      const classes = [];
+      if (x.synthetic) classes.push('synthetic');
+      else if (x.age > 10000) classes.push('stale');
+      if (isCloned) classes.push('cloned');
+      if (classes.length) tr.className = classes.join(' ');
+      const ageStr = x.synthetic ? '—' :
+        (x.age / 1000).toFixed(1) + 's';
       const cells = [
         [x.addr, ''], [x.name || '', ''],
-        [x.rssi, 'r'], [rate, 'r'], [x.count, 'r'],
-        [(x.age / 1000).toFixed(1) + 's', 'r'],
+        [x.rssi, 'r'], [x.synthetic ? '—' : rate, 'r'],
+        [x.count, 'r'], [ageStr, 'r'],
       ];
       for (const [v, cls] of cells) {
         const td = document.createElement('td');
@@ -521,8 +659,8 @@ async function tickDevices() {
       }
       const tdBtn = document.createElement('td');
       const btn = document.createElement('button');
-      btn.className = 'clone-btn';
-      btn.textContent = 'clone';
+      btn.className = isCloned ? 'clone-btn cloned' : 'clone-btn';
+      btn.textContent = isCloned ? 'unclone' : 'clone';
       btn.dataset.addr = x.addr;
       btn.dataset.type = x.type;
       tdBtn.appendChild(btn);
@@ -557,6 +695,8 @@ async function loadInitialValues() {
     wtx.disabled = p.wifi === 0;
     const f = await apiJson('GET /cpufreq'); cpu.value = f.mhz;
     document.getElementById('ls').checked = !!f.ls;
+    const ps = await apiJson('GET /wifips');
+    document.getElementById('wps').value = String(ps.li);
     const sc = await apiJson('GET /scan');
     const duty = document.getElementById('duty');
     const key = `${sc.window},${sc.interval}`;
@@ -564,6 +704,14 @@ async function loadInitialValues() {
     // dropdown showing the first option (we don't add a custom row).
     for (const opt of duty.options) if (opt.value === key) duty.value = key;
     document.getElementById('act').checked = !!sc.active;
+    // /advitvl returns the rounded ms; match against a preset if one
+    // fits exactly. NimBLE's host rounds to 0.625 ms units internally,
+    // so 100/200/500/1000/2000 ms always round-trip without drift.
+    const ai = await apiJson('GET /advitvl');
+    const advitvl = document.getElementById('advitvl');
+    for (const opt of advitvl.options) {
+      if (parseInt(opt.value, 10) === ai.ms) { advitvl.value = opt.value; break; }
+    }
     const hn = document.getElementById('hn');
     const h = await apiJson('GET /hostname');
     hn.value = h.hostname;
@@ -593,6 +741,17 @@ function wireControls() {
     apiText('POST /cpufreq?ls=' + (e.target.checked ? 1 : 0))
       .catch(err => alert(err));
   };
+  // WiFi PS: PS-mode toggle is live, but listen_interval inside
+  // wifi_config_t only takes effect on the next AP association — pulse
+  // the reboot button as an apply hint (same UX as hostname).
+  document.getElementById('wps').onchange = e => {
+    apiText('POST /wifips?li=' + e.target.value).then(() => {
+      const rb = document.getElementById('reboot');
+      rb.classList.add('primary');
+      rb.classList.remove('danger');
+      rb.textContent = 'reboot to apply PS';
+    }).catch(err => alert(err));
+  };
   document.getElementById('duty').onchange = e => {
     const [w, i] = e.target.value.split(',');
     apiText(`POST /scan?window=${w}&interval=${i}`).catch(err => alert(err));
@@ -600,6 +759,9 @@ function wireControls() {
   document.getElementById('act').onchange = e => {
     apiText('POST /scan?active=' + (e.target.checked ? 1 : 0))
       .catch(err => alert(err));
+  };
+  document.getElementById('advitvl').onchange = e => {
+    apiText('POST /advitvl?ms=' + e.target.value).catch(err => alert(err));
   };
   // Hostname: show dirty marker on edit; save on Enter or blur. POST
   // only persists — apply happens on next boot, so we update the saved
@@ -657,28 +819,74 @@ function wireControls() {
   // Delegated handler so we don't re-bind every poll. The button carries
   // addr + addr-type from the scanner row; clone supervisor picks the
   // change up live (only first-time MAC change after mirror has built
-  // sets reboot_required).
+  // sets reboot_required). When the row is the active clone target the
+  // button is in `.cloned` state and the click toggles enabled=0
+  // instead of starting a new clone session.
   document.querySelector('#devices').addEventListener('click', async (e) => {
     const b = e.target.closest('button.clone-btn');
     if (!b) return;
     const addr = b.dataset.addr;
     const type = b.dataset.type || '0';
-    if (!confirm(`Clone ${addr}?`)) return;
+    const wasCloned = b.classList.contains('cloned');
+    const action = wasCloned ? 'Stop cloning' : 'Clone';
+    if (!confirm(`${action} ${addr}?`)) return;
+    // When starting a clone, give the user a chance to set the static
+    // SMP passkey in the same step. Most peers don't need pairing —
+    // empty / cancel keeps the existing value. /clone GET response
+    // includes the current passkey only when CONFIG_NBP_SMP is on, so
+    // we use that as the "is pairing supported" probe.
+    let passkey = null;
+    if (!wasCloned) {
+      try {
+        const cur = await apiJson('GET /clone');
+        if (cur && typeof cur.passkey !== 'undefined') {
+          const ans = prompt(
+            `If ${addr} requires pairing, enter its 6-digit passkey.\n` +
+            'Leave blank to keep the current value or skip pairing.',
+            String(cur.passkey).padStart(6, '0'));
+          if (ans === null) {
+            // User pressed Cancel — abort the whole clone gesture so
+            // there's no surprise about what got saved.
+            return;
+          }
+          const trimmed = ans.trim();
+          if (trimmed !== '' && trimmed !== String(cur.passkey).padStart(6, '0')) {
+            if (!/^\d{1,6}$/.test(trimmed)) {
+              alert('Passkey must be 0..999999');
+              return;
+            }
+            passkey = parseInt(trimmed, 10);
+          }
+        }
+      } catch (_) { /* /clone GET failed — clone may not be built */ }
+    }
     b.disabled = true;
     const prev = b.textContent;
     b.textContent = '…';
     try {
-      const r = await apiJson(
-        `POST /clone?addr=${addr}&type=${type}&enabled=1`);
-      b.textContent = r.reboot_required ? 'reboot' : 'ok';
+      let query;
+      if (wasCloned) {
+        query = 'enabled=0';
+      } else {
+        query = `addr=${addr}&type=${type}&enabled=1`;
+        if (passkey !== null) query += `&passkey=${passkey}`;
+      }
+      const r = await apiJson(`POST /clone?${query}`);
+      // The next /clone poll inside tickDevices will repaint the row,
+      // so we don't have to re-derive the button label here — leave a
+      // brief acknowledgement that survives until the next 1 s tick.
+      b.textContent = r.reboot_required ? 'reboot' : (wasCloned ? 'stopped' : 'ok');
       if (r.reboot_required) alert(
         'Target MAC changed after the GATT mirror was already built. ' +
         'Reboot the device to rebuild against the new target.');
+      if (wasCloned) alert(
+        'Clone disabled. The GATT mirror stays registered until the ' +
+        'next reboot — reconnects to the upstream are suspended.');
     } catch (err) {
       b.textContent = prev;
       alert(err);
     } finally {
-      setTimeout(() => { b.disabled = false; b.textContent = prev; }, 2000);
+      setTimeout(() => { b.disabled = false; }, 1500);
     }
   });
 
@@ -694,6 +902,11 @@ initCharts();
 wireControls();
 
 (async () => {
+  // Disable Connect while the HTTP probe is in flight so a fast click
+  // during boot can't race into the BLE path before we've decided the
+  // transport. Re-enabled below if we fall through to BLE mode.
+  const connectBtn = document.getElementById('connect');
+  connectBtn.disabled = true;
   if (await probeHttpTransport()) {
     TRANSPORT = 'http';
     // Served by the on-device httpd — no Connect step. Hide the BLE-only
@@ -706,7 +919,10 @@ wireControls();
     startPolling();
   } else if (!navigator.bluetooth) {
     document.getElementById('unsupported').classList.remove('hidden');
-    document.getElementById('connect').disabled = true;
+    // Leave Connect disabled — connect() itself will reprobe HTTP on
+    // click if the user retries after the device reboot finishes.
+  } else {
+    connectBtn.disabled = false;
   }
 })();
 </script>
