@@ -24,10 +24,76 @@
 
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 
 namespace {
 constexpr const char *TAG = "main";
+
+#if CONFIG_NBP_CLONE_BOOT_GUARD
+// Boot-safety guard: if the previous boot crashed within BOOT_STABLE_US
+// of app_main start, force-disable ble_clone on the next boot. A panic
+// loop caused by a malformed cloned GATT DB (or a host stack hit on a
+// specific characteristic) would otherwise repeat indefinitely and
+// brick the device until reflash. The user can re-enable clone via
+// /clone once the underlying issue is fixed.
+constexpr const char *NBP_BOOT_NS = "nbp_boot";
+constexpr const char *NBP_BOOT_PENDING_KEY = "pending";
+constexpr int64_t BOOT_STABLE_US =
+    static_cast<int64_t>(CONFIG_NBP_CLONE_BOOT_GUARD_SECS) * 1000 * 1000;
+
+bool boot_was_unstable() {
+  esp_reset_reason_t reason = esp_reset_reason();
+  bool crash_class = (reason == ESP_RST_PANIC ||
+                      reason == ESP_RST_INT_WDT ||
+                      reason == ESP_RST_TASK_WDT ||
+                      reason == ESP_RST_WDT ||
+                      reason == ESP_RST_BROWNOUT);
+
+  nvs_handle_t h;
+  if (nvs_open(NBP_BOOT_NS, NVS_READWRITE, &h) != ESP_OK) return false;
+
+  uint8_t pending = 0;
+  nvs_get_u8(h, NBP_BOOT_PENDING_KEY, &pending);
+  bool bad_boot = crash_class && pending != 0;
+
+  nvs_set_u8(h, NBP_BOOT_PENDING_KEY, 1);
+  nvs_commit(h);
+  nvs_close(h);
+
+  if (bad_boot) {
+    ESP_LOGE(TAG,
+             "previous boot crashed within %lld s (reset_reason=%d); "
+             "BLE clone will be force-disabled",
+             BOOT_STABLE_US / 1000000, static_cast<int>(reason));
+  }
+  return bad_boot;
+}
+
+void schedule_boot_stable_mark() {
+  static esp_timer_handle_t timer = nullptr;
+  if (timer != nullptr) return;
+  esp_timer_create_args_t args = {
+      .callback = [](void *) {
+        nvs_handle_t h;
+        if (nvs_open(NBP_BOOT_NS, NVS_READWRITE, &h) != ESP_OK) return;
+        nvs_set_u8(h, NBP_BOOT_PENDING_KEY, 0);
+        nvs_commit(h);
+        nvs_close(h);
+        ESP_LOGI(TAG, "boot stable for %lld s; cleared boot-guard flag",
+                 BOOT_STABLE_US / 1000000);
+      },
+      .arg = nullptr,
+      .dispatch_method = ESP_TIMER_TASK,
+      .name = "bootstable",
+      .skip_unhandled_events = false,
+  };
+  esp_timer_create(&args, &timer);
+  esp_timer_start_once(timer, BOOT_STABLE_US);
+}
+#endif  // CONFIG_NBP_CLONE_BOOT_GUARD
 }
 
 // Runtime hostname buffer declared in proxy_config.h. Pre-initialised
@@ -56,6 +122,13 @@ extern "C" void app_main() {
   ESP_ERROR_CHECK(esp_event_loop_create_default());
 
   ESP_LOGI(TAG, "nimble-ble-proxy %s booting", proxy::VERSION);
+
+#if CONFIG_NBP_CLONE_BOOT_GUARD
+  // Check before any clone code runs so config::load() can be overridden
+  // below. Always rearms `pending=1` in NVS — cleared by the one-shot
+  // at the end of app_main once we've been up CONFIG_NBP_CLONE_BOOT_GUARD_SECS.
+  const bool clone_force_disable = boot_was_unstable();
+#endif
 
   // NVS is up — load persisted hostname into proxy::g_hostname before
   // any subsystem reads `proxy::hostname()` (mDNS, esp_netif, NimBLE
@@ -109,6 +182,16 @@ extern "C" void app_main() {
   // changes (target MAC, enable/disable) — same pattern as /passkey
   // under CONFIG_NBP_SMP.
   ble_clone::config::load();
+#if CONFIG_NBP_CLONE_BOOT_GUARD
+  if (clone_force_disable) {
+    auto t = ble_clone::config::snapshot();
+    if (t.enabled) {
+      t.enabled = false;
+      ble_clone::config::set(t);
+      ESP_LOGE(TAG, "BLE clone force-disabled due to unstable previous boot");
+    }
+  }
+#endif
   ble_clone::init();
 #if CONFIG_NBP_WIFI
   ble_clone::register_endpoints(ota::handle());
@@ -138,6 +221,14 @@ extern "C" void app_main() {
   // window/interval override now (uses scanner::set_duty which is a
   // no-op until init() has been called by ble_backend::start).
   api_server::stats::apply_scan_from_nvs();
+
+#if CONFIG_NBP_CLONE_BOOT_GUARD
+  // Arm the "boot stable" mark. If we survive CONFIG_NBP_CLONE_BOOT_GUARD_SECS
+  // without a crash-class reset, the pending flag is cleared in NVS and
+  // clone remains enabled across the next reboot. A panic before then
+  // leaves the flag set; the next boot reads it and force-disables clone.
+  schedule_boot_stable_mark();
+#endif
 
   ESP_LOGI(TAG, "boot complete; main task exiting");
 }

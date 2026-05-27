@@ -94,6 +94,39 @@ config NBP_CLONE
         is cloned. NimBLE GATT registration is one-shot, so re-targeting
         requires a reboot: POST /clone?addr=...&type=N then reboot.
 
+config NBP_CLONE_BOOT_GUARD
+    bool "Clone: disable on next boot if previous boot panicked early"
+    depends on NBP_CLONE
+    default y
+    help
+        Boot-loop safety net. At app_main start, check esp_reset_reason()
+        and a "boot_pending" flag in NVS (namespace nbp_boot). If the
+        previous run set the flag and this boot was triggered by a
+        crash-class reset (panic, INT/TASK/WDT, brownout), force-disable
+        the clone target (clone_config: enabled=false) before
+        ble_clone::init() runs, so the next reboot does not repeat the
+        same crash path.
+
+        The flag is rearmed on every boot and cleared by an esp_timer
+        one-shot after CONFIG_NBP_CLONE_BOOT_GUARD_SECS seconds of
+        uptime. The user can re-enable clone via POST /clone after
+        fixing the underlying issue.
+
+        Turn off if you'd rather have the device keep retrying clone
+        across crashes (e.g. you trust the upstream and want to ride out
+        transient panics).
+
+config NBP_CLONE_BOOT_GUARD_SECS
+    int "Clone: boot-guard stable-uptime window (seconds)"
+    depends on NBP_CLONE_BOOT_GUARD
+    default 60
+    range 10 600
+    help
+        How long the device must stay up without a crash-class reset
+        before the boot-pending flag is cleared. A panic that happens
+        after this window does not trigger the force-disable path; the
+        problem is treated as runtime, not boot-time.
+
 config NBP_CLONE_MAX_CHARS
     int "Clone: max characteristics to mirror"
     depends on NBP_CLONE
