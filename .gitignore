@@ -27,3 +27,5 @@ build-bletest/log/
 build-bletest/gdbinit/
 
 build-bletest/
+
+.playwright-mcp/

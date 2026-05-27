@@ -45,39 +45,89 @@ client accepts the device as a Bluetooth proxy:
   plus a CLI smoke test at the same time).
 - **HTTP OTA** on port 80 — `POST /update` writes the inactive OTA slot via
   `esp_ota_*` and reboots into it.
-- **/stats.json** dashboard piggybacks on the OTA listener — adverts/s, GATT
-  read/write/notify counts, in-memory log ring.
+- **Optional clone mode** (`CONFIG_NBP_CLONE`) — mirror one BLE peripheral
+  as a local GATT server so multiple centrals (HA + a vendor app) share one
+  upstream link. Full spec in [`docs/clone.md`](docs/clone.md).
+- **Web dashboard** on port 80 — `/` serves an embedded HTML page with two
+  live charts (BLE activity, CPU + chip-temperature), a devices-seen table
+  with one-click clone, a streaming log console, and tunables for CPU
+  frequency, WiFi/BLE TX power, BLE scan duty, BLE advertising interval,
+  WiFi power-save listen interval, device hostname, and SMP passkey. Full
+  spec in [`docs/web-ui.md`](docs/web-ui.md).
+- **BLE-side HTTP transport** (`CONFIG_NBP_BLE_HTTPD`) — same dashboard,
+  same endpoints, reachable via a GATT request/response service when WiFi
+  isn't built in.
 
 **Out of scope** (by design): sensors, switches, lights, voice assistant,
-Noise encryption, password auth (deprecated in ESPHome 2026.1), pairing,
-bonding, cache management. HA never asks for these because the feature flags
-don't advertise them.
+Noise encryption, password auth (deprecated in ESPHome 2026.1), bonding
+replication across clones, cache management. HA never asks for these
+because the feature flags don't advertise them. SMP / static-passkey
+pairing for paired upstream peripherals (e.g. Victron SmartShunt) is in
+scope under `CONFIG_NBP_SMP`.
 
 ## Architecture
 
 ```
-main/                      app_main → wifi → mdns → ota → api_server → ble_backend
+main/                      app_main; orders bring-up of every component
 components/
 ├── api_proto/             nanopb-generated bindings for the api.proto subset
-├── api_server/            plaintext frame codec, handshake, BT request handlers, /stats
-├── ble_backend/           NimBLE wrappers — scanner, connection slots, GATT discovery
+├── api_server/            plaintext frame codec, handshake, BT request handlers,
+│                          dashboard endpoints (stats / log / level / txpower /
+│                          cpufreq / scan / hostname / wifips / advitvl / trace
+│                          / reboot / devices), embedded web/index.html
+├── ble_backend/           NimBLE wrappers — scanner, connection slots, GATT
+│                          discovery, adv interval state, SMP passkey holder
+├── ble_clone/             optional (CONFIG_NBP_CLONE) — supervisor task +
+│                          upstream client + local GATT mirror + /clone endpoint
+├── ble_httpd/             optional (CONFIG_NBP_BLE_HTTPD) — GATT request/
+│                          response service that routes the same dashboard
+│                          endpoints over Web Bluetooth
 ├── mdns_announce/         _esphomelib._tcp registration
-├── ota/                   HTTP POST /update via esp_ota_*
-└── wifi_sta/              STA bring-up from include/wifi_creds.h
+├── ota/                   HTTP POST /update via esp_ota_*; owns the shared
+│                          httpd that the dashboard piggybacks on
+└── wifi_sta/              STA bring-up from include/wifi_creds.h; reads
+                           listen_interval from NVS for power save
 include/
-├── proxy_config.h         tunables (max_conn, scan timing, feature flags, …)
+├── proxy_config.h         tunables (max_conn, scan timing, feature flags,
+│                          runtime hostname accessor)
 └── wifi_creds.h.example   SSID/PSK template — real file is gitignored
+web/
+└── index.html             dashboard single-source: HTTP fetch OR Web
+                           Bluetooth transport, auto-detected at boot
 ```
 
 The `api_server` and `ble_backend` components are decoupled — `ble_backend`
 publishes via a function-pointer seam (`publish::install`) so it doesn't
-depend on the API server.
+depend on the API server. `ble_clone` and `ble_httpd` plug into the same
+NimBLE singleton without a circular dep on `api_server`.
+
+## Build profiles
+
+Four Kconfig switches under `nimble-ble-proxy` choose what gets compiled in:
+
+| Kconfig | Default | What it adds |
+|---|---|---|
+| `CONFIG_NBP_WIFI` | `y` | STA + mDNS + OTA httpd + aioesphomeapi server + embedded dashboard HTML |
+| `CONFIG_NBP_BLE_HTTPD` | `n` | GATT request/response service (Web Bluetooth dashboard) |
+| `CONFIG_NBP_CLONE` | `n` | Clone supervisor, upstream client, local GATT mirror, `/clone` endpoint |
+| `CONFIG_NBP_SMP` | `n` | Static-passkey pairing as central (paired upstream peripherals) |
+| `CONFIG_NBP_DEVICES_PANEL` | `y` | 64-entry devices-seen table + `/devices` + dashboard table |
+| `CONFIG_NBP_WEB_CONSOLE` | `y` | 64 KiB log ring + `/log` + on-page console |
+
+Two common profiles:
+
+- **WiFi build** (default `sdkconfig.defaults`) — full dashboard via HTTP,
+  HA proxy active. ~1.18 MB.
+- **BLE-only build** (`sdkconfig.defaults.bletest`) — `CONFIG_NBP_WIFI=n`,
+  `CONFIG_NBP_BLE_HTTPD=y`. Same dashboard over Web Bluetooth. ~0.62 MB.
 
 ## Build
 
-ESP-IDF (tested with 5.x). Component manager pulls
+ESP-IDF 5.5 (5.x should work). Component manager pulls
 [`h2zero/esp-nimble-cpp ^2.5.0`](https://github.com/h2zero/esp-nimble-cpp)
-and `nanopb`.
+and `nanopb`. A small patch is auto-applied to the managed NimBLE-CPP
+header by `components/api_server/CMakeLists.txt` (adds `setNotifyCallback`
+so notify registration can skip the CCCD write — see clone pitfall 13.x).
 
 ```sh
 cp include/wifi_creds.h.example include/wifi_creds.h
@@ -93,8 +143,17 @@ After the first serial flash, subsequent updates can go over WiFi:
 curl --data-binary @build/nimble_ble_proxy.bin http://<device-ip>/update
 ```
 
+Or, for a BLE-only build (no WiFi):
+
+```sh
+idf.py -DSDKCONFIG_DEFAULTS='sdkconfig.defaults;sdkconfig.defaults.bletest' fullclean build
+```
+
 Partitions: dual-OTA on 8 MB flash (`ota_0` + `ota_1`, no factory slot). If
-both slots get bricked, re-flash via serial.
+both slots get bricked, re-flash via serial. A boot-guard
+(`CONFIG_NBP_CLONE_BOOT_GUARD`) disables clone on the next boot if the
+previous one panicked early, so a misconfigured clone target can't lock
+the device into a reboot loop.
 
 ## Verify
 
@@ -117,8 +176,18 @@ End-to-end-verified against live Home Assistant:
 - 9-slot scanner allocation registered in HA's bluetooth registry
 - Routing wins against another Bluedroid proxy on the same LAN
 - HTTP OTA round-trip
+- Dashboard live in a phone browser (HTTP) and via a Web Bluetooth Chrome
+  page (BLE transport) against the same firmware
+- Clone-mode: ANT-BLE20PHUB BMS mirrored to batmon-ha (1:1 NOTIFY fan-out),
+  Victron SmartShunt under SMP static-passkey pairing
 
 Bring-up notes, bugs hit, and resolutions are in [`FINDINGS.md`](FINDINGS.md).
+Deeper specs:
+
+- [`docs/web-ui.md`](docs/web-ui.md) — dashboard, every HTTP/BLE endpoint,
+  the boot order, and per-component cost breakdown.
+- [`docs/clone.md`](docs/clone.md) — clone-mode architecture, NimBLE
+  constraints discovered during bring-up, verification recipe.
 
 ## License
 

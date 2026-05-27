@@ -32,14 +32,16 @@ to match the chart/console panels.
 
 ## Build-time gates
 
-Four Kconfig flags shape what gets compiled in. Edit in
+Six Kconfig flags shape what gets compiled in. Edit in
 `idf.py menuconfig` → `nimble-ble-proxy`, or set in
 `sdkconfig.defaults` / `sdkconfig.defaults.bletest`.
 
 | Kconfig | Default | Cost when ON | What it gates |
 |---|---|---|---|
-| `CONFIG_NBP_WIFI` | `y` | ~500 KB flash (WiFi stack + httpd + mDNS + OTA) | STA bring-up, mDNS, OTA, aioesphomeapi server, the HTTP dashboard endpoints, embedded `web/index.html` |
+| `CONFIG_NBP_WIFI` | `y` | ~500 KB flash (WiFi stack + httpd + mDNS + OTA) | STA bring-up, mDNS, OTA, aioesphomeapi server, the HTTP dashboard endpoints, embedded `web/index.html` + `web/favicon.svg` |
 | `CONFIG_NBP_BLE_HTTPD` | `n` | ~4 KB flash | GATT request/response service that lets Web Bluetooth talk to the same handlers |
+| `CONFIG_NBP_CLONE` | `n` | ~20 KB flash, ~10-15 KB RAM when active | clone supervisor + local GATT mirror + `/clone` endpoint + dashboard clone button + synthetic clone-target row |
+| `CONFIG_NBP_SMP` | `n` | ~2 KB flash | static-passkey pairing as central (paired upstream peripherals); `passkey` field on `/clone` |
 | `CONFIG_NBP_DEVICES_PANEL` | `y` | ~12 KB BSS | scanner device table, `/devices`, dashboard table |
 | `CONFIG_NBP_WEB_CONSOLE` | `y` | 64 KB BSS (NimBLE DEBUG) / 8 KB BSS | `esp_log_set_vprintf` hook, ring buffer, `/log`, on-page console |
 
@@ -48,10 +50,10 @@ A BLE-only build flips `NBP_WIFI=n` + `NBP_BLE_HTTPD=y` — see
 entire HTTP handler set, so the BLE-only build is ~75 KB smaller than
 the WiFi build even though both expose the same dashboard.
 
-The rate chart, the system chart, the tunables panel (NimBLE log,
-WiFi TX, BLE TX, CPU MHz, BLE scan duty, light sleep, reboot), and
-`/trace` / `/txpower` / `/cpufreq` / `/scan` endpoints are always
-compiled in — they cost <100 B BSS combined.
+The rate chart, the system chart, the tunables panel and its
+`/trace` / `/txpower` / `/cpufreq` / `/scan` / `/advitvl` / `/wifips`
+/ `/hostname` endpoints are always compiled in — they cost <100 B BSS
+combined.
 
 ## Endpoints
 
@@ -91,14 +93,29 @@ Layout (top → bottom):
    the `.stale` class (40 % opacity). Wrapped in `<div class=devwrap>`
    with `overflow-x:auto` so the table can scroll horizontally on phones
    without forcing the rest of the page wider.
-4. **Tunables row** — wrapping flex row with `<select>` dropdowns for
-   NimBLE log, WiFi TX, BLE TX, CPU MHz, and BLE scan duty; a "light
-   sleep" checkbox; and a red "reboot device" button (`confirm()`
-   guard). WiFi TX is auto-disabled when the device reports `wifi:0`
-   (either runtime off via `?wifi=0`, or the BLE-only build where
-   WiFi is compiled out). On first connect the page issues one GET
-   per endpoint to preselect every control from the live state, then
-   wires onchange handlers that POST single-field updates.
+4. **Tunables panel** — vertical stack of four labelled groups (a flex-
+   column with one flex-wrap row per group, separated by hairline rules
+   so the surface stays scannable as it grows):
+   - **CPU** — `freq` (80 / 160 / 240 MHz), `light sleep` checkbox.
+   - **WiFi** — `TX` (off / 8 / 11 / 14 / 17 / 20 / 21 dBm), `PS` (off /
+     1×DTIM / 3 / 5 / 10).
+   - **BLE** — `TX` (-12..+9 dBm in 3 dB steps), `adv` (default / 100 /
+     200 / 500 / 1000 / 2000 ms — annotated with the resulting rate),
+     `scan` duty preset (50 % / 25 % / 10 % / 3 %), `active scan`
+     checkbox, `log` (NimBLE log level 0–5).
+   - **device** — `name` (hostname text field with validation and a
+     blue/green/red border state), `reboot device` button (red, with a
+     `confirm()` guard; turns blue and re-labels "reboot to apply" after
+     a hostname or WiFi-PS save that needs an association restamp).
+
+   WiFi TX is auto-disabled when the device reports `wifi:0` (runtime
+   off via `?wifi=0`, or the BLE-only build where WiFi is compiled out).
+   On first connect the page issues one GET per endpoint to preselect
+   every control from the live state, then wires `onchange` handlers
+   that POST single-field updates. "BLE scan" controls the central-role
+   scanner (advertisement ingest + clone-upstream discovery); the proxy
+   advertises as a peripheral too, but those parameters (interval) live
+   on `BLE → adv`.
 5. **Console pane** *(if `CONFIG_NBP_WEB_CONSOLE`)* — ~900 × 300
    monospace pane, `width:100%; max-width:920px`. ansi\_up renders
    ESP-IDF color escapes. New bytes from `/log` are appended via
@@ -186,9 +203,42 @@ Internal table holds up to 64 entries; when full, the row with the oldest
 `last_ms` is evicted (LRU by sighting). Response is built into a 6 KiB
 static buffer; httpd serializes requests so the single buffer is safe.
 
-The dashboard renders a `clone` button on each row when
-`CONFIG_NBP_CLONE` is on; clicking it POSTs `/clone?addr=…&type=…&enabled=1`
-with the row's `addr` / `type`. See `docs/clone.md` §6.
+#### Dashboard rendering
+
+The dashboard fetches `/devices` and `/clone` in parallel each tick. For
+each device row it builds a clone button:
+
+- **Clone**: not currently the clone target. Click prompts for the
+  upstream SMP passkey (when `CONFIG_NBP_SMP` is built), then POSTs
+  `/clone?addr=…&type=…&enabled=1[&passkey=N]` in one request — the
+  `/passkey` endpoint was folded into `/clone` so a paired upstream
+  can be configured in one gesture.
+- **Unclone**: this row IS the active clone target. The row gets a
+  `.cloned` class (blue inset border, tinted background) and the
+  button text/style flips. Click POSTs `/clone?enabled=0`.
+
+If the configured clone target isn't in the `/devices` response (e.g.
+the peripheral is silent during an active connection — BLE peripherals
+suppress advertising while in a connection), a **synthetic row** is
+prepended for it. The row's name field is derived from the upstream
+supervisor state in `/clone` so a successfully-cloned peer reads as
+"(connected to upstream)" rather than "(not in range)". State → label
+mapping:
+
+| `/clone state` | synthetic row label |
+|---|---|
+| `Ready` | (connected to upstream) |
+| `Discovering` | (discovering upstream…) |
+| `Connecting` | (connecting to upstream…) |
+| `Reconnecting` | (reconnecting to upstream…) |
+| `Scanning` | (searching for upstream…) |
+| `Idle` | (clone target, idle) |
+| `Disabled` | (clone target, disabled) |
+| anything else | (clone target, not in range) |
+
+The synthetic row carries a `.synthetic` class (italic, dim) so it's
+visually distinct from a live-scanned row. RSSI / adv/s / age all show
+`—` since the scanner isn't seeing the peripheral.
 
 ### `GET /log?since=<seq>` *(gated by `CONFIG_NBP_WEB_CONSOLE`)*
 
@@ -312,6 +362,70 @@ Defaults from `proxy_config.h`. The dashboard exposes four duty
 presets (`30/60` 50 %, `30/120` 25 %, `30/300` 10 %, `30/1000` 3 %)
 and an `active scan` checkbox.
 
+### `GET /advitvl` &nbsp;·&nbsp; `POST /advitvl?ms=<N>`
+
+Get / set the peripheral advertising interval (in ms). 0 = NimBLE host
+default (~30–60 ms range for connectable undirected adv, ~17–33 adv/s);
+otherwise 20..10240 ms. Persisted to NVS namespace `stats`, key
+`adv_itvl` (uint16). Applied **live** via
+`ble_backend::set_adv_interval_ms` — the call updates the singleton
+`NimBLEAdvertising` params, and hot-restarts adv via `stop() / start()`
+if it's currently running, so a dropdown change takes effect within one
+HCI window.
+
+GET returns `{"ms":N}`. Dashboard exposes 0 (default), 100, 200, 500,
+1000, 2000 ms — each labelled with the resulting per-second rate.
+
+Reapplied at boot by `apply_adv_interval_from_nvs()` right after
+`ble_backend::start()` so the first `g_adv->start()` (in
+`ble_httpd::activate` or `clone_mirror::start_advertising`) already uses
+the configured interval. `clone_mirror::start_advertising` calls
+`g_adv->reset()` before populating the adv data, so it re-reads
+`ble_backend::adv_interval_units()` after reset to restore the value.
+
+Effective rate at the controller is the configured interval plus a
+spec-mandated 0..10 ms random delay per adv event; the dropdown labels
+reflect the rough midpoint.
+
+### `GET /wifips` &nbsp;·&nbsp; `POST /wifips?li=<0..10>`
+
+Get / set the WiFi STA power-save listen interval (DTIM beacons between
+RX wake-ups). 0 → `WIFI_PS_NONE` (radio always on, lowest RX latency,
+highest energy). N > 0 → `WIFI_PS_MAX_MODEM` with N×DTIM sleeps.
+
+Persisted to NVS namespace `stats`, key `wifi_li` (int8). The PS-mode
+flip is live (`esp_wifi_set_ps`), but the `listen_interval` field
+inside `wifi_config_t.sta` is read only at association time —
+`wifi_sta.cpp::start_and_wait_for_ip` reads the NVS slot **before**
+`esp_wifi_start`, so the value lands in the initial association. A
+runtime change therefore needs a reboot (or a disconnect/reconnect) to
+fully take effect; the dashboard pulses the reboot button blue and
+re-labels it "reboot to apply PS" as an apply hint.
+
+GET returns `{"li":N}`. Dashboard exposes 0 (off), 1, 3, 5, 10.
+
+### `GET /hostname` &nbsp;·&nbsp; `POST /hostname?val=<name>`
+
+Get / set the device hostname. Drives mDNS (`<name>.local`), the WiFi
+netif hostname, the NimBLE GAP name advertised by ble_httpd, and
+`aioesphomeapi DeviceInfoResponse.name`. Persisted in NVS namespace
+`stats`, key `hostname` (UTF-8 string). Applied at boot by
+`apply_hostname_from_nvs()` which loads into the mutable
+`proxy::g_hostname[31]` buffer that all consumers read via
+`proxy::hostname()`.
+
+Validation: 1..30 chars from `[A-Za-z0-9._-]`, no leading/trailing `-`
+or `.`. The 30-char cap keeps the value (+ NUL) fitting the smallest
+consumer — `proxyapi_HelloResponse.name` is 31 bytes — without
+tripping `-Werror=format-truncation`.
+
+GET returns `{"hostname":"…","default":"nimble-proxy"}`. POST persists
+but does **not** re-initialise mDNS / WiFi netif / NimBLE — a reboot is
+required for the change to take effect across all consumers. The
+dashboard reflects this: the text field gains a `.dirty` (blue) border
+while editing, flips to `.ok` (green) after a successful POST, and
+restyles the reboot button to "reboot to apply name".
+
 ### `POST /trace?on=<0|1>`
 
 Diagnostic capture mode. `on=1`:
@@ -335,10 +449,30 @@ Returns `rebooting\n`, waits 500 ms for the TCP FIN, then calls
 `esp_restart()`. The page's reboot button is a thin wrapper around this
 endpoint with a `confirm()` guard.
 
-### `GET /passkey`, `POST /passkey` *(gated by `CONFIG_NBP_SMP`)*
+### `GET /favicon.svg`
 
-Owned by the SMP feature, not by this UI work. See
-`CONFIG_NBP_SMP` in `main/Kconfig.projbuild`.
+Tiny inline SVG (Bluetooth glyph on a blue rounded square) embedded
+into the WiFi build via `EMBED_FILES`. `Cache-Control: public,
+max-age=86400` so browsers stop refetching it. ~300 B.
+
+### Passkey (folded into `/clone`)
+
+The static SMP passkey used when the proxy is the initiator and an
+upstream peer demands MITM pairing (Victron SmartShunt, some BMS
+variants) is now part of the `/clone` payload — there is no
+standalone `/passkey` HTTP endpoint anymore. Both the dashboard's clone
+prompt and any external scripting use:
+
+```
+GET  /clone                   → {"passkey":NNNNNN,...} (when CONFIG_NBP_SMP)
+POST /clone?addr=…&passkey=N&enabled=1
+```
+
+The `api_server::stats::set_passkey()` C++ helper is the single source
+of truth for NVS persistence (`stats / ble_passkey`) and apply
+(`ble_backend::connection::set_passkey`). Boot-time replay still runs
+inside `apply_log_overrides_from_nvs()` so the passkey is loaded
+before any GATT pairing can be triggered. See `docs/clone.md` §6.
 
 ## BLE transport (`CONFIG_NBP_BLE_HTTPD`)
 
@@ -379,35 +513,75 @@ same envelope on the client side (from the `X-Log-Seq` header) so
 Once the GATT server is registered, `NimBLEDevice::getAdvertising()`
 gets the service UUID added and starts advertising. A scan
 pause/resume guards the registration to dodge a `BLE_HS_EBUSY` from
-NimBLE refusing GATT mutations while the scanner is active.
+NimBLE refusing GATT mutations while the scanner is active. When
+`CONFIG_NBP_CLONE` is also on, `ble_httpd::activate()` is called by
+`clone_mirror::finalize_server` instead of running independently —
+there must be exactly one `NimBLEServer::start()` per session and the
+clone path owns the timing. See clone pitfall 13.15.
+
+### Web Bluetooth Connect button
+
+The dashboard's `Connect` button calls `navigator.bluetooth.
+requestDevice` with `acceptAllDevices: true` (not a service-UUID
+filter) and adds the dashboard SVC to `optionalServices`. Reason: in
+clone mode the cloned upstream's service UUIDs can fill the 31+31 B
+main+scan-response budget, so `clone_mirror::start_advertising` drops
+the dashboard SVC from the adv payload — a UUID-filtered picker would
+then show an empty list. `acceptAllDevices` lists every nearby BLE
+device; `getPrimaryService(SVC)` fails fast if the wrong one is
+chosen.
+
+Web Bluetooth requires a secure context (HTTPS or localhost) and is
+not available on plain `http://<ip>/`. The button is disabled while
+the HTTP transport probe is in flight at boot; if the probe fails AND
+`navigator.bluetooth` is undefined, the page shows the "unsupported"
+banner. Clicking Connect anyway reprobes HTTP once before erroring —
+useful for the post-OTA reboot window where `/level` is transiently
+unreachable.
 
 ## Boot wiring
 
 `main/main.cpp` orders initialisation as follows. Steps marked
-*(WiFi)* run only when `CONFIG_NBP_WIFI=y`.
+*(WiFi)* run only when `CONFIG_NBP_WIFI=y`; *(BLE httpd)* when
+`CONFIG_NBP_BLE_HTTPD=y`; *(clone)* when `CONFIG_NBP_CLONE=y`.
 
-1. `api_server::stats::install_log_hook()` — first, so NVS / WiFi / mDNS
-   init logs are captured. (Gated on `CONFIG_NBP_WEB_CONSOLE`.)
+1. `api_server::stats::install_log_hook()` — first, so NVS / WiFi /
+   mDNS init logs are captured. (Gated on `CONFIG_NBP_WEB_CONSOLE`.)
 2. `nvs_flash_init()`.
 3. `esp_event_loop_create_default()`.
-4. `api_server::stats::apply_log_overrides_from_nvs()` — must run before
-   any NimBLE component initialises.
-5. `api_server::stats::apply_cpu_freq_from_nvs()` — early so WiFi/BLE
+4. `api_server::stats::apply_hostname_from_nvs()` — must run before any
+   consumer reads `proxy::hostname()` (mDNS, esp_netif, NimBLE GAP name,
+   aioesphomeapi DeviceInfo).
+5. `api_server::stats::apply_log_overrides_from_nvs()` — must run before
+   any NimBLE component initialises. Also loads the SMP passkey into
+   `ble_backend::connection`.
+6. `api_server::stats::apply_cpu_freq_from_nvs()` — early so WiFi/BLE
    init runs at the chosen clock.
-6. *(WiFi)* `wifi_sta::start_and_wait_for_ip()`.
-7. *(WiFi)* `mdns_announce::start()`.
-8. *(WiFi)* `ota::start()` — creates the shared httpd.
-9. *(WiFi)* `api_server::stats::register_endpoints(ota::handle())` —
-   adds all dashboard URIs to the OTA httpd.
-10. *(WiFi)* `ble_backend::publish::install(...)`.
-11. `ble_backend::start()`.
-12. *(WiFi)* `api_server::start()` — aioesphomeapi listener on port 6053.
-13. `ble_httpd::start()` — gated on `CONFIG_NBP_BLE_HTTPD`. Registers the
-    GATT service after the NimBLE host is up, pausing the scanner across
-    `server->start()` to avoid `BLE_HS_EBUSY`.
-14. `api_server::stats::apply_tx_power_from_nvs()` — both radios must be
+7. *(WiFi)* `wifi_sta::start_and_wait_for_ip()` — reads
+   `stats / wifi_li` for PS listen_interval BEFORE `esp_wifi_start`.
+8. *(WiFi)* `mdns_announce::start()`.
+9. *(WiFi)* `ota::start()` — creates the shared httpd (URI handler cap
+   bumped to 32 to fit the growing endpoint set; see clone pitfall 13.12).
+10. *(WiFi)* `api_server::stats::register_endpoints(ota::handle())` —
+    adds all dashboard URIs to the OTA httpd.
+11. *(WiFi)* `ble_backend::publish::install(...)`.
+12. `ble_backend::start()` — NimBLE host up; `getAdvertising()` valid.
+13. `api_server::stats::apply_adv_interval_from_nvs()` — applies the
+    persisted advertising interval to the singleton before any
+    `g_adv->start()` call below.
+14. *(WiFi)* `api_server::start()` — aioesphomeapi listener on port 6053.
+15. *(BLE httpd)* `ble_httpd::start()` — only **creates** the dashboard
+    GATT service (no `server->start()`, no `adv->start()`). See clone
+    pitfall 13.15 for the one-call constraint.
+16. *(clone)* `ble_clone::config::load()` + `ble_clone::init()` —
+    spawns the supervisor. The supervisor eventually calls
+    `clone_mirror::finalize_server()` which calls `ble_httpd::activate()`
+    so the dashboard service and any cloned services start together.
+17. *(BLE httpd, !clone)* `ble_httpd::activate()` — fallback that runs
+    when clone is compiled out so the dashboard still comes up.
+18. `api_server::stats::apply_tx_power_from_nvs()` — both radios must be
     up before set-power calls succeed.
-15. `api_server::stats::apply_scan_from_nvs()` — last; `scanner::set_duty`
+19. `api_server::stats::apply_scan_from_nvs()` — last; `scanner::set_duty`
     is a no-op before `scanner::init` runs.
 
 ## Concurrency

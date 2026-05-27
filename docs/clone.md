@@ -238,29 +238,49 @@ Upstream notify (`upstream::NotifyHook`):
 
 ## 6. HTTP endpoint contract
 
-Mirrors the `/passkey` style under `CONFIG_NBP_SMP`. Mounted on the OTA
-httpd to avoid a second listener.
+Mounted on the OTA httpd to avoid a second listener. When
+`CONFIG_NBP_SMP` is built, `/clone` also carries the static SMP
+passkey used for upstream pairing — the standalone `/passkey` endpoint
+was folded in so the dashboard collects target MAC + passkey in one
+gesture.
 
 ```
 GET  /clone           → {"enabled":bool,"addr":"AA:BB:CC:DD:EE:FF",
                          "type":0|1,"name_suffix":"_cloned",
+                         "passkey":NNNNNN,            // SMP build only
                          "state":"Ready"|...,"reconnects":N,
                          "services":N,"characteristics":N,
                          "notifies_in":N,"notifies_out":N,
-                         "connected_centrals":N}
+                         "connected_centrals":N,"advertising":bool,
+                         "mtu":N,"last_disconnect_reason":N,
+                         "writes_drained":N,"writes_dropped":N}
 
-POST /clone?addr=AA:BB:CC:DD:EE:FF&type=0&enabled=1
-                      → 200 + {"ok":true,"reboot_required":true}
-
-POST /clone/disable   → 200; stops adv + drops upstream link (no reboot)
+POST /clone?addr=AA:BB:CC:DD:EE:FF&type=0&enabled=1[&passkey=NNNNNN]
+                      → 200 + {"ok":true,"reboot_required":bool}
 ```
 
-`reboot_required` is `true` whenever `addr` changes — see §7.
+`reboot_required` is `true` whenever `addr` changes after the GATT
+mirror has already been built (see §7). `passkey` is optional and only
+recognised under `CONFIG_NBP_SMP`; it routes through
+`api_server::stats::set_passkey()` (the same single C++ helper that
+persists to NVS `stats/ble_passkey` and applies via
+`ble_backend::connection::set_passkey`). All POST params are
+individually optional — pass only what's changing.
 
-The dashboard's **devices seen** table renders a `clone` button on
-each row that POSTs here with the row's `addr` and `type` — see
-`docs/web-ui.md` `/devices`. The button passes `enabled=1`, so it
-both retargets and (re)enables the supervisor in one click.
+`enabled=0` is the stop path: supervisor suspends reconnect attempts.
+The GATT mirror stays registered until reboot (NimBLE's GATT DB is
+one-shot — see §7), so a stopped clone can be resumed without rebuild
+by POSTing `enabled=1` again.
+
+The dashboard's **devices seen** table renders a `clone` / `unclone`
+button on each row — see `docs/web-ui.md`. The button click optionally
+prompts the user for the SMP passkey (when `CONFIG_NBP_SMP` is on,
+pre-filled with the current value) and POSTs everything in one
+request. The configured clone target also appears as a **synthetic
+row** in that table even when the scanner can't see it advertising —
+BLE peripherals suppress advertising during an active connection, so
+a successfully-cloned peer would otherwise look "not in range". The
+row's label is derived from the `state` field above.
 
 ## 7. NimBLE constraints
 
