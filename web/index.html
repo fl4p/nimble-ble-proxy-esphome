@@ -82,6 +82,9 @@ table#devices th{color:#888;font-weight:normal}
 table#devices .r{text-align:right;font-variant-numeric:tabular-nums}
 table#devices td.bthome{color:#9ca3af;font-size:11px;
   font-variant-numeric:tabular-nums}
+table#devices td.atype,table#devices td.tag{color:#9ca3af;font-size:11px}
+table#devices td.dist{color:#9ca3af;font-size:11px;
+  font-variant-numeric:tabular-nums;text-align:right}
 table#devices tr.stale{opacity:.4}
 table#devices tr.synthetic td{color:#888;font-style:italic}
 table#devices tr.synthetic.cloned td{color:#a0a0a0}
@@ -120,9 +123,9 @@ table#devices button.clone-btn.cloned:hover{background:#3b0a0a}
 
   <h2>devices seen</h2>
   <div class=devwrap><table id=devices><thead><tr>
-    <th>MAC</th><th>name</th><th class=r>RSSI</th>
-    <th class=r>adv/s</th><th class=r>total</th><th class=r>age</th>
-    <th>BTHome</th><th></th>
+    <th>MAC</th><th>type</th><th>name</th><th class=r>RSSI</th>
+    <th class=r>dist</th><th class=r>adv/s</th><th class=r>total</th>
+    <th class=r>age</th><th>tag</th><th>BTHome</th><th></th>
   </tr></thead><tbody></tbody></table></div>
 
   <!-- Tunables grouped by subsystem: CPU → WiFi → BLE → device.
@@ -574,6 +577,49 @@ let g_devPrev = {};
 // during an active connection, so a successfully-cloned peer would
 // otherwise look "not in range").
 let g_cloneTarget = { addr: null, enabled: false, state: 'Idle' };
+// Classify the BLE address type from NimBLE's `addr_type` enum (0/1/2/3)
+// plus the MAC's top two MSB bits (which encode the random-address
+// subtype per Core spec Vol 6 Pt B §1.3.2.1). Identity-resolved values
+// (2, 3) come from a prior bonding and represent the real underlying
+// public/random type — collapse them onto the basic labels.
+function addrTypeTag(type, addr) {
+  if (type === 0 || type === 2) return 'pub';
+  const msb = parseInt(addr.slice(0, 2), 16);
+  const high2 = (msb & 0xC0) >> 6;
+  return high2 === 0b11 ? 'rnd-st'
+       : high2 === 0b01 ? 'rpa'
+       : high2 === 0b00 ? 'nrpa' : 'rnd';
+}
+
+// Free-space path loss at 2.4 GHz is ~41 dB at 1 m. Indoors the
+// exponent is closer to 2.5–3 but n=2 is the simplest assumption and
+// the leading `~` reminds the reader this is rough.
+function formatDist(tx, rssi) {
+  if (tx === undefined || rssi === undefined) return '';
+  const d = Math.pow(10, (tx - rssi - 41) / 20);
+  if (!isFinite(d) || d <= 0) return '';
+  return '~' + (d < 10 ? d.toFixed(1) : Math.round(d)) + 'm';
+}
+
+// GAP Appearance → emoji. Top 10 bits select category; HID (0x03C0)
+// has meaningful sub-categories worth distinguishing.
+const APP_ICONS = {
+  0x0040: '📱', 0x0080: '💻', 0x0083: '⌚', 0x00C0: '⌚', 0x00C2: '⌚',
+  0x0100: '🕐', 0x0140: '🖥️', 0x0180: '📺', 0x01C0: '👓', 0x0200: '🏷️',
+  0x0240: '🔑', 0x0280: '📻', 0x02C0: '📷', 0x0300: '🌡️', 0x0340: '❤️',
+  0x0380: '🩺', 0x0400: '🩸', 0x0440: '🏃', 0x0480: '🚴', 0x0700: '🩺',
+  0x0740: '⚖️', 0x0780: '🛴', 0x0900: '🔊', 0x0940: '🎤', 0x09C0: '🔒',
+  0x0A40: '🔌', 0x0A80: '💡', 0x0AC0: '🪟', 0x0B00: '🎵', 0x0B40: '🎧',
+  0x0B80: '🎧', 0x0BC0: '🔊', 0x0C00: '🚗',
+};
+function appearanceIcon(app) {
+  if (!app) return '';
+  if ((app & 0xFFC0) === 0x03C0) {
+    return ['⌨️','⌨️','🖱️','🕹️','🎮','📲','💳','✏️','📷'][app & 0x3F] || '⌨️';
+  }
+  return APP_ICONS[app] || APP_ICONS[app & 0xFFC0] || '';
+}
+
 // Render the per-row BTHome blob from /devices. Server emits only the
 // fields it actually decoded — missing keys mean "not present in the
 // most recent frame", not zero.
@@ -668,10 +714,17 @@ async function tickDevices() {
       if (classes.length) tr.className = classes.join(' ');
       const ageStr = x.synthetic ? '—' :
         (x.age / 1000).toFixed(1) + 's';
+      const ic = appearanceIcon(x.app);
       const cells = [
-        [x.addr, ''], [x.name || '', ''],
-        [x.rssi, 'r'], [x.synthetic ? '—' : rate, 'r'],
-        [x.count, 'r'], [ageStr, 'r'],
+        [x.addr, ''],
+        [x.synthetic ? '' : addrTypeTag(x.type, x.addr), 'atype'],
+        [(ic ? ic + ' ' : '') + (x.name || ''), ''],
+        [x.rssi, 'r'],
+        [x.synthetic ? '' : formatDist(x.tx, x.rssi), 'dist'],
+        [x.synthetic ? '—' : rate, 'r'],
+        [x.count, 'r'],
+        [ageStr, 'r'],
+        [x.tag || '', 'tag'],
       ];
       for (const [v, cls] of cells) {
         const td = document.createElement('td');
@@ -684,12 +737,18 @@ async function tickDevices() {
       tdBt.textContent = formatBthome(x.bthome);
       tr.appendChild(tdBt);
       const tdBtn = document.createElement('td');
-      const btn = document.createElement('button');
-      btn.className = isCloned ? 'clone-btn cloned' : 'clone-btn';
-      btn.textContent = isCloned ? 'unclone' : 'clone';
-      btn.dataset.addr = x.addr;
-      btn.dataset.type = x.type;
-      tdBtn.appendChild(btn);
+      // Hide the clone button for non-connectable broadcasts (iBeacons,
+      // BTHome sensors, Apple Continuity, etc) — connecting to them
+      // would just hang. Synthetic clone-target rows always show it so
+      // the user can unclone even when the peer is out of range.
+      if (isCloned || x.synthetic || x.conn) {
+        const btn = document.createElement('button');
+        btn.className = isCloned ? 'clone-btn cloned' : 'clone-btn';
+        btn.textContent = isCloned ? 'unclone' : 'clone';
+        btn.dataset.addr = x.addr;
+        btn.dataset.type = x.type;
+        tdBtn.appendChild(btn);
+      }
       tr.appendChild(tdBtn);
       tb.appendChild(tr);
     }

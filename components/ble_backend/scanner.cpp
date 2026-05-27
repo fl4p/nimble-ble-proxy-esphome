@@ -15,6 +15,7 @@
 #include "pb_encode.h"
 
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 
 namespace ble_backend::scanner {
@@ -79,11 +80,87 @@ size_t find_or_alloc_device(uint64_t addr) {
   return oldest;
 }
 
+// Classify a device by its manufacturer data + advertised 16-bit
+// service UUIDs. Returns a static string literal (safe to store as
+// pointer) or nullptr when nothing recognized. Manufacturer ID wins
+// over service-UUID when both match because the company ID is usually
+// the more specific signal (e.g. "Ruuvi" beats "EnvSense").
+const char *classify_device(const NimBLEAdvertisedDevice *dev) {
+  std::string mfg = dev->getManufacturerData();
+  if (mfg.size() >= 2) {
+    auto b0 = static_cast<uint8_t>(mfg[0]);
+    auto b1 = static_cast<uint8_t>(mfg[1]);
+    uint16_t cid = uint16_t(b0) | (uint16_t(b1) << 8);
+    // iBeacon and AltBeacon have specific in-payload markers — try
+    // those before falling back to plain vendor name.
+    if (cid == 0x004C && mfg.size() >= 4 &&
+        static_cast<uint8_t>(mfg[2]) == 0x02 &&
+        static_cast<uint8_t>(mfg[3]) == 0x15) {
+      return "iBeacon";
+    }
+    if (mfg.size() >= 4 &&
+        static_cast<uint8_t>(mfg[2]) == 0xBE &&
+        static_cast<uint8_t>(mfg[3]) == 0xAC) {
+      return "AltBeacon";
+    }
+    switch (cid) {
+      case 0x004C: return "Apple";
+      case 0x0006: return "Microsoft";
+      case 0x0075: return "Samsung";
+      case 0x00E0: return "Google";
+      case 0x0087: return "Garmin";
+      case 0x009E: return "Bose";
+      case 0x012D: return "Sony";
+      case 0x05A7: return "Sonos";
+      case 0x004D: return "Sennheiser";
+      case 0x015E: return "Tile";
+      case 0x0499: return "Ruuvi";
+      case 0x02E1: return "Victron";
+      case 0x038F: return "Xiaomi";
+      case 0x0157: return "Anker";
+      case 0x0059: return "Nordic";
+      case 0x02E5: return "Espressif";
+      case 0x00C4: return "LG";
+      default: break;
+    }
+  }
+  // Fall through to service UUID inspection for devices that don't
+  // emit manufacturer-data (BTHome sensors, Eddystone, ESS-only
+  // peripherals, etc).
+  uint8_t n = dev->getServiceUUIDCount();
+  for (uint8_t i = 0; i < n; ++i) {
+    NimBLEUUID u = dev->getServiceUUID(i);
+    if (u.bitSize() != 16) continue;
+    const uint8_t *v = u.getValue();
+    uint16_t u16 = uint16_t(v[0]) | (uint16_t(v[1]) << 8);
+    switch (u16) {
+      case 0xFCD2: return "BTHome";
+      case 0xFE9F: case 0xFE2C: return "FastPair";
+      case 0xFEAA: return "Eddystone";
+      case 0xFD6F: return "ENS";
+      case 0xFE95: return "MiBeacon";
+      case 0xFDA0: return "SwitchBot";
+      case 0x180F: return "Battery";
+      case 0x181A: return "EnvSense";
+      case 0x1812: return "HID";
+      case 0x180D: return "HeartRate";
+      case 0x1816: return "Cycling";
+      case 0x180A: return "DevInfo";
+      default: break;
+    }
+  }
+  return nullptr;
+}
+
 void record_device(const NimBLEAdvertisedDevice *dev, uint64_t addr,
                    uint8_t addr_type) {
   // Parse outside the mutex — getName() walks the AD list.
   std::string nm = dev->getName();
   int8_t rssi = static_cast<int8_t>(dev->getRSSI());
+  int8_t txp = dev->haveTXPower() ? dev->getTXPower() : INT8_MAX;
+  uint16_t app = dev->haveAppearance() ? dev->getAppearance() : 0;
+  bool conn = dev->isConnectable();
+  const char *tag = classify_device(dev);
   uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
   xSemaphoreTake(g_mutex, portMAX_DELAY);
@@ -92,6 +169,17 @@ void record_device(const NimBLEAdvertisedDevice *dev, uint64_t addr,
   row.rssi = rssi;
   row.adv_count++;
   row.last_ms = now_ms;
+  // TX power, appearance, connectable, tag: only overwrite on a fresh
+  // sighting — but the rules differ. TX power and appearance come
+  // typically from the scan response or the primary adv; once seen,
+  // a later frame without the field shouldn't wipe what we have.
+  if (txp != INT8_MAX) row.tx_power = txp;
+  if (app != 0) row.appearance = app;
+  // Connectable + tag *can* shift between frames in principle (e.g. a
+  // peripheral toggling adv modes), but in practice they're stable —
+  // we record the most recent observation either way.
+  row.connectable = conn;
+  if (tag) row.tag = tag;
   // Persist last non-empty name — many devices put it only in the scan
   // response, so plain adv packets don't overwrite a known name.
   if (!nm.empty()) {

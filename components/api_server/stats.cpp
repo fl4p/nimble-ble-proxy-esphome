@@ -1037,6 +1037,15 @@ size_t build_devices_json(char *buf, size_t cap) {
       }
     }
     if (rem() >= 1) *p++ = '"';
+    if (r.tx_power != INT8_MAX) {
+      bump(std::snprintf(p, rem(), ",\"tx\":%d", static_cast<int>(r.tx_power)));
+    }
+    if (r.appearance != 0) {
+      bump(std::snprintf(p, rem(), ",\"app\":%u",
+                         static_cast<unsigned>(r.appearance)));
+    }
+    if (r.connectable) bump(std::snprintf(p, rem(), ",\"conn\":1"));
+    if (r.tag) bump(std::snprintf(p, rem(), ",\"tag\":\"%s\"", r.tag));
 #if CONFIG_NBP_BTHOME
     const ble_backend::bthome::Reading *br = nullptr;
     for (size_t j = 0; j < bn; ++j) {
