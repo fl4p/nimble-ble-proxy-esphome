@@ -83,8 +83,6 @@ table#devices .r{text-align:right;font-variant-numeric:tabular-nums}
 table#devices td.bthome{color:#9ca3af;font-size:11px;
   font-variant-numeric:tabular-nums}
 table#devices td.atype,table#devices td.tag{color:#9ca3af;font-size:11px}
-table#devices td.dist{color:#9ca3af;font-size:11px;
-  font-variant-numeric:tabular-nums;text-align:right}
 table#devices tr.stale{opacity:.4}
 table#devices tr.synthetic td{color:#888;font-style:italic}
 table#devices tr.synthetic.cloned td{color:#a0a0a0}
@@ -124,7 +122,7 @@ table#devices button.clone-btn.cloned:hover{background:#3b0a0a}
   <h2>devices seen</h2>
   <div class=devwrap><table id=devices><thead><tr>
     <th>MAC</th><th>type</th><th>name</th><th class=r>RSSI</th>
-    <th class=r>dist</th><th class=r>adv/s</th><th class=r>total</th>
+    <th class=r>adv/s</th><th class=r>total</th>
     <th class=r>age</th><th>tag</th><th>BTHome</th><th></th>
   </tr></thead><tbody></tbody></table></div>
 
@@ -591,16 +589,6 @@ function addrTypeTag(type, addr) {
        : high2 === 0b00 ? 'nrpa' : 'rnd';
 }
 
-// Free-space path loss at 2.4 GHz is ~41 dB at 1 m. Indoors the
-// exponent is closer to 2.5–3 but n=2 is the simplest assumption and
-// the leading `~` reminds the reader this is rough.
-function formatDist(tx, rssi) {
-  if (tx === undefined || rssi === undefined) return '';
-  const d = Math.pow(10, (tx - rssi - 41) / 20);
-  if (!isFinite(d) || d <= 0) return '';
-  return '~' + (d < 10 ? d.toFixed(1) : Math.round(d)) + 'm';
-}
-
 // GAP Appearance → emoji. Top 10 bits select category; HID (0x03C0)
 // has meaningful sub-categories worth distinguishing.
 const APP_ICONS = {
@@ -720,7 +708,6 @@ async function tickDevices() {
         [x.synthetic ? '' : addrTypeTag(x.type, x.addr), 'atype'],
         [(ic ? ic + ' ' : '') + (x.name || ''), ''],
         [x.rssi, 'r'],
-        [x.synthetic ? '' : formatDist(x.tx, x.rssi), 'dist'],
         [x.synthetic ? '—' : rate, 'r'],
         [x.count, 'r'],
         [ageStr, 'r'],

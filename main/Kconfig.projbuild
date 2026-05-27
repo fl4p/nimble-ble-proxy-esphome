@@ -110,6 +110,29 @@ config NBP_DEVICES_PANEL
         Disable for a slimmer build that keeps the rate chart but
         drops the per-device view.
 
+config NBP_DEV_DETAILS
+    bool "Web UI: enrich /devices with appearance, connectable, vendor tag"
+    depends on NBP_DEVICES_PANEL
+    default y
+    help
+        Decode the extra fields each advertisement carries beyond
+        MAC + name + RSSI: GAP Appearance (AD 0x19, rendered as an
+        emoji prefix on the name), connectable PDU flag (used to hide
+        the clone button for broadcast-only sensors / beacons), and
+        a vendor / class tag derived from manufacturer company ID
+        (Apple Continuity subtypes, Microsoft, Samsung, Google, Sony,
+        Bose, Sonos, Tile, Ruuvi, Victron, Xiaomi, Anker, Nordic,
+        Espressif, Garmin, LG, Sennheiser, iBeacon, AltBeacon) or
+        16-bit service UUID (BTHome, FastPair, Eddystone, ENS,
+        MiBeacon, SwitchBot, Battery, EnvSense, HID, HeartRate,
+        Cycling, DevInfo).
+
+        Costs ~1 KB BSS (4 bytes × 64 rows + label tables in flash)
+        plus a small AD walk per advertisement. Disable for a slim
+        build that keeps just MAC / name / RSSI / counts in the
+        device table; the address-type column derived client-side
+        from the MAC stays either way.
+
 config NBP_WEB_CONSOLE
     bool "Web UI: device log mirror (/log + on-page console)"
     default y

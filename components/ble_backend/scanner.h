@@ -66,10 +66,11 @@ struct DeviceRow {
   char name[24];       // last non-empty Complete/Shortened Local Name, NUL-term
   uint32_t adv_count;  // total adverts seen from this MAC
   uint32_t last_ms;    // FreeRTOS millis at last sighting
-  int8_t tx_power;     // AD 0x0A claimed TX dBm; INT8_MAX when absent
+#if CONFIG_NBP_DEV_DETAILS
   uint16_t appearance; // AD 0x19 (GAP Appearance); 0 when absent
   bool connectable;    // PDU type is connectable (ADV_IND / ADV_DIRECT_IND)
   const char *tag;     // vendor / class label (static string), nullptr if none
+#endif
 };
 
 // Snapshot up to `cap` rows of the device table into `out`. Internal

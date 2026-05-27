@@ -80,6 +80,7 @@ size_t find_or_alloc_device(uint64_t addr) {
   return oldest;
 }
 
+#if CONFIG_NBP_DEV_DETAILS
 // Classify a device by its manufacturer data + advertised 16-bit
 // service UUIDs. Returns a static string literal (safe to store as
 // pointer) or nullptr when nothing recognized. Manufacturer ID wins
@@ -91,20 +92,36 @@ const char *classify_device(const NimBLEAdvertisedDevice *dev) {
     auto b0 = static_cast<uint8_t>(mfg[0]);
     auto b1 = static_cast<uint8_t>(mfg[1]);
     uint16_t cid = uint16_t(b0) | (uint16_t(b1) << 8);
-    // iBeacon and AltBeacon have specific in-payload markers — try
-    // those before falling back to plain vendor name.
-    if (cid == 0x004C && mfg.size() >= 4 &&
-        static_cast<uint8_t>(mfg[2]) == 0x02 &&
-        static_cast<uint8_t>(mfg[3]) == 0x15) {
-      return "iBeacon";
-    }
     if (mfg.size() >= 4 &&
         static_cast<uint8_t>(mfg[2]) == 0xBE &&
         static_cast<uint8_t>(mfg[3]) == 0xAC) {
       return "AltBeacon";
     }
+    if (cid == 0x004C && mfg.size() >= 3) {
+      // Apple Continuity — first byte after CID is the subtype. iBeacon
+      // (0x02) carries its own length byte (0x15); other subtypes are
+      // generic Continuity TLVs documented from reverse-engineering.
+      uint8_t sub = static_cast<uint8_t>(mfg[2]);
+      if (sub == 0x02 && mfg.size() >= 4 &&
+          static_cast<uint8_t>(mfg[3]) == 0x15) return "iBeacon";
+      switch (sub) {
+        case 0x05: return "AirDrop";
+        case 0x07: return "AirPods";
+        case 0x09: return "AppleTV";
+        case 0x0A: return "ApplePay";
+        case 0x0B: return "AppleWatch";
+        case 0x0C: return "Handoff";
+        case 0x0D: return "WiFiSettings";
+        case 0x0E: return "Hotspot";
+        case 0x0F: return "WiFiJoin";
+        case 0x10: return "AppleNearby";
+        case 0x12: return "FindMy";
+        case 0x16: return "HomeKit";
+        default: break;
+      }
+      return "Apple";
+    }
     switch (cid) {
-      case 0x004C: return "Apple";
       case 0x0006: return "Microsoft";
       case 0x0075: return "Samsung";
       case 0x00E0: return "Google";
@@ -151,16 +168,18 @@ const char *classify_device(const NimBLEAdvertisedDevice *dev) {
   }
   return nullptr;
 }
+#endif  // CONFIG_NBP_DEV_DETAILS
 
 void record_device(const NimBLEAdvertisedDevice *dev, uint64_t addr,
                    uint8_t addr_type) {
   // Parse outside the mutex — getName() walks the AD list.
   std::string nm = dev->getName();
   int8_t rssi = static_cast<int8_t>(dev->getRSSI());
-  int8_t txp = dev->haveTXPower() ? dev->getTXPower() : INT8_MAX;
+#if CONFIG_NBP_DEV_DETAILS
   uint16_t app = dev->haveAppearance() ? dev->getAppearance() : 0;
   bool conn = dev->isConnectable();
   const char *tag = classify_device(dev);
+#endif
   uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
   xSemaphoreTake(g_mutex, portMAX_DELAY);
@@ -169,17 +188,15 @@ void record_device(const NimBLEAdvertisedDevice *dev, uint64_t addr,
   row.rssi = rssi;
   row.adv_count++;
   row.last_ms = now_ms;
-  // TX power, appearance, connectable, tag: only overwrite on a fresh
-  // sighting — but the rules differ. TX power and appearance come
-  // typically from the scan response or the primary adv; once seen,
-  // a later frame without the field shouldn't wipe what we have.
-  if (txp != INT8_MAX) row.tx_power = txp;
+#if CONFIG_NBP_DEV_DETAILS
+  // Appearance comes typically from the scan response; once seen, a
+  // later frame without it shouldn't wipe what we have. Connectable
+  // and tag *can* shift between adv modes in principle but in practice
+  // are stable — we record the most recent observation either way.
   if (app != 0) row.appearance = app;
-  // Connectable + tag *can* shift between frames in principle (e.g. a
-  // peripheral toggling adv modes), but in practice they're stable —
-  // we record the most recent observation either way.
   row.connectable = conn;
   if (tag) row.tag = tag;
+#endif
   // Persist last non-empty name — many devices put it only in the scan
   // response, so plain adv packets don't overwrite a known name.
   if (!nm.empty()) {
