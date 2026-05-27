@@ -95,8 +95,8 @@ class ClientCb : public NimBLEClientCallbacks {
   // Victron SmartShunt et al require an encrypted link before they'll
   // serve GATT characteristic discovery. They send a pairing request
   // with DisplayOnly IO; we respond with the stored passkey (default
-  // 123456, runtime-mutable via /passkey). Same flow as
-  // ble_backend::connection::ClientCb.
+  // 123456, runtime-mutable via POST /clone?passkey=NNNNNN). Same flow
+  // as ble_backend::connection::ClientCb.
   void onPassKeyEntry(NimBLEConnInfo &connInfo) override {
     uint32_t pin = ble_backend::connection::get_passkey();
     ESP_LOGI(TAG, "onPassKeyEntry -> injecting passkey %06lu",

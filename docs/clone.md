@@ -569,9 +569,11 @@ If the upstream peer demands SMP (Victron SmartShunt and similar),
 `ClientCb::onPassKeyEntry` must respond with the static passkey via
 `NimBLEDevice::injectPassKey`. Without it, `discoverAttributes`
 times out because most characteristic reads need an encrypted link.
-The clone reuses `ble_backend::connection::get_passkey()` so it's
-configured via the same `/passkey` HTTP endpoint as the ESPHome-API
-side.
+The clone reads from `ble_backend::connection::get_passkey()`, the
+same runtime slot the ESPHome-proxy side uses. The slot is set via
+`POST /clone?passkey=NNNNNN` (under `CONFIG_NBP_SMP`) — the
+standalone `/passkey` HTTP endpoint was folded into `/clone` so the
+dashboard collects target MAC + passkey in one gesture. See §6.
 
 ### 13.15 `NimBLEServer::start()` must be called **exactly once** per session
 

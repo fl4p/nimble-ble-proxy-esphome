@@ -116,11 +116,12 @@ void start() {
   cfg.lru_purge_enable = true;
   // Default 8 handlers is exactly what we needed for the bring-up set
   // (/update, /, /stats.json, /log, /level GET+POST, /reboot, /trace).
-  // We're now well past that: /favicon.svg, /passkey, /txpower, /cpufreq,
-  // /scan, /wifi_ps, /hostname (all GET+POST pairs), /devices, /clone
-  // GET+POST — 24+ routes today. Each unregistered handler is a silent
-  // 404 in production (we saw /devices drop at boot), so size with a
-  // comfortable margin and add a runtime assert at registration time.
+  // We're now well past that: /favicon.svg, /txpower, /cpufreq, /scan,
+  // /wifips, /hostname, /advitvl (all GET+POST pairs), /devices, /clone
+  // GET+POST (clone absorbed /passkey) — 24+ routes today. Each
+  // unregistered handler is a silent 404 in production (we saw
+  // /devices drop at boot), so size with a comfortable margin and add
+  // a runtime assert at registration time.
   cfg.max_uri_handlers = 32;
   // CONFIG_LWIP_MAX_SOCKETS=16 leaves the api_server (1 listen + up to
   // 4 clients), mDNS and clone.mirror plenty of room alongside the

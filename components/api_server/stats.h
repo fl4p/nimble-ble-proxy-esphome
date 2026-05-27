@@ -162,9 +162,12 @@ void apply_adv_interval_from_nvs();
 // default it was statically initialised with.
 void apply_hostname_from_nvs();
 
-// Registers /, /stats.json, /log, /level, /reboot, /trace, /devices,
-// /passkey, /txpower, /cpufreq. Only defined when WiFi (and therefore
-// the HTTP server) is in the build.
+// Registers all dashboard URIs on the OTA httpd: /, /favicon.svg,
+// /stats.json, /log, /level, /trace, /reboot, /txpower, /cpufreq,
+// /scan, /advitvl, /wifips, /hostname, /devices. SMP passkey is
+// reached via /clone (gated on CONFIG_NBP_SMP+CONFIG_NBP_CLONE, see
+// ble_clone/clone.cpp). Only defined when WiFi (and therefore the
+// HTTP server) is in the build.
 #if CONFIG_NBP_WIFI
 void register_endpoints(httpd_handle_t srv);
 #endif

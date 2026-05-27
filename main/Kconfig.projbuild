@@ -158,9 +158,10 @@ config NBP_SMP
         Compile in NimBLE Security Manager + bond storage. Required for
         peripherals that demand a paired+encrypted link with a static
         passkey (Victron SmartShunt, some BMS variants). On first
-        connect the proxy auto-pairs using the passkey at /passkey
-        (default 123456, NVS-persisted, runtime-mutable). The bond is
-        stored in NVS so subsequent connects reuse it.
+        connect the proxy auto-pairs using the passkey configured via
+        POST /clone?passkey=NNNNNN (default 123456, NVS-persisted,
+        runtime-mutable). The bond is stored in NVS so subsequent
+        connects reuse it.
 
         Disable for a smaller central-only build (~5 KB binary + a few
         hundred bytes of NVS). With this off, peers that require

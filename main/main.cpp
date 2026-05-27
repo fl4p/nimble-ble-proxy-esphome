@@ -191,8 +191,9 @@ extern "C" void app_main() {
   // that scans → connects → discovers → builds the local GATT mirror,
   // then calls ble_httpd::activate() to register all services in one
   // shot. register_endpoints() exposes /clone for runtime config
-  // changes (target MAC, enable/disable) — same pattern as /passkey
-  // under CONFIG_NBP_SMP.
+  // changes (target MAC, enable/disable, and SMP passkey under
+  // CONFIG_NBP_SMP — the previous standalone /passkey endpoint was
+  // folded in here).
   ble_clone::config::load();
 #if CONFIG_NBP_CLONE_BOOT_GUARD
   if (clone_force_disable) {

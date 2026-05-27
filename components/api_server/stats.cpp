@@ -242,7 +242,10 @@ esp_err_t level_post(httpd_req_t *req) {
 
 #ifdef CONFIG_NBP_SMP
 // SMP passkey (NVS-persisted). Default 123456 — covers most Victron
-// SmartShunts. /passkey?val=000000 swaps at runtime.
+// SmartShunts. Runtime-settable via POST /clone?passkey=NNNNNN
+// (merged from the previous /passkey endpoint); the boot-time
+// replay in apply_log_overrides_from_nvs() loads it before any
+// upstream GATT pairing can be triggered.
 
 esp_err_t nvs_read_passkey(uint32_t *out) {
   nvs_handle_t h;
