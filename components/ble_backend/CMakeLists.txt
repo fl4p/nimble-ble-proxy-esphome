@@ -6,6 +6,7 @@ idf_component_register(
         "connection.cpp"
         "gatt_discovery.cpp"
         "ble_backend.cpp"
+        "bthome.cpp"
     INCLUDE_DIRS
         "."
         "../../include"

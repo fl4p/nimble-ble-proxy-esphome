@@ -80,6 +80,8 @@ table#devices th,table#devices td{padding:.2em .6em;
   border-bottom:1px solid #222;text-align:left}
 table#devices th{color:#888;font-weight:normal}
 table#devices .r{text-align:right;font-variant-numeric:tabular-nums}
+table#devices td.bthome{color:#9ca3af;font-size:11px;
+  font-variant-numeric:tabular-nums}
 table#devices tr.stale{opacity:.4}
 table#devices tr.synthetic td{color:#888;font-style:italic}
 table#devices tr.synthetic.cloned td{color:#a0a0a0}
@@ -120,7 +122,7 @@ table#devices button.clone-btn.cloned:hover{background:#3b0a0a}
   <div class=devwrap><table id=devices><thead><tr>
     <th>MAC</th><th>name</th><th class=r>RSSI</th>
     <th class=r>adv/s</th><th class=r>total</th><th class=r>age</th>
-    <th></th>
+    <th>BTHome</th><th></th>
   </tr></thead><tbody></tbody></table></div>
 
   <!-- Tunables grouped by subsystem: CPU → WiFi → BLE → device.
@@ -572,6 +574,26 @@ let g_devPrev = {};
 // during an active connection, so a successfully-cloned peer would
 // otherwise look "not in range").
 let g_cloneTarget = { addr: null, enabled: false, state: 'Idle' };
+// Render the per-row BTHome blob from /devices. Server emits only the
+// fields it actually decoded — missing keys mean "not present in the
+// most recent frame", not zero.
+function formatBthome(b) {
+  if (!b) return '';
+  if (b.enc) return 'enc';
+  const parts = [];
+  if (b.t   !== undefined) parts.push('T '    + (b.t / 100).toFixed(1) + '°C');
+  if (b.h   !== undefined) parts.push('H '    + Math.round(b.h / 100) + '%');
+  if (b.b   !== undefined) parts.push('Batt ' + b.b + '%');
+  if (b.v   !== undefined) parts.push('V '    + (b.v / 1000).toFixed(3));
+  if (b.l   !== undefined) parts.push('L '    + Math.round(b.l / 100) + 'lx');
+  if (b.m   !== undefined) parts.push('M '    + (b.m ? 'on' : 'off'));
+  if (b.btn !== undefined) parts.push('btn '  + b.btn);
+  if (b.w   !== undefined) parts.push((b.w / 100).toFixed(2) + 'W');
+  if (b.co2 !== undefined) parts.push(b.co2 + 'ppm');
+  if (b.p   !== undefined) parts.push('pkt#' + b.p);
+  return parts.join(' · ');
+}
+
 async function tickDevices() {
   try {
     // /clone is small (~250 B) and /devices already runs at 1 Hz, so we
@@ -657,6 +679,10 @@ async function tickDevices() {
         td.textContent = v;
         tr.appendChild(td);
       }
+      const tdBt = document.createElement('td');
+      tdBt.className = 'bthome';
+      tdBt.textContent = formatBthome(x.bthome);
+      tr.appendChild(tdBt);
       const tdBtn = document.createElement('td');
       const btn = document.createElement('button');
       btn.className = isCloned ? 'clone-btn cloned' : 'clone-btn';

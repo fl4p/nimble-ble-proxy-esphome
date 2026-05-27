@@ -2,6 +2,7 @@
 
 #include "address.h"
 #include "api_proto.h"
+#include "bthome.h"
 #include "proxy_config.h"
 #include "publish.h"
 
@@ -170,6 +171,16 @@ class AdvCallbacks : public NimBLEScanCallbacks {
     uint64_t addr_u64 = static_cast<uint64_t>(addr);
 #if CONFIG_NBP_DEVICES_PANEL
     record_device(dev, addr_u64, addr.getType());
+#endif
+
+#if CONFIG_NBP_BTHOME
+    // BTHome v2: 16-bit service UUID 0xFCD2 in service-data AD field.
+    // NimBLE returns an empty string when the field is absent.
+    std::string svc = dev->getServiceData(NimBLEUUID(uint16_t{0xFCD2}));
+    if (!svc.empty()) {
+      ble_backend::bthome::ingest(
+          addr_u64, reinterpret_cast<const uint8_t *>(svc.data()), svc.size());
+    }
 #endif
 
     if (!g_forwarding.load(std::memory_order_acquire)) return;

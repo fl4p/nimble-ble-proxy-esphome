@@ -1,6 +1,7 @@
 #include "stats.h"
 
 #include "ble_backend.h"
+#include "bthome.h"
 #include "connection.h"
 #include "driver/temperature_sensor.h"
 #include "esp_bt.h"
@@ -35,6 +36,13 @@ constexpr const char *TAG = "stats";
 std::atomic<uint32_t> g_reads{0};
 std::atomic<uint32_t> g_writes{0};
 std::atomic<uint32_t> g_notifies{0};
+
+// Optional clone-side counter source. Set once at boot from main when
+// CONFIG_NBP_CLONE is on; never touched otherwise. Plain pointer rather
+// than std::atomic: a torn write against a read can't happen on a
+// 32-bit aligned pointer for our targets, and the only meaningful read
+// is "non-null → invoke".
+CloneStatsProvider g_clone_stats_provider = nullptr;
 
 #if CONFIG_NBP_WEB_CONSOLE
 // ---- log ring buffer ----
@@ -643,10 +651,19 @@ esp_err_t favicon_get(httpd_req_t *req) {
 void record_read() { g_reads.fetch_add(1, std::memory_order_relaxed); }
 void record_write() { g_writes.fetch_add(1, std::memory_order_relaxed); }
 void record_notify() { g_notifies.fetch_add(1, std::memory_order_relaxed); }
+void set_clone_stats_provider(CloneStatsProvider fn) {
+  g_clone_stats_provider = fn;
+}
 
 size_t build_stats_json(char *buf, size_t cap) {
   unsigned in_use = proxy::MAX_CONNECTIONS -
                     ble_backend::connection::free_slots();
+  // Fold the clone GATT image's activity into the same counters so the
+  // dashboard chart reflects both transports. Provider is null until
+  // main installs one (under CONFIG_NBP_CLONE).
+  CloneCounters cc{};
+  if (g_clone_stats_provider) g_clone_stats_provider(&cc);
+  in_use += cc.connected_centrals;
   int cpu0 = 0, cpu1 = 0;
   sample_cpu_pct(&cpu0, &cpu1);
   float temp_c = read_temp_c();
@@ -656,9 +673,12 @@ size_t build_stats_json(char *buf, size_t cap) {
       "\"connections\":%u,\"heap\":%lu,"
       "\"notify_rx\":%lu,\"last_notify_handle\":%u,"
       "\"cpu0\":%d,\"cpu1\":%d,\"temp_c\":%.1f}",
-      static_cast<unsigned long>(g_reads.load(std::memory_order_relaxed)),
-      static_cast<unsigned long>(g_writes.load(std::memory_order_relaxed)),
-      static_cast<unsigned long>(g_notifies.load(std::memory_order_relaxed)),
+      static_cast<unsigned long>(
+          g_reads.load(std::memory_order_relaxed) + cc.reads),
+      static_cast<unsigned long>(
+          g_writes.load(std::memory_order_relaxed) + cc.writes),
+      static_cast<unsigned long>(
+          g_notifies.load(std::memory_order_relaxed) + cc.notifies),
       static_cast<unsigned long>(ble_backend::scanner::adv_count()),
       in_use,
       static_cast<unsigned long>(esp_get_free_heap_size()),
@@ -971,6 +991,12 @@ size_t build_devices_json(char *buf, size_t cap) {
   static ble_backend::scanner::DeviceRow snap[64];
   size_t n = ble_backend::scanner::snapshot_devices(snap, 64);
   uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+#if CONFIG_NBP_BTHOME
+  // Joined per-row below; snapshotting once outside the loop avoids
+  // re-locking the BTHome cache for every device row.
+  static ble_backend::bthome::Reading bsnap[32];
+  size_t bn = ble_backend::bthome::snapshot(bsnap, 32);
+#endif
 
   char *p = buf;
   char *const end = buf + cap;
@@ -1010,7 +1036,38 @@ size_t build_devices_json(char *buf, size_t cap) {
         *p++ = c;
       }
     }
-    if (rem() >= 2) { *p++ = '"'; *p++ = '}'; }
+    if (rem() >= 1) *p++ = '"';
+#if CONFIG_NBP_BTHOME
+    const ble_backend::bthome::Reading *br = nullptr;
+    for (size_t j = 0; j < bn; ++j) {
+      if (bsnap[j].addr == r.addr) { br = &bsnap[j]; break; }
+    }
+    if (br) {
+      bump(std::snprintf(p, rem(), ",\"bthome\":{"));
+      bool first = true;
+      auto kv = [&](const char *k, unsigned long v) {
+        bump(std::snprintf(p, rem(), "%s\"%s\":%lu", first ? "" : ",", k, v));
+        first = false;
+      };
+      auto kv_i = [&](const char *k, long v) {
+        bump(std::snprintf(p, rem(), "%s\"%s\":%ld", first ? "" : ",", k, v));
+        first = false;
+      };
+      if (br->encrypted) kv("enc", 1);
+      if (br->have_temperature) kv_i("t", static_cast<long>(br->temperature_c100));
+      if (br->have_humidity)    kv("h",   br->humidity_pct100);
+      if (br->have_battery)     kv("b",   br->battery_pct);
+      if (br->have_voltage)     kv("v",   br->voltage_mv);
+      if (br->have_illuminance) kv("l",   static_cast<unsigned long>(br->illuminance_lx100));
+      if (br->have_motion)      kv("m",   br->motion);
+      if (br->have_button)      kv("btn", br->button_event);
+      if (br->have_power)       kv("w",   static_cast<unsigned long>(br->power_w100));
+      if (br->have_co2)         kv("co2", br->co2_ppm);
+      if (br->have_packet_id)   kv("p",   br->packet_id);
+      if (rem() >= 1) *p++ = '}';
+    }
+#endif
+    if (rem() >= 1) *p++ = '}';
   }
   if (rem() >= 2) { *p++ = ']'; *p++ = '}'; }
   return static_cast<size_t>(p - buf);
