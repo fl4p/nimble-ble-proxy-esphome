@@ -70,6 +70,7 @@ std::atomic<bool> g_advertising{false};
 std::atomic<uint8_t> g_connected_centrals{0};
 
 std::atomic<uint16_t> g_service_count{0};
+std::atomic<uint32_t> g_reads_served{0};
 std::atomic<uint32_t> g_writes_proxied{0};
 std::atomic<uint32_t> g_notifies_out{0};
 
@@ -95,11 +96,16 @@ class ServerCb : public NimBLEServerCallbacks {
 };
 ServerCb g_server_cb;
 
-// Per-characteristic local callbacks. Read isn't intercepted (NimBLE
-// serves cached value directly). Write captures the value and enqueues
-// it to the upstream worker so the host task isn't blocked.
+// Per-characteristic local callbacks. onRead doesn't modify the cached
+// value (NimBLE serves the bytes set by prime_cache/on_upstream_notify
+// itself); it only bumps the counter exposed via mirror::stats() so the
+// dashboard chart can fold clone reads in. Write captures the value and
+// enqueues it to the upstream worker so the host task isn't blocked.
 class CharCb : public NimBLECharacteristicCallbacks {
  public:
+  void onRead(NimBLECharacteristic *, NimBLEConnInfo &) override {
+    g_reads_served.fetch_add(1, std::memory_order_relaxed);
+  }
   void onWrite(NimBLECharacteristic *chr, NimBLEConnInfo &) override {
     // Locate the MirrorChar row for this local characteristic.
     MirrorChar *row = nullptr;
@@ -625,6 +631,7 @@ Stats stats() {
   Stats s{};
   s.services = g_service_count.load(std::memory_order_relaxed);
   s.characteristics = static_cast<uint16_t>(g_char_count);
+  s.reads_served_from_cache = g_reads_served.load(std::memory_order_relaxed);
   s.writes_proxied = g_writes_proxied.load(std::memory_order_relaxed);
   s.notifies_out = g_notifies_out.load(std::memory_order_relaxed);
   s.connected_centrals = g_connected_centrals.load(std::memory_order_relaxed);
