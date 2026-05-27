@@ -54,7 +54,7 @@ void start_and_wait_for_ip() {
 
   ESP_ERROR_CHECK(esp_netif_init());
   esp_netif_t *netif = esp_netif_create_default_wifi_sta();
-  esp_netif_set_hostname(netif, proxy::HOSTNAME);
+  esp_netif_set_hostname(netif, proxy::hostname());
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&cfg));

@@ -136,7 +136,7 @@ void start() {
                         .user_ctx = nullptr};
   httpd_register_uri_handler(g_srv, &update);
 
-  ESP_LOGI(TAG, "OTA endpoint at http://%s.local/update", proxy::HOSTNAME);
+  ESP_LOGI(TAG, "OTA endpoint at http://%s.local/update", proxy::hostname());
 }
 
 httpd_handle_t handle() { return g_srv; }

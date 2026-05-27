@@ -150,6 +150,7 @@ esp_err_t log_get(httpd_req_t *req) {
 
 constexpr const char *NVS_NS = "stats";
 constexpr const char *NVS_LEVEL_KEY = "nimble_lvl";
+constexpr const char *NVS_HOSTNAME_KEY = "hostname";
 constexpr esp_log_level_t DEFAULT_NIMBLE_LEVEL = ESP_LOG_WARN;
 #ifdef CONFIG_NBP_SMP
 constexpr const char *NVS_PASSKEY_KEY = "ble_passkey";
@@ -393,6 +394,26 @@ esp_err_t cpufreq_post(httpd_req_t *req) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
   }
   const char *err = handle_cpufreq_set(query);
+  if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+
+esp_err_t hostname_get(httpd_req_t *req) {
+  // 2 * (HOSTNAME_MAX+1) + JSON scaffolding fits comfortably in 96 B.
+  char buf[96];
+  size_t n = build_hostname_json(buf, sizeof(buf));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, n);
+}
+
+esp_err_t hostname_post(httpd_req_t *req) {
+  // Query buffer sized for "val=" + max hostname.
+  char query[proxy::HOSTNAME_MAX + 8];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
+  }
+  const char *err = handle_hostname_set(query);
   if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, "{\"ok\":true}", 11);
@@ -729,6 +750,59 @@ size_t build_cpufreq_json(char *buf, size_t cap) {
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
 
+// Subset of RFC 1123 hostname grammar: letter/digit/hyphen/underscore/
+// dot, length 1..HOSTNAME_MAX, no leading/trailing '-' or '.'. We're
+// strict here because the same value drives mDNS (`<name>.local`), the
+// netif hostname, and the BLE GAP name — vendor stacks vary in what
+// they tolerate, so reject anything that could surprise them.
+bool is_valid_hostname(const char *s, size_t len) {
+  if (len == 0 || len > proxy::HOSTNAME_MAX) return false;
+  if (s[0] == '-' || s[0] == '.') return false;
+  if (s[len - 1] == '-' || s[len - 1] == '.') return false;
+  for (size_t i = 0; i < len; ++i) {
+    char c = s[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+    if (!ok) return false;
+  }
+  return true;
+}
+
+size_t build_hostname_json(char *buf, size_t cap) {
+  // The hostname can in principle contain a backslash via NVS tampering
+  // (handle_hostname_set rejects backslashes), but be defensive and
+  // escape anyway so the response is always valid JSON.
+  int n = std::snprintf(buf, cap, "{\"hostname\":\"%s\",\"default\":\"%s\"}",
+                        proxy::hostname(), proxy::DEFAULT_HOSTNAME);
+  if (n < 0) return 0;
+  return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+
+const char *handle_hostname_set(const char *query) {
+  char val[proxy::HOSTNAME_MAX + 1];
+  if (httpd_query_key_value(query, "val", val, sizeof(val)) != ESP_OK) {
+    return "missing val=";
+  }
+  size_t len = std::strlen(val);
+  if (!is_valid_hostname(val, len)) {
+    return "invalid hostname (1..32 chars: A-Za-z0-9._-)";
+  }
+  // No-op fast path: don't churn NVS if the user resubmits the current
+  // value (the UI does this on focus-out as a "save" gesture).
+  if (std::strcmp(val, proxy::g_hostname) == 0) return nullptr;
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+  if (err != ESP_OK) return "nvs open failed";
+  err = nvs_set_str(h, NVS_HOSTNAME_KEY, val);
+  if (err == ESP_OK) err = nvs_commit(h);
+  nvs_close(h);
+  if (err != ESP_OK) return "nvs write failed";
+  ESP_LOGI(TAG,
+           "hostname set to '%s' (persisted; reboot to apply to mDNS/BLE)",
+           val);
+  return nullptr;
+}
+
 const char *handle_cpufreq_set(const char *query) {
   char val[8];
   int mhz = g_cpu_freq_mhz;
@@ -957,6 +1031,25 @@ void schedule_reboot() {
   esp_timer_start_once(timer, 500000);
 }
 
+void apply_hostname_from_nvs() {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+  char buf[proxy::HOSTNAME_MAX + 1];
+  size_t sz = sizeof(buf);
+  esp_err_t err = nvs_get_str(h, NVS_HOSTNAME_KEY, buf, &sz);
+  nvs_close(h);
+  if (err != ESP_OK) return;  // keep static default
+  // nvs_get_str writes including NUL; sz includes it.
+  size_t len = (sz == 0) ? 0 : sz - 1;
+  if (!is_valid_hostname(buf, len)) {
+    ESP_LOGW(TAG, "stored hostname '%s' fails validation; using default '%s'",
+             buf, proxy::DEFAULT_HOSTNAME);
+    return;
+  }
+  std::memcpy(proxy::g_hostname, buf, len + 1);
+  ESP_LOGI(TAG, "hostname from NVS: '%s'", proxy::g_hostname);
+}
+
 void apply_log_overrides_from_nvs() {
   esp_log_level_t lvl;
   if (nvs_read_level(&lvl) == ESP_OK) {
@@ -1101,6 +1194,16 @@ void register_endpoints(httpd_handle_t srv) {
                            .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &cpufreq_g);
   httpd_register_uri_handler(srv, &cpufreq_p);
+  httpd_uri_t hostname_g = {.uri = "/hostname",
+                            .method = HTTP_GET,
+                            .handler = &hostname_get,
+                            .user_ctx = nullptr};
+  httpd_uri_t hostname_p = {.uri = "/hostname",
+                            .method = HTTP_POST,
+                            .handler = &hostname_post,
+                            .user_ctx = nullptr};
+  httpd_register_uri_handler(srv, &hostname_g);
+  httpd_register_uri_handler(srv, &hostname_p);
   httpd_uri_t scan_g = {.uri = "/scan",
                         .method = HTTP_GET,
                         .handler = &scan_get,

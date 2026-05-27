@@ -27,7 +27,7 @@ void format_mac_lower_nosep(char *out, size_t out_size) {
 
 void start() {
   ESP_ERROR_CHECK(mdns_init());
-  ESP_ERROR_CHECK(mdns_hostname_set(proxy::HOSTNAME));
+  ESP_ERROR_CHECK(mdns_hostname_set(proxy::hostname()));
   ESP_ERROR_CHECK(mdns_instance_name_set(proxy::FRIENDLY_NAME));
 
   char mac_buf[13];
@@ -48,7 +48,7 @@ void start() {
 
   ESP_ERROR_CHECK(mdns_service_add(nullptr, "_esphomelib", "_tcp",
                                    proxy::API_PORT, txt, txt_count));
-  ESP_LOGI(TAG, "_esphomelib._tcp on %s:%u announced", proxy::HOSTNAME,
+  ESP_LOGI(TAG, "_esphomelib._tcp on %s:%u announced", proxy::hostname(),
            proxy::API_PORT);
 }
 

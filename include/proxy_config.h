@@ -15,8 +15,24 @@ namespace proxy {
 
 inline constexpr const char *VERSION = "0.1.0";
 
-// Identity advertised to Home Assistant.
-inline constexpr const char *HOSTNAME = "nimble-proxy";
+// Compile-time default hostname. Runtime value is exposed via
+// `hostname()` below — it may be overridden by an NVS entry loaded at
+// boot by `api_server::stats::apply_hostname_from_nvs()`.
+inline constexpr const char *DEFAULT_HOSTNAME = "nimble-proxy";
+
+// Mutable hostname buffer, defined in main.cpp. All consumers (mDNS,
+// netif, NimBLE GAP name, aioesphomeapi DeviceInfo) should read
+// through `hostname()` rather than the compile-time default so a user
+// rename via /hostname takes effect after reboot.
+//
+// Capped at 30 so the value (+ NUL) always fits the smallest consumer:
+// proxyapi_HelloResponse.name is 31 bytes. Going higher trips
+// -Werror=format-truncation in handshake.cpp.
+constexpr size_t HOSTNAME_MAX = 30;
+extern char g_hostname[HOSTNAME_MAX + 1];
+
+inline const char *hostname() { return g_hostname; }
+
 inline constexpr const char *FRIENDLY_NAME = "NimBLE Proxy";
 inline constexpr const char *MODEL = "esp32-s3-devkitc";
 inline constexpr const char *MANUFACTURER = "Custom";

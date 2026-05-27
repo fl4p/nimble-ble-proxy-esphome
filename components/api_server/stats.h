@@ -58,6 +58,18 @@ const char *handle_txpower_set(const char *query);
 size_t build_cpufreq_json(char *buf, size_t cap);
 const char *handle_cpufreq_set(const char *query);
 
+// Hostname (mDNS / WiFi netif / NimBLE GAP name / aioesphomeapi
+// DeviceInfo). Persisted in NVS as a UTF-8 string under key "hostname";
+// applied at boot via apply_hostname_from_nvs() — runtime POST writes
+// NVS but does NOT re-init the radio stack, so the caller should reboot
+// for the change to take effect.
+//
+// Validation: 1..HOSTNAME_MAX chars from [A-Za-z0-9._-], must not start
+// or end with '-' or '.'. These mirror RFC 1123 hostname conventions so
+// the value is usable as the mDNS local name (`<name>.local`).
+size_t build_hostname_json(char *buf, size_t cap);
+const char *handle_hostname_set(const char *query);
+
 #ifdef CONFIG_NBP_SMP
 size_t build_passkey_json(char *buf, size_t cap);
 const char *handle_passkey_set(const char *query);
@@ -110,6 +122,13 @@ void apply_tx_power_from_nvs();
 // early (before WiFi/BLE init) makes the radios' init use the chosen
 // frequency from the start. Default if no NVS entry: 240 MHz.
 void apply_cpu_freq_from_nvs();
+
+// Read persisted hostname from NVS into proxy::g_hostname. Must run
+// AFTER nvs_flash_init and BEFORE any consumer (wifi_sta, mdns_announce,
+// ble_backend, handshake) reads proxy::hostname(). No-op if no NVS key
+// or stored value fails validation — buffer keeps the compile-time
+// default it was statically initialised with.
+void apply_hostname_from_nvs();
 
 // Registers /, /stats.json, /log, /level, /reboot, /trace, /devices,
 // /passkey, /txpower, /cpufreq. Only defined when WiFi (and therefore

@@ -30,6 +30,15 @@ namespace {
 constexpr const char *TAG = "main";
 }
 
+// Runtime hostname buffer declared in proxy_config.h. Pre-initialised
+// to the compile-time default; overwritten at boot by
+// api_server::stats::apply_hostname_from_nvs() if the user stored an
+// override via /hostname. main is the link root so a single definition
+// here is visible to every component.
+namespace proxy {
+char g_hostname[HOSTNAME_MAX + 1] = "nimble-proxy";
+}
+
 extern "C" void app_main() {
 #if CONFIG_NBP_WEB_CONSOLE
   // First thing: tee esp_log into the in-memory ring so the web console
@@ -47,6 +56,12 @@ extern "C" void app_main() {
   ESP_ERROR_CHECK(esp_event_loop_create_default());
 
   ESP_LOGI(TAG, "nimble-ble-proxy %s booting", proxy::VERSION);
+
+  // NVS is up — load persisted hostname into proxy::g_hostname before
+  // any subsystem reads `proxy::hostname()` (mDNS, esp_netif, NimBLE
+  // GAP name, aioesphomeapi DeviceInfo). Changes via /hostname only
+  // take effect after the next boot for this reason.
+  api_server::stats::apply_hostname_from_nvs();
 
   // NVS is up — apply the persisted NimBLE log level before any
   // NimBLE component initialises so it takes effect from the first

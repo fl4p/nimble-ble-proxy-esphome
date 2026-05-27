@@ -192,6 +192,14 @@ size_t dispatch(const char *method, char *path, char *out, size_t cap) {
                               api_server::stats::handle_cpufreq_set(query));
   }
 
+  if (is_get && std::strcmp(path, "/hostname") == 0) {
+    return api_server::stats::build_hostname_json(out, cap);
+  }
+  if (is_post && std::strcmp(path, "/hostname") == 0) {
+    return render_ok_or_error(out, cap,
+                              api_server::stats::handle_hostname_set(query));
+  }
+
   if (is_get && std::strcmp(path, "/scan") == 0) {
     return api_server::stats::build_scan_json(out, cap);
   }

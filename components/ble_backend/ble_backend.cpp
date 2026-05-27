@@ -59,7 +59,7 @@ void start() {
   if (g_started) return;
   g_started = true;
 
-  NimBLEDevice::init(proxy::HOSTNAME);
+  NimBLEDevice::init(proxy::hostname());
   // Slightly larger MTU than the 23-byte default so notification payloads
   // aren't capped at 20 B. Peers may still negotiate down.
   NimBLEDevice::setMTU(247);

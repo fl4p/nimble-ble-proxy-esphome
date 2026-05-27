@@ -45,7 +45,7 @@ Result hello_response(uint8_t *buf, size_t cap) {
   resp.api_version_minor = proxy::API_VERSION_MINOR;
   std::snprintf(resp.server_info, sizeof(resp.server_info), "nimble-ble-proxy %s",
                 proxy::VERSION);
-  std::snprintf(resp.name, sizeof(resp.name), "%s", proxy::HOSTNAME);
+  std::snprintf(resp.name, sizeof(resp.name), "%s", proxy::hostname());
   size_t n = encode_into(buf, cap, proxyapi_HelloResponse_fields, &resp);
   return {true, proxyapi::MSG_HELLO_RESPONSE, n, false};
 }
@@ -61,7 +61,7 @@ Result connect_response(uint8_t *buf, size_t cap) {
 Result device_info_response(uint8_t *buf, size_t cap) {
   proxyapi_DeviceInfoResponse resp = proxyapi_DeviceInfoResponse_init_zero;
   resp.uses_password = false;
-  std::snprintf(resp.name, sizeof(resp.name), "%s", proxy::HOSTNAME);
+  std::snprintf(resp.name, sizeof(resp.name), "%s", proxy::hostname());
   format_mac(ESP_MAC_WIFI_STA, resp.mac_address, sizeof(resp.mac_address));
   format_mac(ESP_MAC_BT, resp.bluetooth_mac_address,
              sizeof(resp.bluetooth_mac_address));

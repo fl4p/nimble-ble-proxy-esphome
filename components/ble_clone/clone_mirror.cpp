@@ -481,7 +481,7 @@ void start_advertising(const char *base_name) {
                 t.name_suffix);
   name[28] = 0;
 
-  // NimBLEDevice was init'd with proxy::HOSTNAME — override the adv
+  // NimBLEDevice was init'd with proxy::hostname() — override the adv
   // name so vendor apps find the cloned device by the expected name.
   // (resetGATT()/ble_svc_gap_init() in finalize_server resets the GAP
   // 0x2A00 char back to the Kconfig default, so this call has to come

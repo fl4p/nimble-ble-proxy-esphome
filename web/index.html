@@ -49,15 +49,20 @@ code{color:#bbb}
 #controls label,#tunables label{color:#aaa;
   display:inline-flex;align-items:center;gap:.3em}
 #controls select,#controls button,
-#tunables select,#tunables button,#tunables input[type=checkbox]{
+#tunables select,#tunables button,#tunables input[type=checkbox],
+#tunables input[type=text]{
   background:#1a1a1a;color:#eee;border:1px solid #333;
   border-radius:4px;padding:.3em .6em;font:inherit;cursor:pointer}
+#tunables input[type=text]{cursor:text;width:9em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+#tunables input[type=text].dirty{border-color:#3b82f6}
+#tunables input[type=text].ok{border-color:#4ade80}
+#tunables input[type=text].err{border-color:#f87171}
 #tunables input[type=checkbox]{padding:0;width:1em;height:1em;accent-color:#3b82f6}
 #controls button:hover,#tunables button:hover{background:#2a2a2a}
 #controls button.danger,#tunables button.danger{border-color:#7f1d1d;color:#fca5a5}
 #controls button.danger:hover,#tunables button.danger:hover{background:#3b0a0a}
-#controls button.primary{border-color:#3b82f6;color:#bfdbfe}
-#controls button.primary:hover{background:#1e3a8a}
+#controls button.primary,#tunables button.primary{border-color:#3b82f6;color:#bfdbfe}
+#controls button.primary:hover,#tunables button.primary:hover{background:#1e3a8a}
 #tunables select:disabled{opacity:.4;cursor:not-allowed}
 #status{color:#888;margin-left:auto}
 #status.ok{color:#4ade80}
@@ -142,6 +147,10 @@ table#devices button.clone-btn:disabled{opacity:.5;cursor:default}
     </select></label>
     <label><input type=checkbox id=ls> light sleep</label>
     <label><input type=checkbox id=act> active scan</label>
+    <!-- Hostname drives mDNS / WiFi netif / NimBLE GAP name / aioesphomeapi
+         DeviceInfo. Save persists to NVS; takes effect on next reboot. -->
+    <label>name: <input type=text id=hn maxlength=30 spellcheck=false
+                        autocomplete=off></label>
     <button id=reboot class=danger>reboot device</button>
   </div>
 
@@ -555,6 +564,10 @@ async function loadInitialValues() {
     // dropdown showing the first option (we don't add a custom row).
     for (const opt of duty.options) if (opt.value === key) duty.value = key;
     document.getElementById('act').checked = !!sc.active;
+    const hn = document.getElementById('hn');
+    const h = await apiJson('GET /hostname');
+    hn.value = h.hostname;
+    hn.dataset.saved = h.hostname;
   } catch (e) { /* dropdowns just stay at defaults */ }
 }
 
@@ -588,6 +601,44 @@ function wireControls() {
     apiText('POST /scan?active=' + (e.target.checked ? 1 : 0))
       .catch(err => alert(err));
   };
+  // Hostname: show dirty marker on edit; save on Enter or blur. POST
+  // only persists — apply happens on next boot, so we update the saved
+  // baseline and hint via the rebooot button styling.
+  const hn = document.getElementById('hn');
+  const hnSave = async () => {
+    const v = hn.value.trim();
+    if (v === (hn.dataset.saved || '')) {
+      hn.classList.remove('dirty', 'ok', 'err');
+      return;
+    }
+    if (!/^[A-Za-z0-9._-]{1,30}$/.test(v) || v.startsWith('-') ||
+        v.startsWith('.') || v.endsWith('-') || v.endsWith('.')) {
+      hn.classList.remove('dirty', 'ok');
+      hn.classList.add('err');
+      return;
+    }
+    try {
+      await apiText('POST /hostname?val=' + encodeURIComponent(v));
+      hn.dataset.saved = v;
+      hn.classList.remove('dirty', 'err');
+      hn.classList.add('ok');
+      // The reboot button is the apply gesture — pulse it visually.
+      const rb = document.getElementById('reboot');
+      rb.classList.add('primary');
+      rb.classList.remove('danger');
+      rb.textContent = 'reboot to apply name';
+    } catch (err) {
+      hn.classList.remove('dirty', 'ok');
+      hn.classList.add('err');
+    }
+  };
+  hn.oninput = () => {
+    hn.classList.remove('ok', 'err');
+    hn.classList.toggle('dirty', hn.value.trim() !== (hn.dataset.saved || ''));
+  };
+  hn.onblur = hnSave;
+  hn.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); hn.blur(); } };
+
   document.getElementById('reboot').onclick = async () => {
     if (!confirm('Reboot device?')) return;
     try {
