@@ -102,21 +102,52 @@ const char *classify_device(const NimBLEAdvertisedDevice *dev) {
       // (0x02) carries its own length byte (0x15); other subtypes are
       // generic Continuity TLVs documented from reverse-engineering.
       uint8_t sub = static_cast<uint8_t>(mfg[2]);
+      if (sub == 0x02 && mfg.size() >= 25 &&
+          static_cast<uint8_t>(mfg[3]) == 0x15) {
+        // iBeacon UUID is bytes 4..19 in big-endian order (the iBeacon
+        // spec transmits the proximity UUID MSB-first, matching how it
+        // would be printed). Tag known vendor defaults.
+        static const uint8_t ESTIMOTE[16] = {
+            0xB9, 0x40, 0x7F, 0x30, 0xF5, 0xF8, 0x46, 0x6E,
+            0xAF, 0xF9, 0x25, 0x55, 0x6B, 0x57, 0xFE, 0x6D};
+        static const uint8_t KONTAKT[16] = {
+            0xF7, 0x82, 0x6D, 0xA6, 0x4F, 0xA2, 0x4E, 0x98,
+            0x80, 0x24, 0xBC, 0x5B, 0x71, 0xE0, 0x89, 0x3E};
+        static const uint8_t RADIUS[16] = {
+            0x2F, 0x23, 0x44, 0x54, 0xCF, 0x6D, 0x4A, 0x0F,
+            0xAD, 0xF2, 0xF4, 0x91, 0x1B, 0xA9, 0xFF, 0xA6};
+        static const uint8_t AIRLOCATE[16] = {
+            0xE2, 0xC5, 0x6D, 0xB5, 0xDF, 0xFB, 0x48, 0xD2,
+            0xB0, 0x60, 0xD0, 0xF5, 0xA7, 0x10, 0x96, 0xE0};
+        // Tesla vehicles (Model 3/Y/S/X) broadcast iBeacon frames whose
+        // Proximity UUID is the phone-key service UUID. The same UUID
+        // also appears in the 128-bit service-UUID branch below for
+        // cases where the car advertises the service directly.
+        static const uint8_t TESLA[16] = {
+            0x74, 0x27, 0x8B, 0xDA, 0xB6, 0x44, 0x45, 0x20,
+            0x8F, 0x0C, 0x72, 0x0E, 0xAF, 0x05, 0x99, 0x35};
+        const auto *u = reinterpret_cast<const uint8_t *>(mfg.data() + 4);
+        if (std::memcmp(u, TESLA, 16) == 0) return "iBeacon·Tesla";
+        if (std::memcmp(u, ESTIMOTE, 16) == 0) return "iBeacon·Estimote";
+        if (std::memcmp(u, KONTAKT, 16) == 0) return "iBeacon·Kontakt";
+        if (std::memcmp(u, RADIUS, 16) == 0) return "iBeacon·RadBeacon";
+        if (std::memcmp(u, AIRLOCATE, 16) == 0) return "iBeacon·AirLocate";
+        return "iBeacon";
+      }
       if (sub == 0x02 && mfg.size() >= 4 &&
           static_cast<uint8_t>(mfg[3]) == 0x15) return "iBeacon";
       switch (sub) {
         case 0x05: return "AirDrop";
-        case 0x07: return "AirPods";
-        case 0x09: return "AppleTV";
-        case 0x0A: return "ApplePay";
-        case 0x0B: return "AppleWatch";
+        case 0x07: return "AirPods";        // Proximity Pairing (AirPods, Beats, …)
+        case 0x09: return "AirPlay";        // any device offering/discovering AirPlay
         case 0x0C: return "Handoff";
         case 0x0D: return "WiFiSettings";
         case 0x0E: return "Hotspot";
-        case 0x0F: return "WiFiJoin";
-        case 0x10: return "AppleNearby";
+        case 0x0F: return "NearbyAction";   // Wi-Fi join prompt, setup, etc.
+        case 0x10: return "NearbyInfo";     // presence + activity state (every iPhone)
         case 0x12: return "FindMy";
         case 0x16: return "HomeKit";
+        // 0x0A / 0x0B are contested in community sources — fall through.
         default: break;
       }
       return "Apple";
@@ -145,25 +176,38 @@ const char *classify_device(const NimBLEAdvertisedDevice *dev) {
   // emit manufacturer-data (BTHome sensors, Eddystone, ESS-only
   // peripherals, etc).
   uint8_t n = dev->getServiceUUIDCount();
+  // 128-bit vendor-specific UUIDs — built once at first call. Most
+  // proprietary protocols (Tesla phone-key, Nordic UART, TI SensorTag,
+  // Bose Connect, Pebble) live in this space rather than SIG-allocated
+  // 16-bit UUIDs. Equality test relies on NimBLEUUID::operator==.
+  static const NimBLEUUID TESLA_KEY("74278BDA-B644-4520-8F0C-720EAF059935");
+  static const NimBLEUUID NORDIC_UART("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
+  static const NimBLEUUID TI_SENSORTAG("F000AA00-0451-4000-B000-000000000000");
   for (uint8_t i = 0; i < n; ++i) {
     NimBLEUUID u = dev->getServiceUUID(i);
-    if (u.bitSize() != 16) continue;
-    const uint8_t *v = u.getValue();
-    uint16_t u16 = uint16_t(v[0]) | (uint16_t(v[1]) << 8);
-    switch (u16) {
-      case 0xFCD2: return "BTHome";
-      case 0xFE9F: case 0xFE2C: return "FastPair";
-      case 0xFEAA: return "Eddystone";
-      case 0xFD6F: return "ENS";
-      case 0xFE95: return "MiBeacon";
-      case 0xFDA0: return "SwitchBot";
-      case 0x180F: return "Battery";
-      case 0x181A: return "EnvSense";
-      case 0x1812: return "HID";
-      case 0x180D: return "HeartRate";
-      case 0x1816: return "Cycling";
-      case 0x180A: return "DevInfo";
-      default: break;
+    uint8_t bs = u.bitSize();
+    if (bs == 16) {
+      const uint8_t *v = u.getValue();
+      uint16_t u16 = uint16_t(v[0]) | (uint16_t(v[1]) << 8);
+      switch (u16) {
+        case 0xFCD2: return "BTHome";
+        case 0xFE9F: case 0xFE2C: return "FastPair";
+        case 0xFEAA: return "Eddystone";
+        case 0xFD6F: return "ENS";
+        case 0xFE95: return "MiBeacon";
+        case 0xFDA0: return "SwitchBot";
+        case 0x180F: return "Battery";
+        case 0x181A: return "EnvSense";
+        case 0x1812: return "HID";
+        case 0x180D: return "HeartRate";
+        case 0x1816: return "Cycling";
+        case 0x180A: return "DevInfo";
+        default: break;
+      }
+    } else if (bs == 128) {
+      if (u == TESLA_KEY) return "Tesla";
+      if (u == NORDIC_UART) return "NordicUART";
+      if (u == TI_SENSORTAG) return "TI SensorTag";
     }
   }
   return nullptr;
