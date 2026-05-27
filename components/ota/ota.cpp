@@ -4,7 +4,9 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#if CONFIG_NBP_OTA
 #include "esp_ota_ops.h"
+#endif
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -17,13 +19,14 @@ namespace {
 
 constexpr const char *TAG = "ota";
 
+httpd_handle_t g_srv = nullptr;
+
+#if CONFIG_NBP_OTA
 // Chunk size for streaming POST body → OTA flash writes. Small enough
 // to keep stack/heap pressure low; large enough to amortize HTTP recv
 // overhead. 4 KiB matches the SPI flash sector size, which is what
 // esp_ota_write internally aligns to.
 constexpr size_t CHUNK = 4096;
-
-httpd_handle_t g_srv = nullptr;
 
 esp_err_t update_post(httpd_req_t *req) {
   ESP_LOGI(TAG, "OTA upload starting, content_len=%d", req->content_len);
@@ -104,6 +107,7 @@ esp_err_t update_post(httpd_req_t *req) {
   esp_restart();
   return ESP_OK;
 }
+#endif  // CONFIG_NBP_OTA
 
 }  // namespace
 
@@ -144,6 +148,7 @@ void start() {
   // would surface via ESP_LOGE (e.g. 'httpd_start failed') instead.
   esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
 
+#if CONFIG_NBP_OTA
   httpd_uri_t update = {.uri = "/update",
                         .method = HTTP_POST,
                         .handler = &update_post,
@@ -151,6 +156,9 @@ void start() {
   httpd_register_uri_handler(g_srv, &update);
 
   ESP_LOGI(TAG, "OTA endpoint at http://%s.local/update", proxy::hostname());
+#else
+  ESP_LOGI(TAG, "OTA endpoint disabled (NBP_OTA=n); httpd up for dashboard");
+#endif
 }
 
 httpd_handle_t handle() { return g_srv; }

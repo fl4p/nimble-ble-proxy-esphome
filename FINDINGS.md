@@ -1,9 +1,9 @@
 # nimble-ble-proxy — bring-up findings
 
-End-to-end bring-up notes from 2026-05-26. The firmware speaks the
-aioesphomeapi plaintext protocol over TCP and exposes itself to Home
-Assistant as a regular ESPHome Bluetooth proxy, but with NimBLE as the
-BLE stack instead of Bluedroid.
+End-to-end bring-up notes from 2026-05-26 onward. The firmware speaks
+the aioesphomeapi plaintext protocol over TCP and exposes itself to
+Home Assistant as a regular ESPHome Bluetooth proxy, but with NimBLE
+as the BLE stack instead of Bluedroid.
 
 ## Status
 
@@ -18,12 +18,12 @@ instance:
   behaviour)
 - `bluetooth_device_connect` round-trips: HA → our proxy → NimBLE
   async connect → onConnectFail callback → `ConnectionResponse{error:13}`
-  back to HA. Tested with an ANT BMS that's out of RF range of the
-  proxy; failure path produces a correct `BLE_HS_ETIMEOUT` (13) error.
-- Successful GATT connect + service discovery against a real peer was
-  **not** validated this session because the only candidate BMS is out
-  of range. The code path is exercised through the failure case but the
-  happy path is unrehearsed.
+  back to HA.
+- **Successful GATT connect + discovery validated** against an
+  ANT-BLE20PHUB BMS and a Victron SmartShunt (the latter under
+  `CONFIG_NBP_SMP` static-passkey pairing). Clone mode runs both as
+  the source of truth — see `docs/clone.md` Status section for the
+  verified-throughput numbers.
 
 ## Bugs found during bring-up
 

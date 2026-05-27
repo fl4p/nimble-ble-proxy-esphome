@@ -352,35 +352,36 @@ per-file: clone 250 / upstream 200 / mirror 300 / config 100).
 
 ## 11. Open questions
 
-1. **Bonded upstream.** Should we persist the bond under
-   `BT_NIMBLE_NVS_PERSIST=y` so the clone survives reboots without
-   re-pairing? Probably yes (it's free given `CONFIG_NBP_SMP=y`).
-2. **Dashboard surface.** Worth adding a row in `/stats.json` and a
-   panel below the device table? Likely yes — reuse the `web_ui` pattern
-   from `stats.cpp`.
-3. **Read cache TTL.** Currently invalidates only on write or notify.
+1. **Bonded upstream.** Resolved — `BT_NIMBLE_NVS_PERSIST=y` is selected
+   automatically by `CONFIG_NBP_CLONE` (see `main/Kconfig.projbuild`).
+   Bonds survive reboots; reconnect skips pairing.
+2. **Dashboard surface.** Resolved — the dashboard's devices-seen table
+   gains a clone / unclone button per row when `CONFIG_NBP_CLONE` is on,
+   and the configured target shows up as a synthetic row (with a state-
+   aware label) even when the peripheral is silent. The combined
+   passkey-setting prompt is wired through the same button. `/clone` is
+   the source of truth for state polled by the dashboard each tick.
+3. **Read cache TTL.** Still open — invalidates only on write or notify.
    Should reads also re-validate if older than N seconds? Defer.
-4. **Adv name length.** ESP32 + NimBLE caps adv name at 29 B. Long
-   upstream names + suffix may need truncation. Truncate from middle?
-   From end? Probably end.
-5. **MTU.** Upstream and each local central have independent MTUs. We
-   should call `client->exchangeMTU()` upstream and `setMTU(247)` (per
-   `ble_backend.cpp`) is already in effect for local. Notifies will be
-   capped at `min(upstream_mtu, smallest_local_mtu) - 3`.
+4. **Adv name length.** Resolved — `clone_mirror::start_advertising`
+   truncates to 26 chars (flags 3 B + name AD header 2 B = 5 B overhead
+   in the 31 B legacy payload). Truncation from the end.
+5. **MTU.** Resolved — `ble_backend.cpp` already calls `setMTU(247)`
+   for local and clone runs `exchangeMTU` against upstream during the
+   connect path. Notifies cap at `min(upstream_mtu, smallest_local_mtu) - 3`.
 
-## 12. Plan
+## 12. Plan (historical)
 
-1. Land Kconfig + skeleton headers + CMakeLists (done).
-2. `clone_config.cpp` + `/clone` HTTP — testable on its own with no BLE.
-3. `clone_upstream.cpp` + supervisor task — testable by scanning &
-   connecting to a fixed MAC and printing the discovered table.
-4. `clone_mirror.cpp` — gate this behind a build but unit-testable by
-   pointing at a known device (a Victron SmartShunt is a good target,
-   matches existing SMP work).
-5. End-to-end: clone the SmartShunt, then connect to the proxy with
-   VictronConnect app + Home Assistant Victron integration
-   simultaneously and verify both see live data.
-6. Dashboard panel.
+Reference timeline kept for context; all six steps are done.
+
+1. Kconfig + skeleton headers + CMakeLists.
+2. `clone_config.cpp` + `/clone` HTTP.
+3. `clone_upstream.cpp` + supervisor task.
+4. `clone_mirror.cpp`.
+5. End-to-end against a real peer (ANT BMS + Victron SmartShunt).
+6. Dashboard panel (now: clone button per device row, synthetic
+   target row, /clone live state poll, passkey merged into the same
+   POST).
 
 ## 13. Implementation pitfalls (discovered during bring-up)
 
@@ -542,9 +543,12 @@ local `std::array`, release the mutex, then iterate without it.
 
 ### 13.12 HTTP URI handler cap
 
-`esp_http_server` defaults to `max_uri_handlers = 8`. The stats
-component already registers 14, OTA adds /update = 15. Adding /clone
-GET + POST hits 17 and the POST silently fails (404). Bumped to **20**
+`esp_http_server` defaults to `max_uri_handlers = 8`. We already
+register 24+ routes (the full dashboard surface: `/`, `/favicon.svg`,
+`/stats.json`, `/log`, `/level`, `/trace`, `/reboot`, `/txpower`,
+`/cpufreq`, `/scan`, `/advitvl`, `/wifips`, `/hostname`, `/devices`,
+all GET+POST pairs that apply, plus `/clone` and OTA `/update`). Each
+unregistered handler is a silent 404 in production. Bumped to **32**
 in `ota.cpp`. If you grow more endpoints, raise it again.
 
 ### 13.13 Skip `target_link_libraries(... PUBLIC ...)` on INTERFACE libs

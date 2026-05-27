@@ -38,7 +38,9 @@ Six Kconfig flags shape what gets compiled in. Edit in
 
 | Kconfig | Default | Cost when ON | What it gates |
 |---|---|---|---|
-| `CONFIG_NBP_WIFI` | `y` | ~500 KB flash (WiFi stack + httpd + mDNS + OTA) | STA bring-up, mDNS, OTA, aioesphomeapi server, the HTTP dashboard endpoints, embedded `web/index.html` + `web/favicon.svg` |
+| `CONFIG_NBP_WIFI` | `y` | ~500 KB flash (WiFi stack + httpd + mDNS) | STA bring-up, mDNS, aioesphomeapi server, the HTTP dashboard endpoints, embedded `web/index.html` + `web/favicon.svg` |
+| `CONFIG_NBP_OTA` | `y` | code-gated; `app_update` dep always linked | `POST /update` HTTP OTA endpoint. The OTA flash code paths are `#if CONFIG_NBP_OTA` in `ota.cpp` so the linker GCs them when off; turn off for a lockdown build that requires serial flash. The shared httpd listener stays up either way for the dashboard. |
+| `CONFIG_NBP_AP_FALLBACK` | `n` | ~15 KB flash, extra netif + httpd | SoftAP fallback when STA can't associate within `CONFIG_NBP_AP_FALLBACK_SECS`. Hosts a single page at `192.168.4.1/` with a form that POSTs `/wifi?ssid=…&psk=…` into NVS namespace `wifi` and reboots. Credential lookup at boot: NVS first, then `wifi_creds.h` if present, then AP fallback. Makes `wifi_creds.h` optional. |
 | `CONFIG_NBP_BLE_HTTPD` | `n` | ~4 KB flash | GATT request/response service that lets Web Bluetooth talk to the same handlers |
 | `CONFIG_NBP_CLONE` | `n` | ~20 KB flash, ~10-15 KB RAM when active | clone supervisor + local GATT mirror + `/clone` endpoint + dashboard clone button + synthetic clone-target row |
 | `CONFIG_NBP_SMP` | `n` | ~2 KB flash | static-passkey pairing as central (paired upstream peripherals); `passkey` field on `/clone` |

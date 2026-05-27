@@ -107,10 +107,12 @@ Four Kconfig switches under `nimble-ble-proxy` choose what gets compiled in:
 
 | Kconfig | Default | What it adds |
 |---|---|---|
-| `CONFIG_NBP_WIFI` | `y` | STA + mDNS + OTA httpd + aioesphomeapi server + embedded dashboard HTML |
+| `CONFIG_NBP_WIFI` | `y` | STA + mDNS + dashboard httpd + aioesphomeapi server + embedded dashboard HTML |
+| `CONFIG_NBP_OTA` | `y` | `POST /update` HTTP OTA endpoint. Turn off for a lockdown build where firmware updates require serial. |
+| `CONFIG_NBP_AP_FALLBACK` | `n` | When STA can't associate within `CONFIG_NBP_AP_FALLBACK_SECS`, fall back to a SoftAP at `<hostname>-setup` (192.168.4.1) with a one-page form that POSTs credentials to NVS and reboots. Replaces edit-`wifi_creds.h`-and-reflash for first-time setup. |
 | `CONFIG_NBP_BLE_HTTPD` | `n` | GATT request/response service (Web Bluetooth dashboard) |
 | `CONFIG_NBP_CLONE` | `n` | Clone supervisor, upstream client, local GATT mirror, `/clone` endpoint |
-| `CONFIG_NBP_SMP` | `n` | Static-passkey pairing as central (paired upstream peripherals) |
+| `CONFIG_NBP_SMP` | `n` | Static-passkey pairing as central (paired upstream peripherals). Passkey is set via `POST /clone?passkey=N` |
 | `CONFIG_NBP_DEVICES_PANEL` | `y` | 64-entry devices-seen table + `/devices` + dashboard table |
 | `CONFIG_NBP_WEB_CONSOLE` | `y` | 64 KiB log ring + `/log` + on-page console |
 
