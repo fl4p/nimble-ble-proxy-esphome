@@ -77,8 +77,15 @@ CONFIG_NIMBLE_CPP_LOG_LEVEL_INFO=y
 # but the host-controller IPC across cores adds latency that the
 # ANT BMS doesn't tolerate.
 
-# Networking: enough sockets for HA control + lwip housekeeping.
-CONFIG_LWIP_MAX_SOCKETS=8
+# Networking: enough sockets for the worst-case mix —
+#   1 api_server listen + up to 4 api clients (HA + CLI)
+#   3 OTA httpd (1 listen + 2 clients)
+#   1-2 mDNS (v4/v6)
+#   1 SNTP / DHCP renew transients
+#   plus headroom for clone.mirror upstream and any in-flight close()
+# 8 was right on the edge and tipped over once HA + a browser tab were
+# both live; 16 leaves ~6 slots of slack with no measurable RAM cost.
+CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_LWIP_SO_REUSE=y
 
 # Task watchdog generous enough for BLE scan callbacks + GATT discovery bursts.

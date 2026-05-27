@@ -210,6 +210,11 @@ void listener_task(void *) {
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
+    // Visibility: print the moment accept() returns, before any task
+    // scheduling delay. If "accepted fd=X" appears with no matching
+    // "client connected" later, xTaskCreate was the holdup.
+    ESP_LOGI(TAG, "accepted fd=%d peer=%s:%u", client_fd,
+             inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
     ::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
     if (!register_client(client_fd)) {
@@ -245,6 +250,8 @@ bool send_async(uint16_t msg_type, EncodeFn encode, void *ctx) {
   size_t resp_cap = sizeof(g_tx_buf) - frame_codec::MAX_HEADER_LEN;
   size_t n = encode ? encode(ctx, resp_payload, resp_cap) : 0;
   bool any_sent = false;
+  int dead[proxy::MAX_API_CLIENTS];
+  uint8_t n_dead = 0;
   if (n > 0) {
     // Snapshot the fd list so the broadcast loop doesn't hold
     // g_clients_mutex while doing socket IO.
@@ -256,12 +263,48 @@ bool send_async(uint16_t msg_type, EncodeFn encode, void *ctx) {
     }
     xSemaphoreGive(g_clients_mutex);
     for (uint8_t i = 0; i < n_fds; ++i) {
-      if (send_locked_to(fds_snapshot[i], msg_type, n)) any_sent = true;
+      if (send_locked_to(fds_snapshot[i], msg_type, n)) {
+        any_sent = true;
+      } else {
+        // Peer is gone (EPIPE / ECONNRESET / EBADF). Without reaping,
+        // the fd lingers in g_client_fds and the connection_task's
+        // recv() may stay blocked until lwIP-level RST timeout — long
+        // enough to leak the lwIP socket and trip ENFILE on accept().
+        dead[n_dead++] = fds_snapshot[i];
+      }
       // Note: prepend_header rewrites the header in g_tx_buf each call,
       // but the payload area is unchanged so re-sending is safe.
     }
   }
   xSemaphoreGive(g_tx_mutex);
+
+  // Force the connection_task's recv() to wake by shutdown()-ing the
+  // socket. Its dispatch loop then returns false and runs the normal
+  // cleanup path (unregister_client + close + vTaskDelete). We do NOT
+  // close here — that would race with the connection_task and risk
+  // operating on a recycled fd if another connect lands first.
+  //
+  // Take g_clients_mutex and re-check membership before shutdown so we
+  // don't tear down an fd the connection_task already retired (rare,
+  // but the kernel could reissue the same numeric fd to a new client
+  // between our send-failure and now).
+  if (n_dead > 0) {
+    xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
+    for (uint8_t i = 0; i < n_dead; ++i) {
+      bool still_ours = false;
+      for (int fd : g_client_fds) {
+        if (fd == dead[i]) {
+          still_ours = true;
+          break;
+        }
+      }
+      if (still_ours) {
+        ::shutdown(dead[i], SHUT_RDWR);
+        ESP_LOGW(TAG, "send failed on fd=%d — shutdown to reap", dead[i]);
+      }
+    }
+    xSemaphoreGive(g_clients_mutex);
+  }
   return any_sent;
 }
 

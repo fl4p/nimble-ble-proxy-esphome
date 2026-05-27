@@ -115,14 +115,18 @@ void start() {
   cfg.send_wait_timeout = 30;
   cfg.lru_purge_enable = true;
   // Default 8 handlers is exactly what we needed for the bring-up set
-  // (/update, /, /stats.json, /log, /level GET+POST, /reboot, /trace);
-  // bumping past 8 covers /passkey GET+POST and leaves headroom for
-  // future endpoints (e.g. /bonds for listing/clearing stored bonds).
-  cfg.max_uri_handlers = 20;
-  // LWIP_MAX_SOCKETS=8 leaves us 5 user sockets after the HTTPD's 3
-  // internal ones; default 7 would fail to start. OTA only needs 1
-  // concurrent client.
-  cfg.max_open_sockets = 3;
+  // (/update, /, /stats.json, /log, /level GET+POST, /reboot, /trace).
+  // We're now well past that: /favicon.svg, /passkey, /txpower, /cpufreq,
+  // /scan, /wifi_ps, /hostname (all GET+POST pairs), /devices, /clone
+  // GET+POST — 24+ routes today. Each unregistered handler is a silent
+  // 404 in production (we saw /devices drop at boot), so size with a
+  // comfortable margin and add a runtime assert at registration time.
+  cfg.max_uri_handlers = 32;
+  // CONFIG_LWIP_MAX_SOCKETS=16 leaves the api_server (1 listen + up to
+  // 4 clients), mDNS and clone.mirror plenty of room alongside the
+  // dashboard. Bumping httpd here to 5 lets a phone + a desktop browser
+  // both poll /stats.json in parallel without httpd_accept_conn ENFILE.
+  cfg.max_open_sockets = 5;
 
   if (httpd_start(&g_srv, &cfg) != ESP_OK) {
     ESP_LOGE(TAG, "httpd_start failed");
