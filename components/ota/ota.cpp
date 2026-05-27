@@ -134,6 +134,15 @@ void start() {
     return;
   }
 
+  // Suppress 'httpd_txrx: error in recv : 104/113' WARN spam. These fire
+  // on every peer-initiated socket close (ECONNRESET / ENOCONN) — both
+  // are normal for a server handling polling clients (the dashboard
+  // closes keep-alive connections between fetch bursts) and for any
+  // recv in flight when WiFi drops. The IDF httpd has no per-errno
+  // filter; coarse-level mute is the only knob. Real bugs in this path
+  // would surface via ESP_LOGE (e.g. 'httpd_start failed') instead.
+  esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
+
   httpd_uri_t update = {.uri = "/update",
                         .method = HTTP_POST,
                         .handler = &update_post,

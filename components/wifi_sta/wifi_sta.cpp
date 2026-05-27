@@ -16,6 +16,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "nvs.h"
 
 #include <cstring>
 
@@ -26,7 +27,25 @@ namespace {
 constexpr const char *TAG = "wifi";
 constexpr int BIT_GOT_IP = BIT0;
 
+// Mirrored from api_server/stats.cpp — both ends read/write the same
+// key. Kept duplicated here to avoid pulling the whole api_server
+// dependency tree into wifi_sta just for one int8.
+constexpr const char *NVS_NS = "stats";
+constexpr const char *NVS_WIFI_LI_KEY = "wifi_li";
+constexpr int DEFAULT_WIFI_LI = 3;
+
 EventGroupHandle_t g_events = nullptr;
+
+int read_listen_interval_from_nvs() {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return DEFAULT_WIFI_LI;
+  int8_t v = DEFAULT_WIFI_LI;
+  esp_err_t err = nvs_get_i8(h, NVS_WIFI_LI_KEY, &v);
+  nvs_close(h);
+  if (err != ESP_OK) return DEFAULT_WIFI_LI;
+  if (v < 0 || v > 10) return DEFAULT_WIFI_LI;
+  return v;
+}
 
 void on_wifi_event(void * /*arg*/, esp_event_base_t base, int32_t id,
                    void * /*data*/) {
@@ -71,9 +90,21 @@ void start_and_wait_for_ip() {
                sizeof(wc.sta.password) - 1);
   wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
+  // Power-save: persisted listen_interval (DTIM beacons between RX
+  // wakeups). 0 means PS_NONE (radio always on, lowest RX latency,
+  // highest energy). 1..N means PS_MAX_MODEM with N×DTIM sleeps —
+  // bigger N = more energy savings but more downstream RX latency.
+  // Listen-interval must be set BEFORE esp_wifi_start so it's part of
+  // the initial association; set_ps mode flips after start.
+  const int li = read_listen_interval_from_nvs();
+  wc.sta.listen_interval = static_cast<uint16_t>(li > 0 ? li : 0);
+
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
   ESP_ERROR_CHECK(esp_wifi_start());
+  ESP_ERROR_CHECK(esp_wifi_set_ps(li > 0 ? WIFI_PS_MAX_MODEM : WIFI_PS_NONE));
+  ESP_LOGI(TAG, "wifi PS: %s (listen_interval=%d)",
+           li > 0 ? "MAX_MODEM" : "NONE", li);
 
   ESP_LOGI(TAG, "connecting to SSID '%s'…", WIFI_SSID);
   xEventGroupWaitBits(g_events, BIT_GOT_IP, pdFALSE, pdTRUE, portMAX_DELAY);

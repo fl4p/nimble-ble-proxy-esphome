@@ -15,11 +15,13 @@
 #include "esp_log.h"
 #include "esp_system.h"
 
+#include "scanner.h"  // pause/resume around upstream connect+finalize
 #ifdef CONFIG_NBP_SMP
 #include "ble_backend.h"
 #include "connection.h"  // for connection::get_passkey()
-#include "scanner.h"     // resume() after NimBLE auto-stops on connect
 #endif
+
+#include "host/ble_gap.h"  // ble_gap_*_active for idle-wait poll
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -185,19 +187,29 @@ bool try_session(uint64_t address, uint8_t address_type) {
   // Drain any stale signal from a previous attempt.
   xSemaphoreTake(g_connect_sem, 0);
   g_connect_ok.store(false, std::memory_order_relaxed);
+  // Bonded peers immediately push notifications on reconnect (because
+  // their CCCD subscription state survives across sessions). Those
+  // notifies can land before discoverAttributes finishes rebuilding the
+  // client-side char cache, and NimBLE-CPP logs each one as
+  // 'NimBLEClient: unknown handle: N'. Suppress that NimBLE log only
+  // around the connect→discover window — restored before we proceed.
+  esp_log_level_set("NimBLEClient", ESP_LOG_ERROR);
   if (!g_client->connect(addr, /*deleteAttibutes=*/true,
                          /*asyncConnect=*/true,
                          /*exchangeMTU=*/true)) {
+    esp_log_level_set("NimBLEClient", ESP_LOG_WARN);
     ESP_LOGW(TAG, "connect (async) returned false — controller busy?");
     return false;
   }
   if (xSemaphoreTake(g_connect_sem, pdMS_TO_TICKS(CONNECT_TIMEOUT_MS)) !=
       pdTRUE) {
+    esp_log_level_set("NimBLEClient", ESP_LOG_WARN);
     ESP_LOGW(TAG, "connect timeout after %ums", CONNECT_TIMEOUT_MS);
     g_client->disconnect();
     return false;
   }
   if (!g_connect_ok.load(std::memory_order_relaxed)) {
+    esp_log_level_set("NimBLEClient", ESP_LOG_WARN);
     ESP_LOGW(TAG, "connect failed (onConnectFail)");
     return false;
   }
@@ -212,10 +224,12 @@ bool try_session(uint64_t address, uint8_t address_type) {
   ESP_LOGI(TAG, "starting discoverAttributes; heap=%u",
            static_cast<unsigned>(esp_get_free_heap_size()));
   if (!g_client->discoverAttributes()) {
+    esp_log_level_set("NimBLEClient", ESP_LOG_WARN);
     ESP_LOGW(TAG, "discoverAttributes failed");
     g_client->disconnect();
     return false;
   }
+  esp_log_level_set("NimBLEClient", ESP_LOG_WARN);
   ESP_LOGI(TAG, "discoverAttributes ok; heap=%u",
            static_cast<unsigned>(esp_get_free_heap_size()));
 
@@ -239,6 +253,15 @@ bool try_session(uint64_t address, uint8_t address_type) {
       g_disconnect_sem = xSemaphoreCreateBinary();
     }
     xSemaphoreTake(g_disconnect_sem, 0);  // drain stale signal
+    // Stop the scanner BEFORE the disconnect. ble_gatts_mutable() (the
+    // gate inside ble_gatts_reset / ble_gatts_add_svcs) returns false
+    // when ANY GAP procedure is active — adv, scan, or connect. With
+    // active scan running through the disconnect window NimBLE's
+    // master FSM can still be in BLE_GAP_OP_M_DISC when we call
+    // server->start, and resetGATT silently fails (rc discarded by
+    // NimBLE-CPP), causing the next ble_svc_gap_init to panic at
+    // ble_svc_gap.c:395. Cross-ref clone.md §13.1.
+    ble_backend::scanner::pause();
     mirror::disconnect_upstream();        // null out the stale RemoteChar* refs
     g_client->disconnect();
     // Wait for the actual onDisconnect callback — that's when the host
@@ -247,31 +270,55 @@ bool try_session(uint64_t address, uint8_t address_type) {
     // accepted) but BLE_GATT_OP / ble_att_svr_reset hasn't completed yet.
     if (xSemaphoreTake(g_disconnect_sem, pdMS_TO_TICKS(3000)) != pdTRUE) {
       ESP_LOGW(TAG, "disconnect didn't complete within 3s");
+      ble_backend::scanner::resume();
       return false;
     }
-    // Extra settle so any in-flight ble_hs work finishes.
-    vTaskDelay(pdMS_TO_TICKS(50));
+    // Poll the host until every GAP role reports idle. ble_gatts_mutable
+    // (the gate inside ble_gatts_reset / ble_gatts_add_svcs) also checks
+    // that there are no active conns; the active-conn list is internal
+    // to NimBLE so we don't probe it directly, but the GAP-procedure
+    // bits clear once the disconnect event has been processed by the
+    // host. ~200 ms cap is generous: the actual transition is microseconds.
+    {
+      const TickType_t deadline =
+          xTaskGetTickCount() + pdMS_TO_TICKS(200);
+      while (xTaskGetTickCount() < deadline) {
+        if (!ble_gap_adv_active() && !ble_gap_disc_active() &&
+            !ble_gap_conn_active()) {
+          break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+      }
+      ESP_LOGI(TAG, "host idle: adv=%d disc=%d conn=%d",
+               ble_gap_adv_active(), ble_gap_disc_active(),
+               ble_gap_conn_active());
+    }
 
     if (!mirror::finalize_server()) {
       ESP_LOGW(TAG, "mirror finalize_server (ble_gatts_start) failed");
+      ble_backend::scanner::resume();
       return false;
     }
     g_mirror_built = true;
 
     // Reconnect for the steady-state session: re-discover, rebind, prime,
-    // subscribe.
+    // subscribe. Same 'unknown handle' suppression as the initial
+    // connect — bonded notifies race the cache rebuild here too.
     ESP_LOGI(TAG, "reconnecting upstream for steady-state session");
     xSemaphoreTake(g_connect_sem, 0);
     g_connect_ok.store(false, std::memory_order_relaxed);
+    esp_log_level_set("NimBLEClient", ESP_LOG_ERROR);
     if (!g_client->connect(addr, /*deleteAttibutes=*/true,
                            /*asyncConnect=*/true,
                            /*exchangeMTU=*/true)) {
+      esp_log_level_set("NimBLEClient", ESP_LOG_WARN);
       ESP_LOGW(TAG, "reconnect (async) returned false");
       return false;
     }
     if (xSemaphoreTake(g_connect_sem, pdMS_TO_TICKS(CONNECT_TIMEOUT_MS)) !=
             pdTRUE ||
         !g_connect_ok.load(std::memory_order_relaxed)) {
+      esp_log_level_set("NimBLEClient", ESP_LOG_WARN);
       ESP_LOGW(TAG, "reconnect timeout/fail");
       return false;
     }
@@ -280,10 +327,12 @@ bool try_session(uint64_t address, uint8_t address_type) {
              g_mtu.load(std::memory_order_relaxed));
     ble_backend::scanner::resume();
     if (!g_client->discoverAttributes()) {
+      esp_log_level_set("NimBLEClient", ESP_LOG_WARN);
       ESP_LOGW(TAG, "post-rebuild discoverAttributes failed");
       g_client->disconnect();
       return false;
     }
+    esp_log_level_set("NimBLEClient", ESP_LOG_WARN);
   }
 
   if (!mirror::rebind_upstream(g_client)) {

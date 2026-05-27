@@ -21,3 +21,13 @@ Give an estimate on code size an impact on flash/mem usage.
 
 write a BLE services that can server the website code/endpoints.
 Write a static html page with a BLE device selector, that connects and fills an iframe or such with the HTML (something like HTTP-over-BLE)
+
+
+ok lets make it more systematic. you keep a browser window open on http://192.168.1.231/, 
+so it will constantly fetch the http server. set BLE debug to DEBUG.
+Fix errors first, then dig into warnings.
+If the device becomes silent on the serial port, try to send reset sequence with esptool on both serial ports /dev/cu.usbmodem*.
+
+If no more issues, try the clone feature with SmartShunt (PSK PIN is 123456). Make sure it is still cloning, because cloning disables on failed boots.
+Then watch out of errors and warnings again.
+You are on full autopilot. 
