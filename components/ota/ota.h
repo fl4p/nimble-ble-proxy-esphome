@@ -3,6 +3,10 @@
 //
 // Usage:
 //   curl --data-binary @nimble_ble_proxy.bin http://nimble-proxy.local/update
+//
+// When NBP_OTA=n, the /update handler is not registered (and
+// esp_ota_ops is not linked), but start() still brings up the shared
+// httpd listener that the dashboard / api_server / clone piggyback on.
 
 #pragma once
 

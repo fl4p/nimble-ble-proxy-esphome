@@ -13,6 +13,64 @@ config NBP_WIFI
         a BLE-side transport is added). NimBLE scanner + clone
         continue to work unchanged.
 
+config NBP_OTA
+    bool "Expose HTTP OTA endpoint (/update) for remote firmware flash"
+    depends on NBP_WIFI
+    default y
+    help
+        Register the POST /update handler that streams a raw .bin into
+        the inactive OTA slot and reboots. Turn off for a "lockdown"
+        build where firmware can only be updated over serial — useful
+        for production deployments on untrusted LANs since OTA over
+        plain HTTP is a write primitive for anyone who can reach the
+        device.
+
+        Disabling drops the app_update component dependency (~12 KB
+        flash) and removes /update from the httpd. The shared httpd
+        listener stays up so the dashboard, /stats.json, /clone, etc.
+        keep working.
+
+        The partition table still reserves two OTA slots either way —
+        re-flash via serial picks ota_0 by default. To roll back to
+        a single-slot factory layout edit partitions.csv.
+
+config NBP_AP_FALLBACK
+    bool "SoftAP fallback + provisioning page when STA can't associate"
+    depends on NBP_WIFI
+    default n
+    help
+        If the WiFi STA can't get an IP within NBP_AP_FALLBACK_SECS
+        (bad creds, AP down, no creds set at all), bring up a SoftAP
+        named "<hostname>-setup" and serve a single page at
+        http://192.168.4.1/ that exposes:
+          POST /wifi?ssid=...&psk=...   write to NVS, then reboot
+        Replaces the "edit wifi_creds.h + re-flash" workflow with a
+        runtime provisioning step — high value for distributing
+        prebuilt binaries.
+
+        Credential lookup order at boot:
+          1. NVS namespace "wifi", keys "ssid" / "psk" (set via /wifi)
+          2. WIFI_SSID / WIFI_PASSWORD from include/wifi_creds.h, if
+             that header exists (now optional with this gate on)
+          3. neither set → go straight to AP fallback
+
+        Costs ~15 KB flash and one extra netif + httpd code path that
+        only links when this gate is on. While the AP is up no other
+        subsystem starts (mDNS, api_server, clone) — the device
+        deliberately stays in provisioning mode until the user
+        submits creds and it reboots.
+
+config NBP_AP_FALLBACK_SECS
+    int "SoftAP fallback: STA association timeout (seconds)"
+    depends on NBP_AP_FALLBACK
+    default 30
+    range 5 300
+    help
+        How long to wait for the STA to acquire an IP before giving
+        up and switching the radio into SoftAP provisioning mode.
+        Bumping this is harmless on a healthy network; lower it for
+        faster recovery when the configured AP is known-bad.
+
 config NBP_BLE_HTTPD
     bool "BLE-side HTTP transport (GATT request/response service)"
     default n
