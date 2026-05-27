@@ -13,6 +13,20 @@ void record_read();
 void record_write();
 void record_notify();
 
+// Optional provider that lets /stats.json fold a second source of GATT
+// activity (the ble_clone GATT image) into reads/writes/notifies/conns
+// without api_server depending on ble_clone. The provider is invoked
+// from build_stats_json; main wires it up at boot when CONFIG_NBP_CLONE
+// is on. Pass nullptr to detach.
+struct CloneCounters {
+  uint32_t reads;
+  uint32_t writes;
+  uint32_t notifies;
+  uint8_t connected_centrals;
+};
+using CloneStatsProvider = void (*)(CloneCounters *out);
+void set_clone_stats_provider(CloneStatsProvider fn);
+
 // Build the same JSON body that /stats.json returns into a caller-
 // supplied buffer. Returns bytes written (truncated at cap-1 by
 // snprintf semantics). Safe to call from any task. The CPU-percent

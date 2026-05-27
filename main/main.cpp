@@ -16,6 +16,7 @@
 #if CONFIG_NBP_CLONE
 #include "clone.h"
 #include "clone_config.h"
+#include "clone_mirror.h"
 #endif
 
 #if CONFIG_NBP_BLE_HTTPD
@@ -208,6 +209,18 @@ extern "C" void app_main() {
   ble_clone::init();
 #if CONFIG_NBP_WIFI
   ble_clone::register_endpoints(ota::handle());
+  // Bridge clone counters into /stats.json so the dashboard chart sees
+  // both transports. Kept in main/ so ble_clone has no link-time
+  // dependency on api_server (and vice versa) — the two components stay
+  // independent and main is the only edge that knows both.
+  api_server::stats::set_clone_stats_provider(
+      [](api_server::stats::CloneCounters *out) {
+        auto s = ble_clone::mirror::stats();
+        out->reads = s.reads_served_from_cache + s.reads_proxied;
+        out->writes = s.writes_proxied;
+        out->notifies = s.notifies_out;
+        out->connected_centrals = s.connected_centrals;
+      });
 #endif
 #endif
 
