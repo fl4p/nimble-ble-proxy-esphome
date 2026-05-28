@@ -10,4 +10,5 @@ idf_component_register(
         ble_clone
         ble_httpd
         ws_proxy
+        nat_router
 )

@@ -27,6 +27,10 @@
 #include "ws_proxy.h"
 #endif
 
+#if CONFIG_NBP_NAT_ROUTER
+#include "nat_router.h"
+#endif
+
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -186,6 +190,14 @@ extern "C" void app_main() {
   // is opened lazily per browser. api_server stays untouched — each WS
   // client appears to it as an ordinary TCP client.
   ws_proxy::register_endpoint(ota::handle());
+#endif
+#if CONFIG_NBP_NAT_ROUTER
+  // STA is up (start_and_wait_for_ip returned above). Bring up the SoftAP
+  // in APSTA mode and NAT its clients out through the STA uplink, then
+  // expose /nat + /portmap on the shared dashboard httpd. start() must
+  // run before register_endpoints so the GET reflects the live AP state.
+  nat_router::start();
+  nat_router::register_endpoints(ota::handle());
 #endif
 #endif
 

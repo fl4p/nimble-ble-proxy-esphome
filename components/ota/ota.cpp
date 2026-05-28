@@ -122,11 +122,12 @@ void start() {
   // (/update, /, /stats.json, /log, /level GET+POST, /reboot, /trace).
   // We're now well past that: /favicon.svg, /txpower, /cpufreq, /scan,
   // /wifips, /hostname, /advitvl (all GET+POST pairs), /devices, /clone
-  // GET+POST (clone absorbed /passkey) — 24+ routes today. Each
+  // GET+POST (clone absorbed /passkey), plus /nat GET+POST and /portmap
+  // POST when the NAT router is built in — ~28 routes today. Each
   // unregistered handler is a silent 404 in production (we saw
   // /devices drop at boot), so size with a comfortable margin and add
   // a runtime assert at registration time.
-  cfg.max_uri_handlers = 32;
+  cfg.max_uri_handlers = 40;
   // CONFIG_LWIP_MAX_SOCKETS=16 leaves the api_server (1 listen + up to
   // 4 clients), mDNS and clone.mirror plenty of room alongside the
   // dashboard. Bumping httpd here to 5 lets a phone + a desktop browser

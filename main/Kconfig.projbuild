@@ -98,6 +98,75 @@ config NBP_WS_PROXY
         mDNS and clone. Disable for builds that only ever talk to HA over
         plain TCP.
 
+config NBP_NAT_ROUTER
+    bool "WiFi NAT router: SoftAP + NAPT out the STA uplink"
+    depends on NBP_WIFI
+    default n
+    select LWIP_IP_FORWARD
+    select LWIP_IPV4_NAPT
+    select LWIP_IPV4_NAPT_PORTMAP
+    help
+        Turn the proxy into a small travel-router. The device already
+        joins an upstream WiFi as a station (wifi_sta); with this gate
+        on it ALSO brings up its own SoftAP in APSTA mode and NATs
+        traffic from AP clients out through the STA uplink.
+
+        Clients that associate to the SoftAP get a 192.168.x.x lease
+        from the on-device DHCP server (with the upstream DNS handed
+        down), and their traffic is source-NAT'd onto the STA's IP.
+        Inbound port-forwarding rules ("ext TCP/UDP port -> internal
+        client ip:port") are configurable at runtime from the dashboard
+        and persisted in NVS.
+
+        Selects the lwIP IP_FORWARD / NAPT / NAPT_PORTMAP options, so
+        they only compile in when this gate is on — a normal BLE-proxy
+        build pays nothing. The SoftAP shares the STA's radio channel
+        (single-radio constraint), so the STA link is unaffected.
+
+config NBP_NAT_AP_SSID
+    string "NAT SoftAP SSID (default; runtime-overridable via /nat)"
+    depends on NBP_NAT_ROUTER
+    default "nimble-nat"
+    help
+        Compile-time default SSID for the NAT SoftAP. Overridable at
+        runtime from the dashboard (POST /nat), persisted in NVS.
+
+config NBP_NAT_AP_PASSWORD
+    string "NAT SoftAP WPA2 password (8..63 chars; <8 = open AP)"
+    depends on NBP_NAT_ROUTER
+    default "nimble-proxy"
+    help
+        Default WPA2-PSK password. A value shorter than 8 characters
+        makes the AP open (no encryption). Runtime-overridable via the
+        dashboard, persisted in NVS.
+
+config NBP_NAT_AP_IP
+    string "NAT SoftAP gateway IP (/24)"
+    depends on NBP_NAT_ROUTER
+    default "192.168.4.1"
+    help
+        IPv4 address of the SoftAP interface; also the gateway + DHCP
+        server address handed to clients. The subnet is always /24.
+
+config NBP_NAT_AP_MAX_CONN
+    int "NAT SoftAP max simultaneous clients"
+    depends on NBP_NAT_ROUTER
+    default 4
+    range 1 10
+    help
+        Upper bound on associated stations. Each client consumes a
+        DHCP lease + NAPT table headroom.
+
+config NBP_NAT_PORTMAP_MAX
+    int "NAT port-forwarding table size"
+    depends on NBP_NAT_ROUTER
+    default 16
+    range 1 32
+    help
+        Number of inbound port-forwarding rules that can be stored.
+        Capped at 32 by lwIP's IP_PORTMAP_MAX. Each slot costs a few
+        bytes of BSS plus one NVS blob entry.
+
 config NBP_BLE_HTTPD
     bool "BLE-side HTTP transport (GATT request/response service)"
     default n
