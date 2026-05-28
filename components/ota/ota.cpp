@@ -10,8 +10,10 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lwip/sockets.h"
 
 #include <cstdio>
+#include <strings.h>  // strncasecmp
 
 namespace ota {
 
@@ -29,7 +31,27 @@ httpd_handle_t g_srv = nullptr;
 constexpr size_t CHUNK = 4096;
 
 esp_err_t update_post(httpd_req_t *req) {
-  ESP_LOGI(TAG, "OTA upload starting, content_len=%d", req->content_len);
+  // OTA is a remote firmware-write primitive — surface it prominently in
+  // the web console (WARN) and record who kicked it off.
+  char peer[48] = "?";
+  struct sockaddr_storage ss;
+  socklen_t sl = sizeof(ss);
+  if (getpeername(httpd_req_to_sockfd(req),
+                  reinterpret_cast<struct sockaddr *>(&ss), &sl) == 0) {
+    if (ss.ss_family == AF_INET6) {
+      auto *a = reinterpret_cast<struct sockaddr_in6 *>(&ss);
+      inet_ntop(AF_INET6, &a->sin6_addr, peer, sizeof(peer));
+    } else {
+      auto *a = reinterpret_cast<struct sockaddr_in *>(&ss);
+      inet_ntop(AF_INET, &a->sin_addr, peer, sizeof(peer));
+    }
+  }
+  // IPv4 clients reach the dual-stack listener as IPv4-mapped
+  // (::ffff:a.b.c.d) — show the bare v4 address.
+  const char *peer_str = peer;
+  if (strncasecmp(peer_str, "::ffff:", 7) == 0) peer_str += 7;
+  ESP_LOGW(TAG, "OTA STARTED from %s (content_len=%d)", peer_str,
+           req->content_len);
 
   const esp_partition_t *target = esp_ota_get_next_update_partition(nullptr);
   if (target == nullptr) {
