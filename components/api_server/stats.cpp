@@ -417,7 +417,10 @@ esp_err_t txpower_get(httpd_req_t *req) {
 }
 
 esp_err_t cpufreq_get(httpd_req_t *req) {
-  char buf[32];
+  // {"mhz":160,"ls":false,"pdcpu":false} is 36 chars — 32 truncated it,
+  // producing invalid JSON the dashboard couldn't parse (looked like the
+  // ls/pdcpu settings weren't persisting).
+  char buf[64];
   size_t n = build_cpufreq_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
