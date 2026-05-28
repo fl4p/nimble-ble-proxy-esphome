@@ -33,6 +33,7 @@ constexpr const char *NVS_NS = "nat";
 constexpr const char *NVS_AP_SSID = "ap_ssid";
 constexpr const char *NVS_AP_PSK = "ap_psk";
 constexpr const char *NVS_PORTMAP = "portmap";
+constexpr const char *NVS_ENABLED = "enabled";
 
 // IPv4 protocol numbers (lwip/prot/ip.h: IP_PROTO_TCP/UDP) — duplicated
 // as small literals so we don't pull a private lwip header just for two
@@ -66,6 +67,7 @@ esp_netif_t *g_ap = nullptr;
 uint32_t g_sta_ip = 0;  // STA IP, network byte order; NAPT external addr
 char g_ap_ssid[33] = {0};
 char g_ap_psk[64] = {0};
+bool g_enabled = true;  // runtime SoftAP on/off (NVS-persisted)
 
 // Format a network-order IPv4 (ESP32 is little-endian, so the low byte is
 // the first octet) into dotted-quad.
@@ -109,6 +111,26 @@ void save_ap_creds() {
   if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
   nvs_set_str(h, NVS_AP_SSID, g_ap_ssid);
   nvs_set_str(h, NVS_AP_PSK, g_ap_psk);
+  nvs_commit(h);
+  nvs_close(h);
+}
+
+// SoftAP on/off, persisted. Defaults to on when no key is present so a
+// fresh device behaves like the always-on build.
+bool load_enabled() {
+  nvs_handle_t h;
+  uint8_t v = 1;
+  if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+    nvs_get_u8(h, NVS_ENABLED, &v);
+    nvs_close(h);
+  }
+  return v != 0;
+}
+
+void save_enabled(bool en) {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_set_u8(h, NVS_ENABLED, en ? 1 : 0);
   nvs_commit(h);
   nvs_close(h);
 }
@@ -195,16 +217,66 @@ void configure_ap() {
   esp_wifi_set_config(WIFI_IF_AP, &ap);
 }
 
+// Bring the SoftAP up: create the AP netif on first use, switch to APSTA
+// (STA association is preserved), configure the AP, hand out DNS, enable
+// NAPT, and apply persisted port mappings. Idempotent — safe to call when
+// already up. The AP netif is created once and reused across toggles.
+void ap_up() {
+  if (g_ap == nullptr) {
+    g_ap = esp_netif_create_default_wifi_ap();
+    esp_netif_ip_info_t ap_ip = {};
+    ap_ip.ip.addr = esp_ip4addr_aton(CONFIG_NBP_NAT_AP_IP);
+    ap_ip.gw.addr = ap_ip.ip.addr;
+    IP4_ADDR(&ap_ip.netmask, 255, 255, 255, 0);
+    esp_netif_dhcps_stop(g_ap);
+    esp_netif_set_ip_info(g_ap, &ap_ip);
+    esp_netif_dhcps_start(g_ap);
+  }
+  esp_wifi_set_mode(WIFI_MODE_APSTA);
+  configure_ap();
+  set_ap_dns();
+  esp_err_t err = esp_netif_napt_enable(g_ap);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_netif_napt_enable failed: %s (NAT non-functional)",
+             esp_err_to_name(err));
+  }
+  apply_portmap();
+  g_enabled = true;
+
+  char ap_s[16], sta_s[16];
+  esp_netif_ip_info_t info = {};
+  esp_netif_get_ip_info(g_ap, &info);
+  ip_to_str(info.ip.addr, ap_s, sizeof(ap_s));
+  ip_to_str(g_sta_ip, sta_s, sizeof(sta_s));
+  ESP_LOGI(TAG, "NAT SoftAP up: '%s' (%s) %s -> STA %s, %d port mapping(s)",
+           g_ap_ssid, std::strlen(g_ap_psk) < 8 ? "open" : "wpa2", ap_s, sta_s,
+           count_valid());
+}
+
+// Tear the SoftAP down: disable NAPT, drop the live port mappings, and put
+// the radio back into STA-only mode. The STA link (and the dashboard) stay
+// up; the AP netif is kept registered for a fast re-enable. This is the
+// runtime knob that brings the device back to the cooler STA-only duty.
+void ap_down() {
+  if (g_ap != nullptr) esp_netif_napt_disable(g_ap);
+  remove_all_live();
+  esp_wifi_set_mode(WIFI_MODE_STA);
+  g_enabled = false;
+  ESP_LOGI(TAG, "NAT SoftAP disabled; radio back to STA-only");
+}
+
 void on_sta_got_ip(void * /*arg*/, esp_event_base_t base, int32_t id,
                    void *data) {
   if (base != IP_EVENT || id != IP_EVENT_STA_GOT_IP) return;
   auto *e = static_cast<ip_event_got_ip_t *>(data);
   uint32_t new_ip = e->ip_info.ip.addr;
-  if (new_ip == g_sta_ip) {
+  bool changed = (new_ip != g_sta_ip);
+  g_sta_ip = new_ip;
+  if (!g_enabled) return;  // AP off — nothing to NAT
+  if (!changed) {
     set_ap_dns();  // same IP, but DNS may have refreshed
     return;
   }
-  g_sta_ip = new_ip;
   remove_all_live();
   apply_portmap();
   set_ap_dns();
@@ -229,10 +301,11 @@ esp_err_t nat_get(httpd_req_t *req) {
   char buf[2048];
   int off = std::snprintf(
       buf, sizeof(buf),
-      "{\"enabled\":true,\"ssid\":\"%s\",\"open\":%s,\"ap_ip\":\"%s\","
+      "{\"enabled\":%s,\"ssid\":\"%s\",\"open\":%s,\"ap_ip\":\"%s\","
       "\"sta_ip\":\"%s\",\"clients\":%d,\"max\":%d,\"portmaps\":[",
-      g_ap_ssid, std::strlen(g_ap_psk) < 8 ? "true" : "false", ap_ip, sta_ip,
-      sl.num, CONFIG_NBP_NAT_AP_MAX_CONN);
+      g_enabled ? "true" : "false", g_ap_ssid,
+      std::strlen(g_ap_psk) < 8 ? "true" : "false", ap_ip, sta_ip, sl.num,
+      CONFIG_NBP_NAT_AP_MAX_CONN);
 
   bool first = true;
   for (size_t i = 0; i < PORTMAP_MAX && off < static_cast<int>(sizeof(buf)) - 96;
@@ -254,22 +327,30 @@ esp_err_t nat_get(httpd_req_t *req) {
   return httpd_resp_send(req, buf, off);
 }
 
-// POST /nat?ssid=...&psk=...  — update AP credentials live + persist.
+// POST /nat?enabled=0|1            — toggle the SoftAP at runtime
+//      /nat?ssid=...&psk=...       — update AP credentials live + persist
+// Params are independent; any combination is accepted.
 esp_err_t nat_post(httpd_req_t *req) {
   char query[160];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
   }
+  char en[8] = {0};
   char ssid[33] = {0};
   char psk[64] = {0};
+  bool have_en =
+      httpd_query_key_value(query, "enabled", en, sizeof(en)) == ESP_OK;
   bool have_ssid =
       httpd_query_key_value(query, "ssid", ssid, sizeof(ssid)) == ESP_OK;
   bool have_psk =
       httpd_query_key_value(query, "psk", psk, sizeof(psk)) == ESP_OK;
-  if (!have_ssid && !have_psk) {
+  if (!have_en && !have_ssid && !have_psk) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                               "need ssid= or psk=");
+                               "need enabled=, ssid= or psk=");
   }
+
+  // Credentials first so an enable in the same request brings the AP up
+  // with the new values.
   if (have_ssid) {
     size_t n = std::strlen(ssid);
     if (n < 1 || n > 32) {
@@ -286,10 +367,24 @@ esp_err_t nat_post(httpd_req_t *req) {
     }
     std::strncpy(g_ap_psk, psk, sizeof(g_ap_psk) - 1);
   }
-  save_ap_creds();
-  configure_ap();  // applies live — associated clients re-handshake
-  ESP_LOGI(TAG, "AP creds updated: ssid='%s' (%s)", g_ap_ssid,
-           std::strlen(g_ap_psk) < 8 ? "open" : "wpa2");
+  if (have_ssid || have_psk) {
+    save_ap_creds();
+    if (g_enabled) configure_ap();  // live; associated clients re-handshake
+    ESP_LOGI(TAG, "AP creds updated: ssid='%s' (%s)", g_ap_ssid,
+             std::strlen(g_ap_psk) < 8 ? "open" : "wpa2");
+  }
+
+  if (have_en) {
+    bool want = (en[0] == '1');
+    if (want != g_enabled) {
+      if (want)
+        ap_up();
+      else
+        ap_down();
+      save_enabled(want);
+    }
+  }
+
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
@@ -401,50 +496,26 @@ esp_err_t portmap_post(httpd_req_t *req) {
 
 void start() {
   load_ap_creds();
+  load_portmap();
+  g_enabled = load_enabled();
 
-  // Create the AP netif (this also stands up its DHCP server) and pin it
-  // to the configured /24 gateway. dhcps must be stopped to change the IP.
-  g_ap = esp_netif_create_default_wifi_ap();
-  esp_netif_ip_info_t ap_ip = {};
-  ap_ip.ip.addr = esp_ip4addr_aton(CONFIG_NBP_NAT_AP_IP);
-  ap_ip.gw.addr = ap_ip.ip.addr;
-  IP4_ADDR(&ap_ip.netmask, 255, 255, 255, 0);
-  esp_netif_dhcps_stop(g_ap);
-  esp_netif_set_ip_info(g_ap, &ap_ip);
-  esp_netif_dhcps_start(g_ap);
-
-  // STA is already running (wifi_sta started it in WIFI_MODE_STA). Adding
-  // the AP is a live mode switch — the STA association is preserved.
-  esp_wifi_set_mode(WIFI_MODE_APSTA);
-  configure_ap();
-
-  set_ap_dns();
-
-  esp_err_t err = esp_netif_napt_enable(g_ap);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "esp_netif_napt_enable failed: %s (NAT non-functional)",
-             esp_err_to_name(err));
-  }
-
-  // Re-apply port mappings + DNS whenever the STA (re)acquires an IP.
-  esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                      &on_sta_got_ip, nullptr, nullptr);
-
+  // Seed the current STA IP so a runtime enable can apply port mappings
+  // immediately, and re-apply them whenever the STA (re)acquires an IP.
   esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
   esp_netif_ip_info_t si = {};
   if (sta != nullptr && esp_netif_get_ip_info(sta, &si) == ESP_OK) {
     g_sta_ip = si.ip.addr;
   }
-  load_portmap();
-  apply_portmap();
+  esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                      &on_sta_got_ip, nullptr, nullptr);
 
-  char ap_s[16], sta_s[16];
-  ip_to_str(ap_ip.ip.addr, ap_s, sizeof(ap_s));
-  ip_to_str(g_sta_ip, sta_s, sizeof(sta_s));
-  ESP_LOGI(TAG,
-           "NAT router up: AP '%s' (%s) %s -> STA %s, %d port mapping(s)",
-           g_ap_ssid, std::strlen(g_ap_psk) < 8 ? "open" : "wpa2", ap_s, sta_s,
-           count_valid());
+  if (g_enabled) {
+    ap_up();
+  } else {
+    ESP_LOGI(TAG,
+             "NAT router compiled in but SoftAP disabled; "
+             "enable at runtime via POST /nat?enabled=1");
+  }
 }
 
 void register_endpoints(void *httpd_handle) {

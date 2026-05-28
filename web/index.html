@@ -94,6 +94,27 @@ table#devices button.clone-btn:hover{background:#2a2a2a}
 table#devices button.clone-btn:disabled{opacity:.5;cursor:default}
 table#devices button.clone-btn.cloned{border-color:#7f1d1d;color:#fca5a5}
 table#devices button.clone-btn.cloned:hover{background:#3b0a0a}
+#natstatus{display:flex;flex-wrap:wrap;gap:.4em 1.5em;color:#aaa;margin:.5em 0}
+#natstatus b{color:#eee}#natstatus code{color:#bbb}
+.natedit,.natadd{display:flex;flex-wrap:wrap;gap:.5em 1em;align-items:center;margin:.6em 0}
+.natedit label,.natadd label{color:#aaa;display:inline-flex;align-items:center;gap:.3em}
+#natpanel input[type=text],#natpanel select,#natpanel button{
+  background:#1a1a1a;color:#eee;border:1px solid #333;border-radius:4px;
+  padding:.3em .6em;font:inherit;cursor:pointer}
+#natpanel input[type=text]{cursor:text;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+#natpanel button:hover{background:#2a2a2a}
+#natpanel input.ok{border-color:#4ade80}#natpanel input.err{border-color:#f87171}
+#pmmport,#pmdport{width:6em}#pmdaddr{width:11em}#natssid,#natpsk{width:11em}
+table#portmaps{border-collapse:collapse;font-size:12px;color:#ddd;
+  margin-bottom:.5em;min-width:420px}
+table#portmaps th,table#portmaps td{padding:.2em .6em;
+  border-bottom:1px solid #222;text-align:left}
+table#portmaps th{color:#888;font-weight:normal}
+table#portmaps .r{text-align:right;font-variant-numeric:tabular-nums}
+table#portmaps button.del{background:#1a1a1a;border:1px solid #7f1d1d;
+  color:#fca5a5;font:inherit;padding:.1em .5em;border-radius:3px;cursor:pointer}
+table#portmaps button.del:hover{background:#3b0a0a}
 .hidden{display:none}
 #unsupported{background:#3b0a0a;color:#fca5a5;padding:1em;border-radius:6px;
   border:1px solid #7f1d1d;margin-bottom:1em}
@@ -138,7 +159,8 @@ table#devices button.clone-btn.cloned:hover{background:#3b0a0a}
         <option value=80>80</option><option value=160>160</option>
         <option value=240>240</option>
       </select> MHz</label>
-      <label><input type=checkbox id=ls> light sleep</label>
+      <label title="Powers the CPU down between bursts. Leave OFF unless deliberately testing thermals."><input type=checkbox id=ls> light sleep</label>
+      <small style="color:#fca5a5;font-size:.78em">can hang device — leave off</small>
     </div>
 
     <div class=tgroup>
@@ -171,11 +193,14 @@ table#devices button.clone-btn.cloned:hover{background:#3b0a0a}
         <option value=0>0</option><option value=3>3</option>
         <option value=6>6</option><option value=9>9</option>
       </select> dBm</label>
-      <!-- Peripheral advertising interval. 0 = NimBLE host default
-           (~30..60 ms = ~17..33 adv/s). Larger values are big TX-duty
-           savings since each adv burst transmits on 3 primary channels;
-           cost is slower discovery by phones. -->
+      <!-- Peripheral advertising interval. "off" disables the device's
+           own broadcaster entirely (clone mirror / ble_httpd) — the
+           scanner and HA advert forwarding keep running. 0 = NimBLE host
+           default (~30..60 ms = ~17..33 adv/s). Larger values are big
+           TX-duty savings since each adv burst transmits on 3 primary
+           channels; cost is slower discovery by phones. -->
       <label>adv: <select id=advitvl>
+        <option value=-1>off (no broadcast)</option>
         <option value=0>default (~17–33/s)</option>
         <option value=100>100 ms (10/s)</option>
         <option value=200>200 ms (5/s)</option>
@@ -210,6 +235,40 @@ table#devices button.clone-btn.cloned:hover{background:#3b0a0a}
       <label>name: <input type=text id=hn maxlength=30 spellcheck=false
                           autocomplete=off></label>
       <button id=reboot class=danger>reboot device</button>
+    </div>
+  </div>
+
+  <!-- NAT router panel. Hidden unless GET /nat succeeds (i.e. the
+       firmware was built with CONFIG_NBP_NAT_ROUTER); loadNat() unhides
+       it, so the same HTML stays valid for non-NAT builds. -->
+  <div id=natpanel class=hidden>
+    <h2>NAT router</h2>
+    <div id=natstatus>
+      <span>AP <b id=natssidlbl>&mdash;</b></span>
+      <span>AP IP <code id=natapip>&mdash;</code></span>
+      <span>uplink <code id=natstaip>&mdash;</code></span>
+      <span><b id=natclients>0</b>/<span id=natmax>0</span> clients</span>
+    </div>
+    <div class=natedit>
+      <label><input type=checkbox id=naten> SoftAP enabled</label>
+      <label>SSID <input type=text id=natssid maxlength=32 spellcheck=false
+                         autocomplete=off></label>
+      <label>password <input type=text id=natpsk maxlength=63 spellcheck=false
+                             autocomplete=off placeholder="8–63, blank = open"></label>
+      <button id=natsave>save AP</button>
+    </div>
+    <div class=devwrap><table id=portmaps><thead><tr>
+      <th>proto</th><th class=r>ext&nbsp;port</th><th>&rarr; internal IP</th>
+      <th class=r>port</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
+    <div class=natadd>
+      <select id=pmproto><option value=tcp>TCP</option>
+        <option value=udp>UDP</option></select>
+      <label>ext <input type=text id=pmmport inputmode=numeric placeholder=8080></label>
+      <label>&rarr; <input type=text id=pmdaddr inputmode=numeric
+                          placeholder=192.168.4.50></label>
+      <label>: <input type=text id=pmdport inputmode=numeric placeholder=80></label>
+      <button id=pmadd>add mapping</button>
     </div>
   </div>
 
@@ -743,11 +802,52 @@ async function tickDevices() {
   } catch (e) { /* ignore */ }
 }
 
+// Refresh the NAT panel: AP status, client count, port-map table. On the
+// first success the panel is unhidden; if /nat 404s (firmware built
+// without CONFIG_NBP_NAT_ROUTER) we silently leave it hidden so the same
+// page works for plain BLE-proxy builds.
+async function loadNat() {
+  let nat;
+  try { nat = await apiJson('GET /nat'); }
+  catch (e) { return; }
+  document.getElementById('natpanel').classList.remove('hidden');
+  document.getElementById('natssidlbl').textContent =
+    nat.ssid + (nat.open ? ' (open)' : '');
+  document.getElementById('natapip').textContent = nat.ap_ip;
+  document.getElementById('natstaip').textContent = nat.sta_ip;
+  document.getElementById('natclients').textContent = nat.clients;
+  document.getElementById('natmax').textContent = nat.max;
+  document.getElementById('naten').checked = !!nat.enabled;
+  // Don't clobber the SSID field while the user is editing it.
+  const ssid = document.getElementById('natssid');
+  if (document.activeElement !== ssid) ssid.value = nat.ssid;
+  const tb = document.querySelector('#portmaps tbody');
+  tb.textContent = '';
+  for (const pm of (nat.portmaps || [])) {
+    const tr = document.createElement('tr');
+    const cells = [[pm.proto.toUpperCase(), ''], [String(pm.mport), 'r'],
+                   [pm.daddr, ''], [String(pm.dport), 'r']];
+    for (const [v, cls] of cells) {
+      const td = document.createElement('td');
+      if (cls) td.className = cls;
+      td.textContent = v; tr.appendChild(td);
+    }
+    const tdDel = document.createElement('td');
+    const btn = document.createElement('button');
+    btn.className = 'del'; btn.textContent = 'delete';
+    btn.dataset.proto = pm.proto; btn.dataset.mport = pm.mport;
+    tdDel.appendChild(btn); tr.appendChild(tdDel);
+    tb.appendChild(tr);
+  }
+}
+
 function startPolling() {
   stopPolling();
   g_pollTimers.push(setInterval(tickStats,   1000)); tickStats();
   g_pollTimers.push(setInterval(tickLog,      500)); tickLog();
   g_pollTimers.push(setInterval(tickDevices, 1000)); tickDevices();
+  // NAT status changes slowly (client joins, manual edits) — 3 s is plenty.
+  g_pollTimers.push(setInterval(loadNat,     3000)); loadNat();
 }
 function stopPolling() {
   for (const id of g_pollTimers) clearInterval(id);
@@ -961,6 +1061,64 @@ function wireControls() {
       setTimeout(() => { b.disabled = false; }, 1500);
     }
   });
+
+  // NAT router controls. The panel may be hidden (non-NAT build), but
+  // wiring the handlers unconditionally is harmless — they only fire on
+  // clicks, which can't happen while hidden.
+  const natSave = document.getElementById('natsave');
+  if (natSave) {
+    // SoftAP on/off. Disabling tears the AP down to STA-only (cooler);
+    // enabling brings it back up. Revert the checkbox on failure.
+    document.getElementById('naten').onchange = async (e) => {
+      try {
+        await apiText('POST /nat?enabled=' + (e.target.checked ? 1 : 0));
+        loadNat();
+      } catch (err) { e.target.checked = !e.target.checked; alert(err); }
+    };
+    natSave.onclick = async () => {
+      const ssid = document.getElementById('natssid');
+      const psk  = document.getElementById('natpsk');
+      const p = new URLSearchParams();
+      if (ssid.value.trim()) p.set('ssid', ssid.value.trim());
+      p.set('psk', psk.value);  // always sent; empty value => open AP
+      try {
+        await apiText('POST /nat?' + p.toString());
+        ssid.classList.remove('err'); ssid.classList.add('ok');
+        psk.value = '';
+        setTimeout(() => { ssid.classList.remove('ok'); loadNat(); }, 800);
+      } catch (e) { ssid.classList.remove('ok'); ssid.classList.add('err'); alert(e); }
+    };
+    document.getElementById('pmadd').onclick = async () => {
+      const proto = document.getElementById('pmproto').value;
+      const mport = document.getElementById('pmmport').value.trim();
+      const daddr = document.getElementById('pmdaddr').value.trim();
+      const dport = document.getElementById('pmdport').value.trim();
+      if (!mport || !daddr || !dport) {
+        alert('Fill in external port, internal IP, and internal port.');
+        return;
+      }
+      try {
+        await apiText(`POST /portmap?proto=${proto}` +
+          `&mport=${encodeURIComponent(mport)}` +
+          `&daddr=${encodeURIComponent(daddr)}` +
+          `&dport=${encodeURIComponent(dport)}`);
+        document.getElementById('pmmport').value = '';
+        document.getElementById('pmdaddr').value = '';
+        document.getElementById('pmdport').value = '';
+        loadNat();
+      } catch (e) { alert(e); }
+    };
+    document.querySelector('#portmaps').addEventListener('click', async (e) => {
+      const b = e.target.closest('button.del');
+      if (!b) return;
+      if (!confirm(`Delete ${b.dataset.proto.toUpperCase()} :${b.dataset.mport} mapping?`))
+        return;
+      try {
+        await apiText(`POST /portmap?del=1&proto=${b.dataset.proto}&mport=${b.dataset.mport}`);
+        loadNat();
+      } catch (err) { alert(err); }
+    });
+  }
 
   addEventListener('resize', () => {
     if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
