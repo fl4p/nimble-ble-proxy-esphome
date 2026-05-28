@@ -8,6 +8,8 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs.h"
 
 // lwIP NAPT / port-mapping API. The declarations live behind
@@ -235,7 +237,21 @@ void ap_up() {
   esp_wifi_set_mode(WIFI_MODE_APSTA);
   configure_ap();
   set_ap_dns();
+  // The AP netif comes up asynchronously (WIFI_EVENT_AP_START handler), but
+  // esp_netif_napt_enable returns ESP_FAIL if the netif isn't up yet. On the
+  // first enable the freshly-created netif was already up so it raced
+  // through; on a re-enable (after ap_down switched to STA-only) the netif
+  // is brought back up a beat later, so enabling NAPT synchronously here
+  // failed. Wait (up to ~1 s) for the netif to be up first, then enable.
+  for (int i = 0; i < 40 && !esp_netif_is_netif_up(g_ap); ++i) {
+    vTaskDelay(pdMS_TO_TICKS(25));
+  }
   esp_err_t err = esp_netif_napt_enable(g_ap);
+  if (err != ESP_OK) {
+    // The netif occasionally needs another beat; one bounded retry.
+    vTaskDelay(pdMS_TO_TICKS(100));
+    err = esp_netif_napt_enable(g_ap);
+  }
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_netif_napt_enable failed: %s (NAT non-functional)",
              esp_err_to_name(err));
