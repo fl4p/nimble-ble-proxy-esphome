@@ -7,6 +7,7 @@
 #include "esp_bt.h"
 #include "esp_log.h"
 #include "esp_pm.h"
+#include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #if CONFIG_NBP_WIFI
@@ -316,6 +317,14 @@ int g_wifi_listen_interval = DEFAULT_WIFI_LI;
 // POST /cpufreq?ls=1 (accepting the hang risk).
 bool g_light_sleep = false;
 
+// Whether the CPU is powered down during light sleep (only relevant when
+// g_light_sleep is true). Default false = keep the CPU powered and merely
+// clock-gate/coast — the PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP path is what hung
+// the device, so this lets light sleep be re-enabled for thermal savings
+// without the hang. Mapped to esp_sleep_pd_config(ESP_PD_DOMAIN_CPU).
+// NVS key "cpu_pd".
+bool g_cpu_pd = false;
+
 // Runtime-only: set by handle_txpower_set when wifi=0. Not persisted —
 // a reboot brings WiFi back at the NVS-stored dBm so the device can't
 // be bricked over BLE.
@@ -333,6 +342,12 @@ esp_err_t apply_cpu_freq_mhz(int mhz, bool light_sleep) {
   };
   esp_err_t err = esp_pm_configure(&cfg);
   if (err == ESP_OK) g_light_sleep = light_sleep;
+  // Independently gate CPU power-down during light sleep. ESP_PD_OPTION_ON
+  // keeps the CPU powered (coast/clock-gate only); AUTO restores the default
+  // PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP behaviour. Harmless when light sleep is
+  // off (the SoC never sleeps, so the option is never consulted).
+  esp_sleep_pd_config(ESP_PD_DOMAIN_CPU,
+                      g_cpu_pd ? ESP_PD_OPTION_AUTO : ESP_PD_OPTION_ON);
   return err;
 }
 
@@ -812,8 +827,9 @@ const char *handle_txpower_set(const char *query) {
 }
 
 size_t build_cpufreq_json(char *buf, size_t cap) {
-  int n = std::snprintf(buf, cap, "{\"mhz\":%d,\"ls\":%s}",
-                        g_cpu_freq_mhz, g_light_sleep ? "true" : "false");
+  int n = std::snprintf(buf, cap, "{\"mhz\":%d,\"ls\":%s,\"pdcpu\":%s}",
+                        g_cpu_freq_mhz, g_light_sleep ? "true" : "false",
+                        g_cpu_pd ? "true" : "false");
   if (n < 0) return 0;
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
@@ -887,14 +903,20 @@ const char *handle_cpufreq_set(const char *query) {
     light_sleep = (std::atoi(val) != 0);
     any = true;
   }
-  if (!any) return "missing mhz= or ls=";
+  if (httpd_query_key_value(query, "pdcpu", val, sizeof(val)) == ESP_OK) {
+    g_cpu_pd = (std::atoi(val) != 0);
+    any = true;
+  }
+  if (!any) return "missing mhz=, ls= or pdcpu=";
   if (apply_cpu_freq_mhz(mhz, light_sleep) != ESP_OK) {
     return "cpu freq apply failed";
   }
   g_cpu_freq_mhz = mhz;
   nvs_write_i8(NVS_CPU_FREQ_KEY, static_cast<int8_t>(mhz / 10));
   nvs_write_i8("cpu_ls", light_sleep ? 1 : 0);
-  ESP_LOGI(TAG, "cpu -> %d MHz ls=%d (persisted)", mhz, light_sleep ? 1 : 0);
+  nvs_write_i8("cpu_pd", g_cpu_pd ? 1 : 0);
+  ESP_LOGI(TAG, "cpu -> %d MHz ls=%d pdcpu=%d (persisted)", mhz,
+           light_sleep ? 1 : 0, g_cpu_pd ? 1 : 0);
   return nullptr;
 }
 
@@ -1324,14 +1346,16 @@ void apply_cpu_freq_from_nvs() {
   }
   int8_t ls = 0;
   if (nvs_read_i8("cpu_ls", &ls) == ESP_OK) g_light_sleep = (ls != 0);
+  int8_t pd = 0;
+  if (nvs_read_i8("cpu_pd", &pd) == ESP_OK) g_cpu_pd = (pd != 0);
   esp_err_t err = apply_cpu_freq_mhz(g_cpu_freq_mhz, g_light_sleep);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "esp_pm_configure(%d MHz ls=%d) failed: %s",
              g_cpu_freq_mhz, g_light_sleep ? 1 : 0, esp_err_to_name(err));
     return;
   }
-  ESP_LOGI(TAG, "CPU applied: %d MHz, light sleep=%d",
-           g_cpu_freq_mhz, g_light_sleep ? 1 : 0);
+  ESP_LOGI(TAG, "CPU applied: %d MHz, light sleep=%d, pdcpu=%d",
+           g_cpu_freq_mhz, g_light_sleep ? 1 : 0, g_cpu_pd ? 1 : 0);
 }
 
 void apply_wifi_ps_from_nvs() {
