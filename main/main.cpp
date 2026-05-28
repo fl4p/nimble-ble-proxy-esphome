@@ -179,6 +179,10 @@ extern "C" void app_main() {
   // adv->start() call below so the configured rate lands in the first
   // HCI window. clone_mirror::start_advertising re-reads the value
   // after its g_adv->reset() call.
+  // Also applies the persisted "advertising off" state (NVS adv_itvl
+  // sentinel 0xFFFF) — done here, after ble_backend::start so the adv
+  // singleton exists and before clone's supervisor task could call
+  // start_advertising, so a stored "off" gates the very first adv start.
   api_server::stats::apply_adv_interval_from_nvs();
 
 #if CONFIG_NBP_WIFI

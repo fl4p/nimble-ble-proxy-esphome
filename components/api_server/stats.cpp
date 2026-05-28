@@ -901,18 +901,31 @@ const char *handle_cpufreq_set(const char *query) {
 // Peripheral advertising interval (ms). Stored as uint16 under NVS key
 // "adv_itvl". 0 means "use NimBLE host default" (~30..60 ms range for
 // connectable undirected adv); any other value clamps to the BLE-spec
-// bounds 20..10240 ms in ble_backend::set_adv_interval_ms. The reported
-// rate field is informational — at the controller layer the actual rate
-// depends on the random 0..10 ms delay the spec mandates per adv event.
+// bounds 20..10240 ms in ble_backend::set_adv_interval_ms. The sentinel
+// 0xFFFF means "advertising off" — the broadcaster is disabled entirely
+// (ble_backend::set_advertising_enabled(false)) rather than slowed down.
+// The reported rate field is informational — at the controller layer the
+// actual rate depends on the random 0..10 ms delay the spec mandates per
+// adv event.
 constexpr const char *NVS_ADV_ITVL_KEY = "adv_itvl";
 
+// Sentinel stored in the u16 NVS slot to mean "advertising disabled".
+// Out of the valid ms range (0 or 20..10240), so it can't collide.
+constexpr uint16_t ADV_ITVL_OFF = 0xFFFF;
+
 size_t build_advitvl_json(char *buf, size_t cap) {
-  // Reconstruct ms from the cached 0.625 ms units in ble_backend. 0
-  // units → 0 ms (= "default"); else round to the nearest ms.
-  uint16_t units = ble_backend::adv_interval_units();
-  uint16_t ms = (units == 0) ? 0 : static_cast<uint16_t>(
-      (static_cast<uint32_t>(units) * 625u + 500u) / 1000u);
-  int n = std::snprintf(buf, cap, "{\"ms\":%u}", static_cast<unsigned>(ms));
+  // -1 = advertising off (broadcaster disabled). Otherwise reconstruct ms
+  // from the cached 0.625 ms units in ble_backend: 0 units → 0 ms
+  // (= "default"); else round to the nearest ms.
+  int ms;
+  if (!ble_backend::advertising_enabled()) {
+    ms = -1;
+  } else {
+    uint16_t units = ble_backend::adv_interval_units();
+    ms = (units == 0) ? 0 : static_cast<int>(
+        (static_cast<uint32_t>(units) * 625u + 500u) / 1000u);
+  }
+  int n = std::snprintf(buf, cap, "{\"ms\":%d}", ms);
   if (n < 0) return 0;
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
@@ -923,21 +936,33 @@ const char *handle_advitvl_set(const char *query) {
     return "missing ms=";
   }
   long parsed = std::strtol(val, nullptr, 10);
-  if (parsed < 0 || parsed > 10240) return "ms must be 0 or 20..10240";
-  if (parsed > 0 && parsed < 20) return "ms must be 0 or 20..10240";
-  uint16_t ms = static_cast<uint16_t>(parsed);
+  // -1 = off (disable the broadcaster); 0 = NimBLE host default;
+  // 20..10240 = explicit interval.
+  if (parsed < -1 || parsed > 10240) return "ms must be -1, 0, or 20..10240";
+  if (parsed > 0 && parsed < 20) return "ms must be -1, 0, or 20..10240";
+  const bool off = (parsed == -1);
 
+  // Persist 0xFFFF for off; otherwise the ms value itself.
+  uint16_t stored = off ? ADV_ITVL_OFF : static_cast<uint16_t>(parsed);
   nvs_handle_t h;
   esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
   if (err != ESP_OK) return "nvs open failed";
-  err = nvs_set_u16(h, NVS_ADV_ITVL_KEY, ms);
+  err = nvs_set_u16(h, NVS_ADV_ITVL_KEY, stored);
   if (err == ESP_OK) err = nvs_commit(h);
   nvs_close(h);
   if (err != ESP_OK) return "nvs write failed";
 
-  ble_backend::set_adv_interval_ms(ms);
-  ESP_LOGI(TAG, "adv interval -> %u ms (persisted, hot-applied)",
-           static_cast<unsigned>(ms));
+  if (off) {
+    ble_backend::set_advertising_enabled(false);
+    ESP_LOGI(TAG, "advertising -> off (persisted, hot-applied)");
+  } else {
+    uint16_t ms = static_cast<uint16_t>(parsed);
+    // Set the interval first so re-enabling starts with the new params.
+    ble_backend::set_adv_interval_ms(ms);
+    ble_backend::set_advertising_enabled(true);
+    ESP_LOGI(TAG, "adv interval -> %u ms, advertising on (persisted)",
+             static_cast<unsigned>(ms));
+  }
   return nullptr;
 }
 
@@ -1214,21 +1239,26 @@ void schedule_reboot() {
 }
 
 void apply_adv_interval_from_nvs() {
+  uint16_t stored = 0;
   nvs_handle_t h;
-  if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+  if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+    if (nvs_get_u16(h, NVS_ADV_ITVL_KEY, &stored) != ESP_OK) stored = 0;
+    nvs_close(h);
+  }
+  if (stored == ADV_ITVL_OFF) {
+    // Disable the broadcaster; leave the interval at host default for
+    // whenever the user re-enables via POST /advitvl?ms=0.
     ble_backend::set_adv_interval_ms(0);
+    ble_backend::set_advertising_enabled(false);
+    ESP_LOGI(TAG, "advertising: disabled (persisted off)");
     return;
   }
-  uint16_t ms = 0;
-  esp_err_t err = nvs_get_u16(h, NVS_ADV_ITVL_KEY, &ms);
-  nvs_close(h);
-  if (err != ESP_OK) ms = 0;
-  ble_backend::set_adv_interval_ms(ms);
-  if (ms == 0) {
+  ble_backend::set_adv_interval_ms(stored);
+  if (stored == 0) {
     ESP_LOGI(TAG, "adv interval: host default (~30..60 ms)");
   } else {
     ESP_LOGI(TAG, "adv interval from NVS: %u ms",
-             static_cast<unsigned>(ms));
+             static_cast<unsigned>(stored));
   }
 }
 

@@ -72,10 +72,14 @@ const char *handle_txpower_set(const char *query);
 size_t build_cpufreq_json(char *buf, size_t cap);
 const char *handle_cpufreq_set(const char *query);
 
-// Peripheral advertising interval in ms (0 = NimBLE host default,
-// ~30..60 ms range). Persisted in NVS under "adv_itvl"; applied live
-// via ble_backend::set_adv_interval_ms which hot-restarts adv if it's
-// currently active. Validation: 0 or 20..10240 ms (BLE-spec bounds).
+// Peripheral advertising interval in ms. GET returns {"ms":N}; POST takes
+// "ms=N". -1 = advertising OFF (broadcaster disabled via
+// ble_backend::set_advertising_enabled); 0 = NimBLE host default
+// (~30..60 ms range); 20..10240 = explicit interval (BLE-spec bounds).
+// Persisted in NVS under "adv_itvl" (0xFFFF = off sentinel); applied live
+// via ble_backend::set_adv_interval_ms / set_advertising_enabled. The
+// scanner and raw-advert forwarding to HA are unaffected by the off state
+// — it only gates the device's own broadcaster role.
 size_t build_advitvl_json(char *buf, size_t cap);
 const char *handle_advitvl_set(const char *query);
 

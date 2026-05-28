@@ -28,6 +28,11 @@ std::atomic<uint16_t> g_last_notify_handle{0};
 // boot and via POST /advitvl at runtime.
 std::atomic<uint16_t> g_adv_interval_units{0};
 
+// Master enable for the device's own peripheral advertising. Default on.
+// Flipped via the /advitvl config surface (ms=-1 = off) at boot and
+// runtime; every adv start path checks advertising_enabled() first.
+std::atomic<bool> g_adv_enabled{true};
+
 struct ble_gap_event_listener g_evt_listener;
 
 int notify_listener_cb(struct ble_gap_event *event, void *arg) {
@@ -88,10 +93,35 @@ void set_adv_interval_ms(uint16_t ms) {
   }
   // Hot-restart: if we're currently advertising, stop+start so the new
   // interval lands in the next HCI window. If not advertising, the
-  // configured params will be used on the next start() call.
+  // configured params will be used on the next start() call. Honor the
+  // master switch so an interval change can't resurrect advertising that
+  // the user disabled via POST /advitvl?ms=-1.
   if (adv->isAdvertising()) {
     adv->stop();
-    adv->start();
+    if (g_adv_enabled.load(std::memory_order_relaxed)) adv->start();
+  }
+}
+
+bool advertising_enabled() {
+  return g_adv_enabled.load(std::memory_order_relaxed);
+}
+
+void set_advertising_enabled(bool on) {
+  bool was = g_adv_enabled.exchange(on, std::memory_order_relaxed);
+
+  // Pre-init (NimBLEDevice::getAdvertising() is null until start()): the
+  // flag is stored and the gated start paths honor it once the host is up.
+  auto *adv = NimBLEDevice::getAdvertising();
+  if (adv == nullptr) return;
+
+  if (!on) {
+    // Kill switch: drop any in-flight advertising immediately.
+    if (adv->isAdvertising()) adv->stop();
+  } else if (!was) {
+    // Re-enable after a disable. NimBLE keeps the last advertising payload
+    // across stop(), so start() resumes the cloned/dashboard adv without
+    // waiting for the next central reconnect to re-trigger it.
+    if (!adv->isAdvertising()) adv->start();
   }
 }
 

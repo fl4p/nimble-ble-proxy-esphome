@@ -84,14 +84,19 @@ class ServerCb : public NimBLEServerCallbacks {
              g_connected_centrals.load(std::memory_order_relaxed));
     // Keep advertising so additional centrals can connect (multiplex).
     // NimBLE-CPP's start() logs 'Advertising already active' as a WARN
-    // if adv is still running, so pre-check via the host API.
-    if (g_adv != nullptr && !ble_gap_adv_active()) g_adv->start();
+    // if adv is still running, so pre-check via the host API. Honor the
+    // peripheral-advertising master switch (POST /advitvl?ms=-1 = off).
+    if (g_adv != nullptr && ble_backend::advertising_enabled() &&
+        !ble_gap_adv_active())
+      g_adv->start();
   }
   void onDisconnect(NimBLEServer *, NimBLEConnInfo &info, int reason) override {
     uint8_t prev = g_connected_centrals.fetch_sub(1, std::memory_order_relaxed);
     ESP_LOGI(TAG, "local central disconnected reason=%d, remaining=%u",
              reason, prev > 0 ? prev - 1 : 0);
-    if (g_adv != nullptr && !ble_gap_adv_active()) g_adv->start();
+    if (g_adv != nullptr && ble_backend::advertising_enabled() &&
+        !ble_gap_adv_active())
+      g_adv->start();
   }
 };
 ServerCb g_server_cb;
@@ -584,6 +589,17 @@ void start_advertising(const char *base_name) {
 
   if (scan_rsp.getPayload().size() > 0) {
     g_adv->setScanResponseData(scan_rsp);
+  }
+
+  // Payload is fully prepared above; only begin broadcasting if the
+  // peripheral-advertising master switch is on. When off, re-enabling via
+  // POST /advitvl?ms=0 resumes this same payload without a clone reconnect.
+  if (!ble_backend::advertising_enabled()) {
+    ESP_LOGI(TAG,
+             "advertising disabled (POST /advitvl?ms=0 to enable); "
+             "payload prepared for '%s'",
+             name);
+    return;
   }
 
   if (g_adv->start()) {

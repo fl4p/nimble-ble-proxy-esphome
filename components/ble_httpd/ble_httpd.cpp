@@ -8,6 +8,7 @@
 #include "NimBLEServer.h"
 #include "NimBLEService.h"
 #include "NimBLEUUID.h"
+#include "ble_backend.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -311,14 +312,15 @@ class ServerCb : public NimBLEServerCallbacks {
  public:
   void onConnect(NimBLEServer *, NimBLEConnInfo &) override {
     ESP_LOGI(TAG, "central connected");
-    // Keep advertising so a dropped client can reconnect cleanly.
+    // Keep advertising so a dropped client can reconnect cleanly, unless
+    // the peripheral-advertising master switch is off.
     auto *adv = NimBLEDevice::getAdvertising();
-    if (adv != nullptr) adv->start();
+    if (adv != nullptr && ble_backend::advertising_enabled()) adv->start();
   }
   void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int reason) override {
     ESP_LOGI(TAG, "central disconnected reason=%d", reason);
     auto *adv = NimBLEDevice::getAdvertising();
-    if (adv != nullptr) adv->start();
+    if (adv != nullptr && ble_backend::advertising_enabled()) adv->start();
   }
 };
 ServerCb g_server_cb;
@@ -380,7 +382,13 @@ void activate() {
   NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(NimBLEUUID(SVC_UUID));
   adv->enableScanResponse(true);
-  adv->start();
+  // Configure the payload either way so re-enabling at runtime resumes
+  // cleanly, but only begin broadcasting if the master switch is on.
+  if (ble_backend::advertising_enabled()) {
+    adv->start();
+  } else {
+    ESP_LOGI(TAG, "advertising disabled (POST /advitvl?ms=0 to enable)");
+  }
 
   ESP_LOGI(TAG, "ble_httpd activated: svc=%s", SVC_UUID);
 }

@@ -39,4 +39,17 @@ uint16_t adv_interval_units();
 // NVS persistence is the caller's responsibility (api_server::stats).
 void set_adv_interval_ms(uint16_t ms);
 
+// Master enable for the device's own peripheral advertising. Default
+// true. When set false, any in-flight advertising is stopped at once and
+// every adv start path (clone mirror, ble_httpd, the reconnect-resume
+// callbacks) becomes a no-op, so the device stops broadcasting and being
+// connectable as a peripheral. The central-role scanner and raw-advert
+// forwarding to HA are unaffected — this only gates the broadcaster role.
+// Re-enabling resumes advertising with the last-configured payload
+// (NimBLE retains it across stop()). Driven by the /advitvl config surface
+// (ms=-1 = off); NVS persistence + boot-apply live in api_server::stats
+// (key "adv_itvl", 0xFFFF sentinel = off).
+bool advertising_enabled();
+void set_advertising_enabled(bool on);
+
 }  // namespace ble_backend
