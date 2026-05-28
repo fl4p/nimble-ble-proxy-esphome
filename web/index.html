@@ -160,6 +160,7 @@ table#portmaps button.del:hover{background:#3b0a0a}
         <option value=240>240</option>
       </select> MHz</label>
       <label title="Powers the CPU down between bursts. Leave OFF unless deliberately testing thermals."><input type=checkbox id=ls> light sleep</label>
+      <label title="Only matters when light sleep is ON. OFF = keep CPU powered during light sleep (coast/clock-gate only) — cooler yet stable. ON = full CPU power-down (max savings, can hang)."><input type=checkbox id=pdcpu> power-down CPU</label>
       <small style="color:#fca5a5;font-size:.78em">can hang device — leave off</small>
     </div>
 
@@ -711,14 +712,15 @@ async function tickDevices() {
     const now = performance.now() / 1000;
     const next = {};
     d.sort((a, b) => b.count - a.count);
-    // Always show the configured clone target — even when the scanner
-    // hasn't observed it this window. The user needs the row to remain
-    // reachable so they can unclone or re-pair without waiting for the
-    // peripheral to come back into range. The label depends on the
-    // supervisor state: a connected peer naturally goes silent on adv
-    // (BLE spec — non-connectable mode while in a connection), so we
-    // mustn't call that "not in range".
-    if (g_cloneTarget.addr &&
+    // Show the configured clone target while the clone is ENABLED — even
+    // when the scanner hasn't observed it this window. An active clone
+    // needs the row to stay reachable so the user can unclone without
+    // waiting for the peripheral to come back into range (a connected
+    // peer goes silent on adv per the BLE spec, so we mustn't call that
+    // "not in range"). Gated on `enabled`, not just `addr`: the device
+    // keeps the target MAC in NVS after unclone so it can be re-enabled,
+    // but a disabled target must not linger in the list as a ghost row.
+    if (g_cloneTarget.enabled &&
         !d.some(x => x.addr.toUpperCase() === g_cloneTarget.addr)) {
       const synLabels = {
         Ready: '(connected to upstream)',
@@ -727,7 +729,6 @@ async function tickDevices() {
         Reconnecting: '(reconnecting to upstream…)',
         Scanning: '(searching for upstream…)',
         Idle: '(clone target, idle)',
-        Disabled: '(clone target, disabled)',
       };
       const label = synLabels[g_cloneTarget.state] ||
                     '(clone target, not in range)';
@@ -867,6 +868,7 @@ async function loadInitialValues() {
     wtx.disabled = p.wifi === 0;
     const f = await apiJson('GET /cpufreq'); cpu.value = f.mhz;
     document.getElementById('ls').checked = !!f.ls;
+    document.getElementById('pdcpu').checked = !!f.pdcpu;
     const ps = await apiJson('GET /wifips');
     document.getElementById('wps').value = String(ps.li);
     const sc = await apiJson('GET /scan');
@@ -911,6 +913,10 @@ function wireControls() {
   };
   document.getElementById('ls').onchange = e => {
     apiText('POST /cpufreq?ls=' + (e.target.checked ? 1 : 0))
+      .catch(err => alert(err));
+  };
+  document.getElementById('pdcpu').onchange = e => {
+    apiText('POST /cpufreq?pdcpu=' + (e.target.checked ? 1 : 0))
       .catch(err => alert(err));
   };
   // WiFi PS: PS-mode toggle is live, but listen_interval inside
