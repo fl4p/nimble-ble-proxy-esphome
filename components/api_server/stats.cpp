@@ -297,19 +297,24 @@ constexpr const char *NVS_WIFI_LI_KEY = "wifi_li";
 constexpr int8_t DEFAULT_WIFI_TX_DBM = 20;
 constexpr int8_t DEFAULT_BLE_TX_DBM = 9;
 constexpr int DEFAULT_CPU_FREQ_MHZ = 240;
-constexpr int DEFAULT_WIFI_LI = 3;
+// 0 = WIFI_PS_NONE (power-save OFF) by default — WIFI_PS_MAX_MODEM made
+// the device unstable/unreachable and killed serial in steady state.
+// Keep in sync with DEFAULT_WIFI_LI in wifi_sta.cpp.
+constexpr int DEFAULT_WIFI_LI = 0;
 
 int8_t g_wifi_tx_dbm = DEFAULT_WIFI_TX_DBM;
 int8_t g_ble_tx_dbm = DEFAULT_BLE_TX_DBM;
 int g_cpu_freq_mhz = DEFAULT_CPU_FREQ_MHZ;
 int g_wifi_listen_interval = DEFAULT_WIFI_LI;
 
-// Default to on: combined with WIFI_PS_MAX_MODEM (configured in
-// wifi_sta), this lets the SoC coast between bursts of work without
-// affecting outbound TX latency. Existing NVS "cpu_ls" override keeps
-// whatever the user persisted, so flipping the default only affects
-// fresh devices / NVS-erased ones.
-bool g_light_sleep = true;
+// Default OFF: CPU light-sleep (esp_pm + PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP)
+// made the device hang for minutes until a watchdog reboot — HTTP,
+// api_server and serial all went dark. WiFi PS_NONE (li=0) did NOT prevent
+// it; only ls=false did (stability poll: ~3/36 reachable before, 48/48
+// after). NVS "cpu_ls" still overrides, so flipping this default only
+// affects fresh / NVS-erased devices. Re-enable for thermal savings via
+// POST /cpufreq?ls=1 (accepting the hang risk).
+bool g_light_sleep = false;
 
 // Runtime-only: set by handle_txpower_set when wifi=0. Not persisted —
 // a reboot brings WiFi back at the NVS-stored dBm so the device can't

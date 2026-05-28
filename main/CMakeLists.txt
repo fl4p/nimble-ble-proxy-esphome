@@ -9,4 +9,5 @@ idf_component_register(
         api_server
         ble_clone
         ble_httpd
+        ws_proxy
 )

@@ -48,7 +48,11 @@ constexpr int BIT_GOT_IP = BIT0;
 // dependency tree into wifi_sta just for one int8.
 constexpr const char *NVS_NS = "stats";
 constexpr const char *NVS_WIFI_LI_KEY = "wifi_li";
-constexpr int DEFAULT_WIFI_LI = 3;
+// 0 = WIFI_PS_NONE (power-save OFF). Default off: WIFI_PS_MAX_MODEM +
+// esp_pm light sleep made the device intermittently unreachable and
+// killed USB-Serial/JTAG console output in steady state. Opt back in
+// per-device via POST /wifips?li=N (1..10) if you need the power saving.
+constexpr int DEFAULT_WIFI_LI = 0;
 
 // Credentials namespace (separate from "stats" so the provisioning
 // flow doesn't intermix with telemetry tunables).

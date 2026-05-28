@@ -71,6 +71,33 @@ config NBP_AP_FALLBACK_SECS
         Bumping this is harmless on a healthy network; lower it for
         faster recovery when the configured AP is known-bad.
 
+config NBP_WS_PROXY
+    bool "WebSocket bridge: aioesphomeapi over ws://<host>/api (browser clients)"
+    depends on NBP_WIFI
+    select HTTPD_WS_SUPPORT
+    default n
+    help
+        Add a binary WebSocket route at GET /api on the shared dashboard
+        httpd. Each WS message carries raw plaintext aioesphomeapi protocol
+        bytes; the bridge relays them verbatim to/from the existing TCP
+        api_server over an on-device loopback connection (127.0.0.1:6053).
+        This lets a browser (e.g. a JS port of aioesphomeapi) drive the BLE
+        proxy — Hello/DeviceInfo, advertisement subscriptions, GATT
+        connect/read/write/notify — even though browsers can't open a raw
+        TCP socket.
+
+        The api_server protocol code is untouched: from its side the
+        browser is just another HA client on a normal TCP connection, so
+        the handshake, Bluetooth* handlers, send_async broadcast and
+        dead-fd reaping all apply unchanged. Selects HTTPD_WS_SUPPORT.
+
+        Cost per connected browser: one loopback socket here + one accepted
+        socket and an 8 KiB connection task inside api_server + a ~4 KiB
+        pump task. Concurrent bridges are capped (MAX_WS_SESSIONS=2) so a
+        page can't exhaust the 16-socket LWIP budget shared with httpd,
+        mDNS and clone. Disable for builds that only ever talk to HA over
+        plain TCP.
+
 config NBP_BLE_HTTPD
     bool "BLE-side HTTP transport (GATT request/response service)"
     default n

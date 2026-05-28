@@ -23,6 +23,10 @@
 #include "ble_httpd.h"
 #endif
 
+#if CONFIG_NBP_WS_PROXY
+#include "ws_proxy.h"
+#endif
+
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -175,6 +179,14 @@ extern "C" void app_main() {
 
 #if CONFIG_NBP_WIFI
   api_server::start();
+#if CONFIG_NBP_WS_PROXY
+  // Browser bridge: tunnel the aioesphomeapi TCP protocol over a WebSocket
+  // on the shared dashboard httpd. Registered after api_server::start() so
+  // the loopback target is already listening, though the connection itself
+  // is opened lazily per browser. api_server stays untouched — each WS
+  // client appears to it as an ordinary TCP client.
+  ws_proxy::register_endpoint(ota::handle());
+#endif
 #endif
 
 #if CONFIG_NBP_BLE_HTTPD

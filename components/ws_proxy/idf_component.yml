@@ -1,0 +1,4 @@
+## esp_http_server WebSocket support (httpd_ws_*) needs IDF >= 5.1.
+dependencies:
+  idf:
+    version: ">=5.1"
