@@ -55,6 +55,12 @@ TaskHandle_t g_flush_task = nullptr;
 // sections are tiny (linear scan + memcpy) so the contention added on
 // top of the adv-forward path is negligible.
 constexpr size_t DEV_CAP = 64;
+// MACs rotate (random/resolvable-private addresses change every ~15 min),
+// so without expiry the table fills with ghosts of devices long gone.
+// Drop a row once it hasn't been seen for this long.
+constexpr uint32_t DEVICE_STALE_MS = 30u * 60u * 1000u;  // 30 min
+// How often flush_task sweeps the table for stale rows.
+constexpr uint32_t DEVICE_PRUNE_INTERVAL_MS = 60u * 1000u;  // 1 min
 DeviceRow g_devices[DEV_CAP];
 size_t g_device_count = 0;
 
@@ -78,6 +84,24 @@ size_t find_or_alloc_device(uint64_t addr) {
   g_devices[oldest] = DeviceRow{};
   g_devices[oldest].addr = addr;
   return oldest;
+}
+
+// Drop rows not seen within DEVICE_STALE_MS. Caller must NOT hold g_mutex.
+// uint32 millis wrap at ~49.7 days; the unsigned (now - last_ms) difference
+// stays correct for any gap shorter than that, so the 30-min threshold is
+// wrap-safe. Compacts in place by moving the last live row into each hole.
+void prune_stale_devices() {
+  const uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  size_t i = 0;
+  while (i < g_device_count) {
+    if (now_ms - g_devices[i].last_ms > DEVICE_STALE_MS) {
+      g_devices[i] = g_devices[--g_device_count];  // re-test the moved row
+    } else {
+      ++i;
+    }
+  }
+  xSemaphoreGive(g_mutex);
 }
 
 #if CONFIG_NBP_DEV_DETAILS
@@ -300,10 +324,23 @@ void flush_once() {
 
 void flush_task(void *) {
   const TickType_t period = pdMS_TO_TICKS(proxy::ADV_FLUSH_INTERVAL_MS);
+#if CONFIG_NBP_DEVICES_PANEL
+  TickType_t last_prune = xTaskGetTickCount();
+  const TickType_t prune_period = pdMS_TO_TICKS(DEVICE_PRUNE_INTERVAL_MS);
+#endif
   while (true) {
     // Wake on notify (batch full) OR after period (time-based flush).
     ulTaskNotifyTake(pdTRUE, period);
     flush_once();
+#if CONFIG_NBP_DEVICES_PANEL
+    // Sweep stale devices roughly once a minute (the flush wakes far more
+    // often, so this just rate-limits the table scan onto the same task).
+    TickType_t now = xTaskGetTickCount();
+    if (now - last_prune >= prune_period) {
+      prune_stale_devices();
+      last_prune = now;
+    }
+#endif
   }
 }
 
