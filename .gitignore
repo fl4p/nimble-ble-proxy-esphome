@@ -1,6 +1,13 @@
 build/
 sdkconfig
 sdkconfig.old
+# Generated per-target sdkconfigs (idf.py set-target / -D SDKCONFIG=...).
+# Keep the committed sdkconfig.defaults / sdkconfig.defaults.<target> files.
+sdkconfig.*
+!sdkconfig.defaults
+!sdkconfig.defaults.*
+# Alternate per-target build dirs (idf.py -B build_<target>).
+build_*/
 managed_components/
 dependencies.lock
 

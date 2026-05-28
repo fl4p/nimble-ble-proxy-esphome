@@ -1,0 +1,10 @@
+# esp32 (classic) target overrides. Applied on top of sdkconfig.defaults
+# only when IDF_TARGET=esp32.
+#
+# The classic ESP32 has a tighter IRAM region than the ESP32-S3 this project
+# normally targets, and the full image (WiFi + NimBLE + httpd + clone + WS
+# bridge + NAT) overflows iram0_0_seg by a few KB. Move the WiFi hot paths out
+# of IRAM into flash — frees ~17 KB of IRAM at a small RX/TX throughput cost,
+# which is irrelevant for a BLE proxy.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n

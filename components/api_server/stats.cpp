@@ -3,7 +3,10 @@
 #include "ble_backend.h"
 #include "bthome.h"
 #include "connection.h"
+#include "soc/soc_caps.h"
+#if SOC_TEMP_SENSOR_SUPPORTED
 #include "driver/temperature_sensor.h"
+#endif
 #include "esp_bt.h"
 #include "esp_log.h"
 #include "esp_pm.h"
@@ -346,8 +349,10 @@ esp_err_t apply_cpu_freq_mhz(int mhz, bool light_sleep) {
   // keeps the CPU powered (coast/clock-gate only); AUTO restores the default
   // PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP behaviour. Harmless when light sleep is
   // off (the SoC never sleeps, so the option is never consulted).
+#if SOC_PM_SUPPORT_CPU_PD
   esp_sleep_pd_config(ESP_PD_DOMAIN_CPU,
                       g_cpu_pd ? ESP_PD_OPTION_AUTO : ESP_PD_OPTION_ON);
+#endif
   return err;
 }
 
@@ -534,6 +539,7 @@ esp_err_t reboot_post(httpd_req_t *req) {
 // Temperature uses the ESP32-S3 internal silicon-temperature sensor
 // (±1-2 °C absolute, fine for trend visibility).
 
+#if SOC_TEMP_SENSOR_SUPPORTED
 temperature_sensor_handle_t g_temp_handle = nullptr;
 bool g_temp_init_done = false;
 
@@ -555,6 +561,11 @@ float read_temp_c() {
   if (temperature_sensor_get_celsius(g_temp_handle, &c) != ESP_OK) return 0.0f;
   return c;
 }
+#else
+// No internal temperature sensor on this chip (e.g. classic ESP32);
+// /stats.json reports temp_c=0.0.
+float read_temp_c() { return 0.0f; }
+#endif
 
 void sample_cpu_pct(int *cpu0, int *cpu1) {
   // Persisted across calls; safe because httpd serializes requests.
