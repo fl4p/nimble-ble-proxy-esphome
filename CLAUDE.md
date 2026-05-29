@@ -170,6 +170,12 @@
 
 ## ESP-IDF workflow (for the agent)
 
+- **Activate the IDF environment with `get_idf`** before any `idf.py`
+  command (it's a shell alias for `. $HOME/dev/esp/idf5.5/export.sh` —
+  use this, not the old `./idf-export`). Because it sources an absolute
+  path it works from any directory — this repo or any other repo with
+  the same ESP-IDF setup. Shell state doesn't persist between Bash
+  calls, so chain it: `get_idf && idf.py build`.
 - `idf.py build` and `idf.py flash` terminate and return — run them as
   normal Bash calls. No MCP server needed.
 - `idf.py monitor` is the only blocking command (streams serial forever,
