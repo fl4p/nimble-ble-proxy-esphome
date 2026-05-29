@@ -721,12 +721,20 @@ size_t build_stats_json(char *buf, size_t cap) {
   int cpu0 = 0, cpu1 = 0;
   sample_cpu_pct(&cpu0, &cpu1);
   float temp_c = read_temp_c();
+  // Compile-time capability flag: the dashboard hides the BLE-only
+  // sections (device table, scan duty, adv interval, BLE TX) when false,
+  // since their endpoints (/scan, /advitvl, /devices) aren't registered.
+#if CONFIG_NBP_BLE
+  const char *ble_cap = "true";
+#else
+  const char *ble_cap = "false";
+#endif
   int n = std::snprintf(
       buf, cap,
       "{\"reads\":%lu,\"writes\":%lu,\"notifies\":%lu,\"adverts\":%lu,"
       "\"connections\":%u,\"heap\":%lu,"
       "\"notify_rx\":%lu,\"last_notify_handle\":%u,"
-      "\"cpu0\":%d,\"cpu1\":%d,\"temp_c\":%.1f}",
+      "\"cpu0\":%d,\"cpu1\":%d,\"temp_c\":%.1f,\"ble\":%s}",
       static_cast<unsigned long>(
           g_reads.load(std::memory_order_relaxed) + cc.reads),
       static_cast<unsigned long>(
@@ -738,7 +746,7 @@ size_t build_stats_json(char *buf, size_t cap) {
       static_cast<unsigned long>(esp_get_free_heap_size()),
       notify_rx,
       notify_handle,
-      cpu0, cpu1, static_cast<double>(temp_c));
+      cpu0, cpu1, static_cast<double>(temp_c), ble_cap);
   if (n < 0) return 0;
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
