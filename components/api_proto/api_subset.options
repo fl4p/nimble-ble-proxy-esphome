@@ -27,7 +27,7 @@ proxyapi.BluetoothLERawAdvertisementsResponse.advertisements    max_count:16
 
 # ---- bluetooth connection slots ----
 # Must match proxy::MAX_CONNECTIONS in include/proxy_config.h
-proxyapi.BluetoothConnectionsFreeResponse.allocated   max_count:9
+proxyapi.BluetoothConnectionsFreeResponse.allocated   max_count:4
 
 # ---- GATT discovery ----
 # 128-bit UUID split into 2x uint64; short_uuid covers the 16/32-bit cases.

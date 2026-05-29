@@ -1,5 +1,9 @@
 # BLE: NimBLE host, central+observer only (no peripheral, no broadcaster).
-CONFIG_BT_ENABLED=y
+# CONFIG_BT_ENABLED is NOT set here on purpose — the NBP_BLE master gate
+# (main/Kconfig.projbuild) `select`s it when BLE is on, and leaves it off
+# (→ NimBLE stack not compiled) when NBP_BLE=n. The host-choice + tuning
+# below only take effect while BT_ENABLED is on (the BT_HOST choice is
+# hidden otherwise), so they stay here inert in a BLE-free build.
 CONFIG_BT_BLUEDROID_ENABLED=n
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
@@ -30,11 +34,16 @@ CONFIG_BT_NIMBLE_GATT_SERVER=y
 # reset actually clears the table and re-init succeeds. Verified
 # against the Victron SmartShunt clone bring-up, 2026-05-26.
 CONFIG_BT_NIMBLE_DYNAMIC_SERVICE=y
-# NimBLE caps at 9 connections on ESP32-S3 (Kconfig range 1..9). With
-# NBP_CLONE=y, one slot is held by the clone upstream — leaves 8 for
-# HA-proxy GATT connections. proxy::MAX_CONNECTIONS still advertises 9
-# to HA; collision is only possible if HA holds every slot at once.
-CONFIG_BT_NIMBLE_MAX_CONNECTIONS=9
+# NimBLE connection slots. Trimmed 9->4 to reclaim internal DRAM: this is
+# a no-PSRAM S3, and 9 links (host + controller per-link buffers) left only
+# ~42 KB free heap, too fragmented for api_server's 8 KB per-connection task
+# stack (xTaskCreate failures → HA reconnect storm → BLE-scan/coex churn).
+# With NBP_CLONE=y one slot is the clone upstream, leaving 3 for HA-proxy
+# GATT links. MUST stay in sync with proxy::MAX_CONNECTIONS
+# (include/proxy_config.h) and BluetoothConnectionsFreeResponse.allocated
+# max_count (components/api_proto/api_subset.options). NIMBLE_MAX_CONNECTIONS
+# (nimble-cpp) is a non-prompt symbol that auto-tracks this one.
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=4
 # NimBLE host at INFO; flip to LOG_LEVEL_DEBUG to recompile with LOGD
 # calls when investigating wire-level issues — but it costs ~40 KB BSS
 # (string literals + 64 KiB web console ring) and the runtime DEBUG-only
@@ -42,9 +51,16 @@ CONFIG_BT_NIMBLE_MAX_CONNECTIONS=9
 # initiated" INFO lines.
 CONFIG_BT_NIMBLE_LOG_LEVEL_INFO=y
 CONFIG_BT_NIMBLE_LOG_LEVEL=1
-# BLE controller activity slots must accommodate connections + scan/adv;
-# default is 6 on S3 which caps NimBLE's effective concurrency.
-CONFIG_BT_CTRL_BLE_MAX_ACT=10
+# BLE controller activity slots = connections + scan + adv. With 4 conns
+# that's 4 + 1 scan + 1 adv = 6 (the S3 default). Each activity reserves
+# controller RAM, so this must track MAX_CONNECTIONS back down from 10.
+CONFIG_BT_CTRL_BLE_MAX_ACT=6
+# Host buffer pools, trimmed for the smaller connection count. ACL pool
+# 24->12 (~3 KB). Left at defaults: HCI event buffers (HI=30/LO=8) — they
+# back adv-report bursts during scan forwarding, so not worth risking for
+# the small saving. Bump ACL back toward 24 if you proxy high-throughput
+# GATT (notify floods) across several links at once.
+CONFIG_BT_NIMBLE_ACL_BUF_COUNT=12
 # SMP + bonding: the SECURITY_ENABLE / SM_LEGACY / SM_SC / NVS_PERSIST
 # flags are selected (or not) by main/Kconfig.projbuild's
 # NBP_SMP option, default y. MAX_BONDS is set
@@ -140,4 +156,15 @@ CONFIG_COMPILER_CXX_RTTI=n
 CONFIG_NBP_CLONE=y
 CONFIG_NBP_CLONE_MAX_CHARS=64
 CONFIG_NBP_CLONE_VALUE_CACHE_BYTES=64
+
+# Feature gates that used to be set via menuconfig only — pinned here so a
+# `rm sdkconfig && idf.py reconfigure` (or a fresh checkout) can't silently
+# drop them. NBP_NAT_ROUTER `select`s LWIP_IP_FORWARD / LWIP_IPV4_NAPT /
+# _NAPT_PORTMAP and the NBP_NAT_AP_* defaults; NBP_WS_PROXY `select`s
+# HTTPD_WS_SUPPORT. AP SSID/PSK/IP are runtime-overridable via POST /nat
+# (NVS), so the compile-time defaults here are just the cold-boot values.
+CONFIG_NBP_NAT_ROUTER=y
+CONFIG_NBP_BLE_AUTO_OFF=y
+CONFIG_NBP_BLE_AUTO_OFF_IDLE_SECS=30
+CONFIG_NBP_WS_PROXY=y
 

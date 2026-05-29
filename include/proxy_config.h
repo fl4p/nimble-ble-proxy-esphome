@@ -62,11 +62,14 @@ inline constexpr uint32_t BT_PROXY_FEATURE_FLAGS =
     (1u << 0) | (1u << 1) | (1u << 2) | (1u << 5);
 
 // BLE proxy tuning.
-// 9 matches ESPHome's BT proxy cap and what NimBLE can comfortably handle
-// on ESP32-S3. Keep in sync with CONFIG_BT_NIMBLE_MAX_CONNECTIONS in
-// sdkconfig.defaults AND proxyapi.BluetoothConnectionsFreeResponse.allocated
-// max_count in components/api_proto/api_subset.options.
-inline constexpr uint8_t MAX_CONNECTIONS = 9;
+// Trimmed 9->4 to relieve internal-DRAM pressure on this no-PSRAM S3 (see
+// the rationale in sdkconfig.defaults). This is the BT-proxy slot count
+// advertised to HA (bt_handlers.cpp -> BluetoothConnectionsFreeResponse.limit),
+// so HA will only ever open up to 4 BLE links. Keep in sync with
+// CONFIG_BT_NIMBLE_MAX_CONNECTIONS in sdkconfig.defaults AND
+// proxyapi.BluetoothConnectionsFreeResponse.allocated max_count in
+// components/api_proto/api_subset.options.
+inline constexpr uint8_t MAX_CONNECTIONS = 4;
 // 50% duty: listening half the time still catches devices that
 // advertise every 100 ms-1 s in well under a second, while halving
 // scanner radio-on time vs the previous 100% duty (interval=window=30).
