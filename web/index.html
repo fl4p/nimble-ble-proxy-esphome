@@ -143,8 +143,8 @@ table#portmaps button.del:hover{background:#3b0a0a}
   <br>
   <div id=chart2></div>
 
-  <h2>devices seen</h2>
-  <div class=devwrap><table id=devices><thead><tr>
+  <h2 class=ble-only>devices seen</h2>
+  <div class="devwrap ble-only"><table id=devices><thead><tr>
     <th>MAC</th><th>type</th><th>name</th><th class=r>RSSI</th>
     <th class=r>adv/s</th><th class=r>total</th>
     <th class=r>age</th><th>tag</th><th>BTHome</th><th></th>
@@ -190,8 +190,8 @@ table#portmaps button.del:hover{background:#3b0a0a}
     </div>
 
     <div class=tgroup>
-      <span class=glabel>BLE</span>
-      <label>TX: <select id=btx>
+      <span class="glabel ble-only">BLE</span>
+      <label class=ble-only>TX: <select id=btx>
         <option value=-12>-12</option><option value=-9>-9</option>
         <option value=-6>-6</option><option value=-3>-3</option>
         <option value=0>0</option><option value=3>3</option>
@@ -203,7 +203,7 @@ table#portmaps button.del:hover{background:#3b0a0a}
            default (~30..60 ms = ~17..33 adv/s). Larger values are big
            TX-duty savings since each adv burst transmits on 3 primary
            channels; cost is slower discovery by phones. -->
-      <label>adv: <select id=advitvl>
+      <label class=ble-only>adv: <select id=advitvl>
         <option value=-1>off (no broadcast)</option>
         <option value=0>default (~17–33/s)</option>
         <option value=100>100 ms (10/s)</option>
@@ -215,13 +215,13 @@ table#portmaps button.del:hover{background:#3b0a0a}
       <!-- Central-role scan duty cycle. Values are "<window_ms>,<interval_ms>";
            JS splits and POSTs both. Lower duty = cooler chip, slower
            pickup of new advertisers. -->
-      <label>scan: <select id=duty>
+      <label class=ble-only>scan: <select id=duty>
         <option value="30,60">50% (responsive)</option>
         <option value="30,120">25%</option>
         <option value="30,300">10% (balanced)</option>
         <option value="30,1000">3% (cool)</option>
       </select></label>
-      <label><input type=checkbox id=act> active scan</label>
+      <label class=ble-only><input type=checkbox id=act> active scan</label>
       <label>log: <select id=lvl>
         <option value=0>NONE</option>
         <option value=1>ERROR</option>
@@ -577,6 +577,20 @@ function initCharts() {
 let g_pollTimers = [];
 let g_prev = null, g_prevT = null;
 
+// BLE capability, learned from /stats.json ("ble":true/false). When the
+// firmware is built with NBP_BLE=n there is no scanner / BluetoothProxy
+// and the /scan, /advitvl, /devices endpoints aren't registered — so we
+// hide the BLE-only UI (.ble-only) once and skip the /devices poll. null
+// until the first stats tick; applied a single time.
+let g_ble = null;
+function applyCaps(s) {
+  if (g_ble !== null || typeof s.ble === 'undefined') return;
+  g_ble = !!s.ble;
+  if (!g_ble) {
+    document.querySelectorAll('.ble-only').forEach(el => el.classList.add('hidden'));
+  }
+}
+
 function shiftPush(arr, v) { arr.shift(); arr.push(v); }
 const delta = (cur, p, dt) => { const v = (cur - p) / dt; return v < 0 ? null : v; };
 
@@ -584,6 +598,7 @@ async function tickStats() {
   try {
     const now = performance.now() / 1000;
     const s = await apiJson('GET /stats.json');
+    applyCaps(s);
     if (g_prev) {
       const dt = now - g_prevT;
       shiftPush(r, delta(s.reads,    g_prev.reads,    dt));
@@ -696,6 +711,9 @@ function formatBthome(b) {
 }
 
 async function tickDevices() {
+  // BLE-free build: no scanner, /devices + /clone aren't served. Skip the
+  // poll entirely so we don't spew 404s once we've learned the capability.
+  if (g_ble === false) return;
   try {
     // /clone is small (~250 B) and /devices already runs at 1 Hz, so we
     // just piggyback on the same tick. Failure of /clone (e.g. clone
@@ -901,21 +919,25 @@ async function loadInitialValues() {
     document.getElementById('pdcpu').disabled = !f.ls;
     const ps = await apiJson('GET /wifips');
     document.getElementById('wps').value = String(ps.li);
-    const sc = await apiJson('GET /scan');
-    const duty = document.getElementById('duty');
-    const key = `${sc.window},${sc.interval}`;
-    // Match if one of the presets fits exactly; otherwise leave the
-    // dropdown showing the first option (we don't add a custom row).
-    for (const opt of duty.options) if (opt.value === key) duty.value = key;
-    document.getElementById('act').checked = !!sc.active;
-    // /advitvl returns the rounded ms; match against a preset if one
-    // fits exactly. NimBLE's host rounds to 0.625 ms units internally,
-    // so 100/200/500/1000/2000 ms always round-trip without drift.
-    const ai = await apiJson('GET /advitvl');
-    const advitvl = document.getElementById('advitvl');
-    for (const opt of advitvl.options) {
-      if (parseInt(opt.value, 10) === ai.ms) { advitvl.value = opt.value; break; }
-    }
+    // /scan + /advitvl exist only in BLE builds. Isolate them in their own
+    // try so a BLE-free build's 404 doesn't abort the /hostname load below.
+    try {
+      const sc = await apiJson('GET /scan');
+      const duty = document.getElementById('duty');
+      const key = `${sc.window},${sc.interval}`;
+      // Match if one of the presets fits exactly; otherwise leave the
+      // dropdown showing the first option (we don't add a custom row).
+      for (const opt of duty.options) if (opt.value === key) duty.value = key;
+      document.getElementById('act').checked = !!sc.active;
+      // /advitvl returns the rounded ms; match against a preset if one
+      // fits exactly. NimBLE's host rounds to 0.625 ms units internally,
+      // so 100/200/500/1000/2000 ms always round-trip without drift.
+      const ai = await apiJson('GET /advitvl');
+      const advitvl = document.getElementById('advitvl');
+      for (const opt of advitvl.options) {
+        if (parseInt(opt.value, 10) === ai.ms) { advitvl.value = opt.value; break; }
+      }
+    } catch (e) { /* BLE-free build: scan/advitvl absent */ }
     const hn = document.getElementById('hn');
     const h = await apiJson('GET /hostname');
     hn.value = h.hostname;
