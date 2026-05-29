@@ -20,6 +20,40 @@
   endpoints (`/wifips`, `/cpufreq`, `/txpower`, …) only apply via `POST`;
   a bare GET just reads.
 
+- **NAT builds are heap- and coex-bound — don't over-provision NimBLE.**
+  This S3 has *no PSRAM*, so WiFi (APSTA) + NimBLE + httpd + NAPT all share
+  ~512 KB internal DRAM. Over-provisioning shows up as a WiFi-layer failure,
+  not an obvious OOM: the SoftAP tears clients down in an 802.11w PMF
+  **SA-Query → disassoc loop** (`wifi: … STA not responded to 6 SA Query
+  attempts` + `reason = 209`, repeating), and HA's api_server connections
+  fail with `xTaskCreate … failed`. The chain: `BT_NIMBLE_MAX_CONNECTIONS=9`
+  reserved enough host+controller per-link buffers that no *contiguous* 8 KB
+  block remained for an api_server connection task stack → HA reconnect storm
+  → BLE central scan keeps re-arming → coex steals airtime on the single
+  radio → beacon misses → client re-associates → SA-Query loop → every TCP
+  conn (incl. the NAT'd client's MQTT/OTA) dies with `select() timeout`.
+  Note PMF can't be turned off in IDF 5.5 (`wifi_pmf_config_t.capable` is
+  deprecated/forced), so the lever is reducing re-assoc, i.e. the radio
+  contention. Fix was sizing NimBLE to what's actually used — 1 clone
+  upstream + ~3 HA links: `BT_NIMBLE_MAX_CONNECTIONS 9→4`,
+  `BT_CTRL_BLE_MAX_ACT 10→6`, `BT_NIMBLE_ACL_BUF_COUNT 24→12` (freed ~13 KB;
+  42→55 KB steady, SA-Query loop gone, port-forwards work). The connection
+  count is coupled across **three** files — keep them in sync:
+  `BT_NIMBLE_MAX_CONNECTIONS` (`sdkconfig.defaults`), `proxy::MAX_CONNECTIONS`
+  (`include/proxy_config.h`, the slot count advertised to HA), and the nanopb
+  `BluetoothConnectionsFreeResponse.allocated` cap
+  (`components/api_proto/api_subset.options`). Diagnose live with
+  `GET /stats.json` (`heap`) + `GET /log` (grep `SA Query` / `xTaskCreate`).
+
+- **Feature opt-ins must live in `sdkconfig.defaults`, not menuconfig-only.**
+  `sdkconfig` is gitignored/generated; `rm sdkconfig && idf.py reconfigure`
+  (or a fresh checkout) regenerates it *purely* from `sdkconfig.defaults` and
+  **silently drops** any flag that was only ever set via menuconfig — e.g. it
+  once dropped `NBP_NAT_ROUTER` (compiling the whole NAT router + SoftAP out).
+  `NBP_NAT_ROUTER`, `NBP_BLE_AUTO_OFF`, `NBP_WS_PROXY` are now pinned in
+  `sdkconfig.defaults` for this reason. IDF saves the previous config as
+  `sdkconfig.old` on regenerate — recover dropped values from there.
+
 ## There are multiple ESP32 boards on this LAN — verify which one you're on
 
 - `mDNS nimble-proxy.local` resolves to **192.168.1.231** (MAC `94:A9:90:08:BA:3C`),
@@ -107,8 +141,27 @@
 - `idf.py build` and `idf.py flash` terminate and return — run them as
   normal Bash calls. No MCP server needed.
 - `idf.py monitor` is the only blocking command (streams serial forever,
-  never returns). Don't run it foreground and wait. Instead use
-  `run_in_background: true`, or bound it (`timeout 10 idf.py monitor`).
+  never returns). Don't run it foreground and wait. **Instead use
+  `scripts/serlog.py`** — a bounded pyserial reader that captures for a
+  fixed window and returns. Use it any time you'd reach for `idf.py monitor`
+  (including when the user says "use idf.py monitor"):
+    - `scripts/serlog.py -s 10` — 10s capture, auto-picks the sole usbmodem port.
+    - `scripts/serlog.py --reset --until "app_init"` — pulse reset, then stop
+      as soon as the boot banner appears (good for checking compile time).
+    - `scripts/serlog.py -p /dev/cu.usbmodem1201` — **required when several
+      boards are plugged in**; bare auto-pick errors on multiple ports (pass
+      `--auto` to override). See the multi-board warning above.
+  It self-bootstraps pyserial from `~/.espressif/python_env/*` (homebrew
+  python3 lacks it) and tolerates the S3 native-USB-CDC idle quirk where a
+  readable port returns 0 bytes. Fall back to `timeout 10 idf.py monitor`
+  only if you need IDF's panic/backtrace decoding.
+- **Reset difference vs `idf.py monitor`:** `idf.py monitor` resets the chip
+  on attach by default, so it always shows a fresh boot log. `serlog.py` does
+  **not** reset unless you pass `--reset`; without it you capture only
+  steady-state output — which can be empty if the device is in light sleep.
+  So when you reach for monitor *to see boot/init output*, use
+  `serlog.py --reset`. (Verified: the classic DTR/RTS sequence in `--reset`
+  does reboot this board's native USB-Serial/JTAG peripheral.)
 - **Prefer the `/log` web-console endpoint over serial monitor** for
   observing the device: it's pollable over HTTP, survives light sleep,
   and avoids USB port contention. Serial only emits in the post-reset
