@@ -103,6 +103,38 @@
   `NimBLEDevice::deinit()` — deinit would tear down the one-shot clone/ble_httpd
   GATT DB and is deliberately avoided. `wifi_sta::is_connected()` is the WiFi gate.
 
+## `CONFIG_NBP_BLE` — compile-time master gate (vs the runtime auto-off above)
+
+- `NBP_BLE` (default y, `main/Kconfig.projbuild`) is the **compile-time**
+  switch that builds BLE in or out entirely — distinct from
+  `NBP_BLE_AUTO_OFF`, which only *quiesces the radio at runtime*. Every
+  BLE option (`NBP_BLE_HTTPD`, `NBP_CLONE`, `NBP_SMP`, `NBP_BLE_AUTO_OFF`,
+  and the `NBP_DEVICES_PANEL` table) nests in an `if NBP_BLE … endif`
+  block. `NBP_BLE` `select`s `BT_ENABLED`; off ⇒ no scanner, no
+  BluetoothProxy API, NimBLE stack excluded (~300 KB smaller, WiFi/NAT/
+  dashboard-only). Keep at least one of `NBP_WIFI` / `NBP_BLE` on or the
+  device has no remote transport.
+- **`sdkconfig.defaults` must NOT pin `CONFIG_BT_ENABLED`** — the `select`
+  is authoritative. The NimBLE host/role/tuning lines stay there but are
+  inert when the BT_HOST choice is hidden (BT off).
+- **`esp-nimble-cpp` is an *optional* dependency** in all four manifests
+  (`api_server`, `ble_backend`, `ble_clone`, `ble_httpd`):
+  `rules: - if: "$CONFIG{NBP_BLE} == True"`. Two gotchas: (1) gate on
+  `NBP_BLE`, **not** `BT_NIMBLE_ENABLED` — the latter vanishes from the
+  Kconfig model when BT is off and trips IDF's "missing kconfig after
+  retry" fatal; (2) the component manager does **not** auto-add an
+  *optional* dep to `REQUIRES`, so `ble_backend` and `api_server` link
+  `nimble_lib` explicitly in their CMakeLists (guarded on `CONFIG_NBP_BLE`)
+  the same way `ble_clone`/`ble_httpd` always have.
+- To flip a previously-on `sdkconfig` to BLE-free you must clear **both**
+  `CONFIG_NBP_BLE` and the stale `CONFIG_BT_ENABLED=y` (a `select` sets a
+  symbol but can't un-set an existing `y` on reconfigure), then
+  reconfigure. A fresh `rm sdkconfig && reconfigure` does it cleanly.
+- **Known gap:** `web/index.html` still calls `/scan`, `/advitvl`,
+  `/devices` and reads `adverts`/`bthome` — those endpoints/fields are
+  absent in a BLE-free build, so the dashboard's device table + BLE
+  controls 404/empty. Not yet gated client-side.
+
 ## DHCP client hostnames (NAT/SoftAP) — captured via a custom lwIP hook
 
 - `/nat` lists connected SoftAP clients with MAC, leased IP, RSSI, and
