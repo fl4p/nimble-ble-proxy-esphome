@@ -69,6 +69,31 @@
   `NimBLEDevice::deinit()` — deinit would tear down the one-shot clone/ble_httpd
   GATT DB and is deliberately avoided. `wifi_sta::is_connected()` is the WiFi gate.
 
+## DHCP client hostnames (NAT/SoftAP) — captured via a custom lwIP hook
+
+- `/nat` lists connected SoftAP clients with MAC, leased IP, RSSI, and
+  **DHCP hostname**. IDF 5.5's DHCP server parses past option 12 (Host Name)
+  and discards it, and there's no public accessor — so we recover it with a
+  custom lwIP hook rather than forking the server (a whole-file fork is
+  *unworkable*: esp_netif's AP-DHCP wiring is gated by `ESP_DHCPS` ==
+  `CONFIG_LWIP_DHCPS`, so disabling the built-in to substitute symbols just
+  makes esp_netif skip starting any AP DHCP server).
+- Mechanism: `components/dhcps_hostname` defines `LWIP_HOOK_DHCPS_POST_STATE`
+  in `nbp_lwip_hooks.h`, injected into lwIP's `dhcpserver.c` via
+  `ESP_IDF_LWIP_HOOK_FILENAME` (set on the lwip component in the **root
+  `CMakeLists.txt`**, gated on `CONFIG_NBP_NAT_ROUTER`). The hook reads
+  option 12 from each incoming packet and stores MAC→hostname in a small
+  spinlock-guarded registry; `nat_router` reads it back via
+  `dhcps_hostname_lookup()`. The implementation symbol is pulled into the
+  link by `nat_router`'s `REQUIRES dhcps_hostname`.
+- **IDF-version coupled.** The hook relies on `struct dhcps_msg` layout
+  (`chaddr`, `options`) and the `LWIP_HOOK_DHCPS_POST_STATE` /
+  `ESP_IDF_LWIP_HOOK_FILENAME` contract. On an IDF bump, re-verify the hook
+  still fires: `nm build/.../dhcpserver.c.obj | grep nbp_dhcps_post_state`
+  should show it as `U` (undefined → the hook is being called). IDF 6 has
+  this natively (`CONFIG_LWIP_DHCPS_REPORT_CLIENT_HOSTNAME`) — prefer that
+  if/when the project moves to IDF 6 and drop the hook.
+
 ## WebSocket bridge (NBP_WS_PROXY)
 
 - Gated off by default. When on, `GET ws://<host>/api` tunnels the plaintext

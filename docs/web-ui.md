@@ -441,6 +441,36 @@ dashboard reflects this: the text field gains a `.dirty` (blue) border
 while editing, flips to `.ok` (green) after a successful POST, and
 restyles the reboot button to "reboot to apply name".
 
+### `GET /nat` &nbsp;·&nbsp; `POST /nat` *(gated by `CONFIG_NBP_NAT_ROUTER`)*
+
+SoftAP/NAT router status + control. `GET` returns:
+
+```json
+{"enabled":true,"ssid":"nimble-nat","open":false,
+ "ap_ip":"192.168.4.1","sta_ip":"192.168.1.50","clients":2,"max":4,
+ "stations":[
+   {"mac":"aa:bb:cc:dd:ee:ff","ip":"192.168.4.2","rssi":-54,"hostname":"pixel-7"},
+   {"mac":"11:22:33:44:55:66","ip":"192.168.4.3","rssi":-71,"hostname":""}],
+ "portmaps":[{"proto":"tcp","mport":8080,"daddr":"192.168.4.2","dport":80}]}
+```
+
+`stations` lists the currently-associated SoftAP clients. `mac` + `rssi`
+come from `esp_wifi_ap_get_sta_list`; `ip` from the DHCP server's MAC↔IP
+pairing (`esp_wifi_ap_get_sta_list_with_ip`); `hostname` is the client's
+DHCP **option 12** (Host Name), empty when the client didn't send one.
+
+IDF 5.5's DHCP server parses past option 12 and discards it, so we recover
+it with a custom lwIP hook (`LWIP_HOOK_DHCPS_POST_STATE`, wired via
+`ESP_IDF_LWIP_HOOK_FILENAME` in the root `CMakeLists.txt`): on every
+incoming DHCP packet the hook reads option 12 and stores it keyed by MAC in
+a small registry (`components/dhcps_hostname`), which `/nat` looks up per
+station. The built-in server is left fully intact — no fork, no
+`CONFIG_LWIP_DHCPS` change. The dashboard NAT panel renders the array as a
+"hostname / IP / MAC / RSSI" table.
+
+`POST /nat?enabled=0|1`, `?ssid=…`, `?psk=…` toggle/reconfigure the AP;
+`/portmap` (separate endpoint) adds/deletes inbound forwards.
+
 ### `POST /trace?on=<0|1>`
 
 Diagnostic capture mode. `on=1`:

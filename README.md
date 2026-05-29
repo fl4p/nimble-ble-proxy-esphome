@@ -110,6 +110,7 @@ These Kconfig switches under `nimble-ble-proxy` choose what gets compiled in:
 | `CONFIG_NBP_WIFI` | `y` | STA + mDNS + dashboard httpd + aioesphomeapi server + embedded dashboard HTML |
 | `CONFIG_NBP_OTA` | `y` | `POST /update` HTTP OTA endpoint. Turn off for a lockdown build where firmware updates require serial. |
 | `CONFIG_NBP_AP_FALLBACK` | `n` | When STA can't associate within `CONFIG_NBP_AP_FALLBACK_SECS`, fall back to a SoftAP at `<hostname>-setup` (192.168.4.1) with a one-page form that POSTs credentials to NVS and reboots. Replaces edit-`wifi_creds.h`-and-reflash for first-time setup. |
+| `CONFIG_NBP_NAT_ROUTER` | `n` | SoftAP + NAPT out the STA uplink, with `/nat` (status + AP creds) and `/portmap` (inbound forwards). `/nat` also lists connected clients — MAC, leased IP, RSSI, and DHCP hostname (captured via a custom lwIP hook; see `components/dhcps_hostname`). Shown in the dashboard NAT panel. |
 | `CONFIG_NBP_BLE_HTTPD` | `n` | GATT request/response service (Web Bluetooth dashboard) |
 | `CONFIG_NBP_CLONE` | `n` | Clone supervisor, upstream client, local GATT mirror, `/clone` endpoint |
 | `CONFIG_NBP_SMP` | `n` | Static-passkey pairing as central (paired upstream peripherals). Passkey is set via `POST /clone?passkey=N` |
