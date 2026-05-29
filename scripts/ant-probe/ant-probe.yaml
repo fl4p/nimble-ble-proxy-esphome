@@ -33,8 +33,9 @@ external_components:
     components: [ant_bms_ble]
 
 wifi:
-  ssid: REDACTED
-  password: REDACTED
+  # Credentials live in scripts/ant-probe/secrets.yaml (gitignored), not here.
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
   ap:
     ssid: "ant-probe-fallback"
 

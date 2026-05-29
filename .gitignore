@@ -1,6 +1,9 @@
 build/
 sdkconfig
 sdkconfig.old
+# ESPHome / lab secrets (WiFi creds etc.) — never commit
+secrets.yaml
+**/secrets.yaml
 # Generated per-target sdkconfigs (idf.py set-target / -D SDKCONFIG=...).
 # Keep the committed sdkconfig.defaults / sdkconfig.defaults.<target> files.
 sdkconfig.*

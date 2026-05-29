@@ -106,6 +106,14 @@ void build_free_msg(proxyapi_BluetoothConnectionsFreeResponse *m) {
   *m = proxyapi_BluetoothConnectionsFreeResponse_init_zero;
   m->limit = proxy::MAX_CONNECTIONS;
   m->free = ble_backend::connection::free_slots();
+  // in_use_addresses writes up to MAX_CONNECTIONS entries into the nanopb
+  // `allocated` array, whose size is fixed by max_count in api_subset.options.
+  // Keep them coupled at compile time (sizeof on the member is constant even
+  // through the pointer — it doesn't dereference m).
+  static_assert(proxy::MAX_CONNECTIONS <=
+                    sizeof(m->allocated) / sizeof(m->allocated[0]),
+                "proxy::MAX_CONNECTIONS exceeds the nanopb allocated[] capacity — "
+                "raise max_count in components/api_proto/api_subset.options");
   m->allocated_count = ble_backend::connection::in_use_addresses(
       m->allocated, proxy::MAX_CONNECTIONS);
 }

@@ -70,6 +70,14 @@ inline constexpr uint32_t BT_PROXY_FEATURE_FLAGS =
 // proxyapi.BluetoothConnectionsFreeResponse.allocated max_count in
 // components/api_proto/api_subset.options.
 inline constexpr uint8_t MAX_CONNECTIONS = 4;
+#ifdef CONFIG_BT_NIMBLE_MAX_CONNECTIONS
+// We advertise MAX_CONNECTIONS slots to HA and size connection::g_slots by it,
+// so it must never exceed what NimBLE is actually built to handle. (Guarded
+// because the macro is undefined when BLE is compiled out via NBP_BLE=n.)
+static_assert(MAX_CONNECTIONS <= CONFIG_BT_NIMBLE_MAX_CONNECTIONS,
+              "proxy::MAX_CONNECTIONS exceeds CONFIG_BT_NIMBLE_MAX_CONNECTIONS — "
+              "raise it in sdkconfig.defaults");
+#endif
 // 50% duty: listening half the time still catches devices that
 // advertise every 100 ms-1 s in well under a second, while halving
 // scanner radio-on time vs the previous 100% duty (interval=window=30).
