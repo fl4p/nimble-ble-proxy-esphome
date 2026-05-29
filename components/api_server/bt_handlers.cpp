@@ -183,6 +183,12 @@ bool handle_subscribe_adv(const uint8_t *payload, size_t payload_len,
       ble_backend::scanner::start_forwarding();
     }
   }
+  // TODO(active-scan): make effective active-scan = (web toggle, /scan?active=1
+  // via scanner::get_active()) OR (HA is subscribed, g_sub_adv_count > 0).
+  // NOTE: there is NO active-scan request in the ESPHome protocol — `flags`
+  // above is only BLUETOOTH_PROXY_SUBSCRIPTION_FLAG_RAW_ADVERTISEMENTS, so the
+  // OR's second operand is "HA is listening", not a scan-mode field. Drive
+  // scanner::set_active() from here + the unsubscribe path accordingly.
   return true;
 }
 
