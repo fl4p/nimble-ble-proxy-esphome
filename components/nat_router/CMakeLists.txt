@@ -19,4 +19,5 @@ idf_component_register(
         lwip
         nvs_flash
         log
+        dhcps_hostname
 )

@@ -106,12 +106,15 @@ table#devices button.clone-btn.cloned:hover{background:#3b0a0a}
 #natpanel button:hover{background:#2a2a2a}
 #natpanel input.ok{border-color:#4ade80}#natpanel input.err{border-color:#f87171}
 #pmmport,#pmdport{width:6em}#pmdaddr{width:11em}#natssid,#natpsk{width:11em}
-table#portmaps{border-collapse:collapse;font-size:12px;color:#ddd;
-  margin-bottom:.5em;min-width:420px}
-table#portmaps th,table#portmaps td{padding:.2em .6em;
+table#portmaps,table#natstations{border-collapse:collapse;font-size:12px;
+  color:#ddd;margin-bottom:.5em;min-width:420px}
+table#portmaps th,table#portmaps td,
+table#natstations th,table#natstations td{padding:.2em .6em;
   border-bottom:1px solid #222;text-align:left}
-table#portmaps th{color:#888;font-weight:normal}
-table#portmaps .r{text-align:right;font-variant-numeric:tabular-nums}
+table#portmaps th,table#natstations th{color:#888;font-weight:normal}
+table#portmaps .r,table#natstations .r{text-align:right;
+  font-variant-numeric:tabular-nums}
+table#natstations td.muted{color:#777}
 table#portmaps button.del{background:#1a1a1a;border:1px solid #7f1d1d;
   color:#fca5a5;font:inherit;padding:.1em .5em;border-radius:3px;cursor:pointer}
 table#portmaps button.del:hover{background:#3b0a0a}
@@ -250,6 +253,9 @@ table#portmaps button.del:hover{background:#3b0a0a}
       <span>uplink <code id=natstaip>&mdash;</code></span>
       <span><b id=natclients>0</b>/<span id=natmax>0</span> clients</span>
     </div>
+    <div class=devwrap><table id=natstations><thead><tr>
+      <th>hostname</th><th>IP</th><th>MAC</th><th class=r>RSSI</th>
+    </tr></thead><tbody></tbody></table></div>
     <div class=natedit>
       <label><input type=checkbox id=naten> SoftAP enabled</label>
       <label>SSID <input type=text id=natssid maxlength=32 spellcheck=false
@@ -823,6 +829,28 @@ async function loadNat() {
   // Don't clobber the SSID field while the user is editing it.
   const ssid = document.getElementById('natssid');
   if (document.activeElement !== ssid) ssid.value = nat.ssid;
+  // Connected SoftAP clients: hostname (DHCP option 12), IP, MAC, RSSI.
+  const stb = document.querySelector('#natstations tbody');
+  stb.textContent = '';
+  const stations = nat.stations || [];
+  if (!stations.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 4; td.className = 'muted'; td.textContent = 'no clients';
+    tr.appendChild(td); stb.appendChild(tr);
+  }
+  for (const st of stations) {
+    const tr = document.createElement('tr');
+    const host = st.hostname || '—';  // em dash when no DHCP hostname
+    const cells = [[host, st.hostname ? '' : 'muted'], [st.ip || '—', ''],
+                   [st.mac, ''], [st.rssi + ' dBm', 'r']];
+    for (const [v, cls] of cells) {
+      const td = document.createElement('td');
+      if (cls) td.className = cls;
+      td.textContent = v; tr.appendChild(td);
+    }
+    stb.appendChild(tr);
+  }
   const tb = document.querySelector('#portmaps tbody');
   tb.textContent = '';
   for (const pm of (nat.portmaps || [])) {

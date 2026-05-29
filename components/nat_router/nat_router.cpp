@@ -7,10 +7,15 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "esp_wifi_ap_get_sta_list.h"  // wifi_sta_mac_ip_list_t, *_with_ip
 #include "esp_wifi_default.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
+
+// MAC→hostname registry populated by our lwIP DHCP-server hook. Lets the
+// /nat client list show names like a consumer router does.
+#include "dhcps_hostname.h"
 
 // lwIP NAPT / port-mapping API. The declarations live behind
 // #if IP_FORWARD / #if IP_NAPT, both of which our Kconfig `select`s turn
@@ -302,6 +307,57 @@ void on_sta_got_ip(void * /*arg*/, esp_event_base_t base, int32_t id,
            count_valid());
 }
 
+// Append a JSON "stations":[...] array of currently-associated SoftAP
+// clients: MAC, the IP the DHCP server leased them, RSSI, and the DHCP
+// option-12 hostname our lwIP hook captured (empty string if the client
+// sent none). `sl` is the already-fetched station list (reused for the
+// client count); `off` is the current write offset. Returns the new offset.
+int append_stations_json(char *buf, int off, size_t cap,
+                         const wifi_sta_list_t &sl) {
+  // Best-effort MAC↔IP pairing from the DHCP server. Order may differ from
+  // sl, so we match by MAC below rather than by index.
+  wifi_sta_mac_ip_list_t ipl = {};
+  esp_wifi_ap_get_sta_list_with_ip(&sl, &ipl);
+
+  off += std::snprintf(buf + off, cap - off, "\"stations\":[");
+  bool first = true;
+  for (int i = 0; i < sl.num && off < static_cast<int>(cap) - 160; ++i) {
+    const uint8_t *mac = sl.sta[i].mac;
+
+    uint32_t ip = 0;
+    for (int j = 0; j < ipl.num; ++j) {
+      if (std::memcmp(ipl.sta[j].mac, mac, 6) == 0) {
+        ip = ipl.sta[j].ip.addr;
+        break;
+      }
+    }
+    char ips[16];
+    ip_to_str(ip, ips, sizeof(ips));
+
+    char host[32];
+    dhcps_hostname_lookup(mac, host, sizeof(host));
+    // host is sanitized to printable ASCII upstream, but that still admits
+    // " and \ — escape them for valid JSON.
+    char esc[2 * sizeof(host)];
+    size_t e = 0;
+    for (const char *p = host; *p != '\0' && e < sizeof(esc) - 2; ++p) {
+      if (*p == '"' || *p == '\\') esc[e++] = '\\';
+      esc[e++] = *p;
+    }
+    esc[e] = '\0';
+
+    off += std::snprintf(
+        buf + off, cap - off,
+        "%s{\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"ip\":\"%s\","
+        "\"rssi\":%d,\"hostname\":\"%s\"}",
+        first ? "" : ",", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ips,
+        static_cast<int>(sl.sta[i].rssi), esc);
+    first = false;
+  }
+  off += std::snprintf(buf + off, cap - off, "]");
+  return off;
+}
+
 // ──────────────────────────── HTTP endpoints ───────────────────────
 
 esp_err_t nat_get(httpd_req_t *req) {
@@ -314,14 +370,17 @@ esp_err_t nat_get(httpd_req_t *req) {
   wifi_sta_list_t sl = {};
   esp_wifi_ap_get_sta_list(&sl);
 
-  char buf[2048];
+  char buf[3072];
   int off = std::snprintf(
       buf, sizeof(buf),
       "{\"enabled\":%s,\"ssid\":\"%s\",\"open\":%s,\"ap_ip\":\"%s\","
-      "\"sta_ip\":\"%s\",\"clients\":%d,\"max\":%d,\"portmaps\":[",
+      "\"sta_ip\":\"%s\",\"clients\":%d,\"max\":%d,",
       g_enabled ? "true" : "false", g_ap_ssid,
       std::strlen(g_ap_psk) < 8 ? "true" : "false", ap_ip, sta_ip, sl.num,
       CONFIG_NBP_NAT_AP_MAX_CONN);
+
+  off = append_stations_json(buf, off, sizeof(buf), sl);
+  off += std::snprintf(buf + off, sizeof(buf) - off, ",\"portmaps\":[");
 
   bool first = true;
   for (size_t i = 0; i < PORTMAP_MAX && off < static_cast<int>(sizeof(buf)) - 96;
