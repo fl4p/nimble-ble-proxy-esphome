@@ -167,6 +167,34 @@ config NBP_NAT_PORTMAP_MAX
         Capped at 32 by lwIP's IP_PORTMAP_MAX. Each slot costs a few
         bytes of BSS plus one NVS blob entry.
 
+config NBP_BLE
+    bool "Enable BLE (NimBLE scanner/proxy + all BLE features)"
+    default y
+    select BT_ENABLED
+    help
+        Master switch for the entire BLE side of the proxy. ON (the
+        default) pulls in the NimBLE controller + host (selects
+        BT_ENABLED; the host choice is pinned to NimBLE in
+        sdkconfig.defaults) and compiles the BLE backend: the
+        observer/central scanner that forwards advertisements to Home
+        Assistant, the per-peer GATT client pool, and the BluetoothProxy
+        half of the aioesphomeapi protocol. Every optional BLE feature
+        nested below (ble_httpd dashboard, clone, SMP pairing, radio
+        auto-off, the live device table) lives under this gate.
+
+        Turn OFF to build a BLE-free firmware: no scanner, no
+        BluetoothProxy API, and the NimBLE stack itself is left out of
+        the image entirely (BT_ENABLED is no longer selected), reclaiming
+        its flash + RAM. Only the WiFi-side subsystems remain — use this
+        for a pure NAT-router / dashboard build.
+
+        NOTE: turning this off together with NBP_WIFI leaves the device
+        with no remote transport at all (no HTTP, no api_server, no BLE
+        dashboard) — it would be reachable only over serial. Keep at
+        least one of NBP_WIFI / NBP_BLE on.
+
+if NBP_BLE
+
 config NBP_BLE_HTTPD
     bool "BLE-side HTTP transport (GATT request/response service)"
     default n
@@ -226,83 +254,6 @@ config NBP_BLE_AUTO_OFF_IDLE_SECS
         quiesced. Guards against toggling the radio on every HA
         reconnect or transient WiFi drop. Re-activation is always
         immediate regardless of this value.
-
-config NBP_DEVICES_PANEL
-    bool "Web UI: live device table (/devices + dashboard table)"
-    default y
-    help
-        Track every unique MAC the scanner sees in a 64-entry table
-        (RSSI, last local name, cumulative adv count, last-seen
-        timestamp; LRU-by-last_ms eviction). Exposes it as a JSON
-        endpoint at /devices and renders a sortable table below the
-        rate chart on the dashboard.
-
-        Costs ~12 KB BSS (two 3 KB DeviceRow arrays + 6 KB JSON
-        scratch buffer) plus one extra mutex op per advertisement.
-        Disable for a slimmer build that keeps the rate chart but
-        drops the per-device view.
-
-config NBP_BTHOME
-    bool "Web UI: decode BTHome v2 service-data adverts (/devices column)"
-    depends on NBP_DEVICES_PANEL
-    default y
-    help
-        Decode BTHome v2 (https://bthome.io) service-data
-        advertisements (16-bit UUID 0xFCD2) inline in the scan
-        callback and surface the most recent reading (temperature,
-        humidity, battery, voltage, illuminance, motion, button,
-        power, CO2, packet id) as a "BTHome" column in the existing
-        /devices table on the dashboard.
-
-        Encrypted BTHome frames are detected and marked but not
-        decrypted — per-device key configuration is not yet
-        implemented. Unrecognized object IDs abort the rest of that
-        frame (BTHome has no separators) but preserve any fields
-        already decoded before the unknown ID.
-
-        Costs ~1.5 KB BSS (32-entry cache + scratch) plus one
-        optional mutex op per advert (only when 0xFCD2 service data
-        is present). The raw-advertisement forwarding path to Home
-        Assistant is unchanged — this is a parallel local-display
-        path.
-
-config NBP_DEV_DETAILS
-    bool "Web UI: enrich /devices with appearance, connectable, vendor tag"
-    depends on NBP_DEVICES_PANEL
-    default y
-    help
-        Decode the extra fields each advertisement carries beyond
-        MAC + name + RSSI: GAP Appearance (AD 0x19, rendered as an
-        emoji prefix on the name), connectable PDU flag (used to hide
-        the clone button for broadcast-only sensors / beacons), and
-        a vendor / class tag derived from manufacturer company ID
-        (Apple Continuity subtypes, Microsoft, Samsung, Google, Sony,
-        Bose, Sonos, Tile, Ruuvi, Victron, Xiaomi, Anker, Nordic,
-        Espressif, Garmin, LG, Sennheiser, iBeacon, AltBeacon) or
-        16-bit service UUID (BTHome, FastPair, Eddystone, ENS,
-        MiBeacon, SwitchBot, Battery, EnvSense, HID, HeartRate,
-        Cycling, DevInfo).
-
-        Costs ~1 KB BSS (4 bytes × 64 rows + label tables in flash)
-        plus a small AD walk per advertisement. Disable for a slim
-        build that keeps just MAC / name / RSSI / counts in the
-        device table; the address-type column derived client-side
-        from the MAC stays either way.
-
-config NBP_WEB_CONSOLE
-    bool "Web UI: device log mirror (/log + on-page console)"
-    default y
-    help
-        Tee esp_log_set_vprintf into a ring buffer and stream it to
-        the dashboard. /log?since=N returns new bytes via chunked
-        encoding; the page polls every 500 ms and renders ANSI
-        colors via ansi_up. UART/JTAG output is unaffected — this
-        is purely a copy.
-
-        Ring sizes itself from CONFIG_BT_NIMBLE_LOG_LEVEL_DEBUG:
-        64 KiB with NimBLE DEBUG on, 8 KiB otherwise. The 64 KiB
-        path is the dashboard's largest BSS consumer; disable here
-        if you don't need the web console (UART logging stays).
 
 config NBP_CLONE
     bool "BLE clone: local GATT mirror of one upstream device"
@@ -405,5 +356,84 @@ config NBP_SMP
         encryption will return an authentication-required error on
         their characteristics; reads/writes/notifies on non-encrypted
         chars still work normally.
+
+config NBP_DEVICES_PANEL
+    bool "Web UI: live device table (/devices + dashboard table)"
+    default y
+    help
+        Track every unique MAC the scanner sees in a 64-entry table
+        (RSSI, last local name, cumulative adv count, last-seen
+        timestamp; LRU-by-last_ms eviction). Exposes it as a JSON
+        endpoint at /devices and renders a sortable table below the
+        rate chart on the dashboard.
+
+        Costs ~12 KB BSS (two 3 KB DeviceRow arrays + 6 KB JSON
+        scratch buffer) plus one extra mutex op per advertisement.
+        Disable for a slimmer build that keeps the rate chart but
+        drops the per-device view.
+
+config NBP_BTHOME
+    bool "Web UI: decode BTHome v2 service-data adverts (/devices column)"
+    depends on NBP_DEVICES_PANEL
+    default y
+    help
+        Decode BTHome v2 (https://bthome.io) service-data
+        advertisements (16-bit UUID 0xFCD2) inline in the scan
+        callback and surface the most recent reading (temperature,
+        humidity, battery, voltage, illuminance, motion, button,
+        power, CO2, packet id) as a "BTHome" column in the existing
+        /devices table on the dashboard.
+
+        Encrypted BTHome frames are detected and marked but not
+        decrypted — per-device key configuration is not yet
+        implemented. Unrecognized object IDs abort the rest of that
+        frame (BTHome has no separators) but preserve any fields
+        already decoded before the unknown ID.
+
+        Costs ~1.5 KB BSS (32-entry cache + scratch) plus one
+        optional mutex op per advert (only when 0xFCD2 service data
+        is present). The raw-advertisement forwarding path to Home
+        Assistant is unchanged — this is a parallel local-display
+        path.
+
+config NBP_DEV_DETAILS
+    bool "Web UI: enrich /devices with appearance, connectable, vendor tag"
+    depends on NBP_DEVICES_PANEL
+    default y
+    help
+        Decode the extra fields each advertisement carries beyond
+        MAC + name + RSSI: GAP Appearance (AD 0x19, rendered as an
+        emoji prefix on the name), connectable PDU flag (used to hide
+        the clone button for broadcast-only sensors / beacons), and
+        a vendor / class tag derived from manufacturer company ID
+        (Apple Continuity subtypes, Microsoft, Samsung, Google, Sony,
+        Bose, Sonos, Tile, Ruuvi, Victron, Xiaomi, Anker, Nordic,
+        Espressif, Garmin, LG, Sennheiser, iBeacon, AltBeacon) or
+        16-bit service UUID (BTHome, FastPair, Eddystone, ENS,
+        MiBeacon, SwitchBot, Battery, EnvSense, HID, HeartRate,
+        Cycling, DevInfo).
+
+        Costs ~1 KB BSS (4 bytes × 64 rows + label tables in flash)
+        plus a small AD walk per advertisement. Disable for a slim
+        build that keeps just MAC / name / RSSI / counts in the
+        device table; the address-type column derived client-side
+        from the MAC stays either way.
+
+endif # NBP_BLE
+
+config NBP_WEB_CONSOLE
+    bool "Web UI: device log mirror (/log + on-page console)"
+    default y
+    help
+        Tee esp_log_set_vprintf into a ring buffer and stream it to
+        the dashboard. /log?since=N returns new bytes via chunked
+        encoding; the page polls every 500 ms and renders ANSI
+        colors via ansi_up. UART/JTAG output is unaffected — this
+        is purely a copy.
+
+        Ring sizes itself from CONFIG_BT_NIMBLE_LOG_LEVEL_DEBUG:
+        64 KiB with NimBLE DEBUG on, 8 KiB otherwise. The 64 KiB
+        path is the dashboard's largest BSS consumer; disable here
+        if you don't need the web console (UART logging stays).
 
 endmenu

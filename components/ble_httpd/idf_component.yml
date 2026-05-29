@@ -1,6 +1,11 @@
 ## Pulls NimBLE-CPP headers; same dependency line as ble_backend so the
-## managed-component manager resolves to the same version.
+## managed-component manager resolves to the same version. Gated on
+## CONFIG_BT_NIMBLE_ENABLED (driven by NBP_BLE) so a BLE-free build doesn't
+## try to compile NimBLE-CPP. NBP_BLE_HTTPD itself requires NBP_BLE.
 dependencies:
-  h2zero/esp-nimble-cpp: "^2.5.0"
+  h2zero/esp-nimble-cpp:
+    version: "^2.5.0"
+    rules:
+      - if: "$CONFIG{NBP_BLE} == True"
   idf:
     version: ">=5.1"

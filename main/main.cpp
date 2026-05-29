@@ -166,12 +166,15 @@ extern "C" void app_main() {
   // Piggyback the stats UI on the OTA httpd so we don't burn an extra
   // LWIP socket budget on a second listener.
   api_server::stats::register_endpoints(ota::handle());
+#if CONFIG_NBP_BLE
   // Wire the ble_backend → api_server publish hook before either starts
   // accepting traffic. Order between start() calls doesn't matter as
   // long as install() happens before any adv callback fires.
   ble_backend::publish::install(&api_server::send_async,
                                 &api_server::has_active_client);
 #endif
+#endif
+#if CONFIG_NBP_BLE
   ble_backend::start();
 
   // NimBLE host is up, NimBLEDevice::getAdvertising() returns a valid
@@ -184,6 +187,7 @@ extern "C" void app_main() {
   // singleton exists and before clone's supervisor task could call
   // start_advertising, so a stored "off" gates the very first adv start.
   api_server::stats::apply_adv_interval_from_nvs();
+#endif  // CONFIG_NBP_BLE
 
 #if CONFIG_NBP_WIFI
   api_server::start();
@@ -271,10 +275,12 @@ extern "C" void app_main() {
   // chip-default power before being potentially throttled down.
   api_server::stats::apply_tx_power_from_nvs();
 
+#if CONFIG_NBP_BLE
   // Scanner is running with proxy:: defaults; reapply any persisted
   // window/interval override now (uses scanner::set_duty which is a
   // no-op until init() has been called by ble_backend::start).
   api_server::stats::apply_scan_from_nvs();
+#endif
 
 #if CONFIG_NBP_BLE_AUTO_OFF
   // Radio auto-quiesce. Wired last so every subsystem the supervisor

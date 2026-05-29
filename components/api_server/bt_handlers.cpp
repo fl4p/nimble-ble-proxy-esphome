@@ -1,9 +1,12 @@
 #include "bt_handlers.h"
 
+#include "proxy_config.h"  // CONFIG_NBP_BLE (via sdkconfig.h)
+
+#if CONFIG_NBP_BLE
+
 #include "api_proto.h"
 #include "api_server.h"
 #include "ble_backend.h"
-#include "proxy_config.h"
 #include "stats.h"
 
 // ble_backend internal modules — bt_handlers is the bridge layer so
@@ -505,3 +508,23 @@ void on_last_client_disconnect() {
 }
 
 }  // namespace api_server::bt_handlers
+
+#else  // !CONFIG_NBP_BLE
+
+// BLE disabled (NBP_BLE off): the BluetoothProxy protocol and the whole
+// ble_backend are absent from this build. Provide trivial stubs so
+// api_server's dispatch loop still links. handle() reports "not
+// recognized", so any Bluetooth* message HA sends is silently ignored
+// (the device advertises 0 bluetooth_proxy_feature_flags anyway, so a
+// well-behaved HA never sends them); the teardown hooks are no-ops.
+namespace api_server::bt_handlers {
+
+bool handle(uint16_t, const uint8_t *, size_t, const Context &) {
+  return false;
+}
+void on_client_disconnect(ClientSubs &) {}
+void on_last_client_disconnect() {}
+
+}  // namespace api_server::bt_handlers
+
+#endif  // CONFIG_NBP_BLE

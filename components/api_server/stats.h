@@ -80,8 +80,10 @@ const char *handle_cpufreq_set(const char *query);
 // via ble_backend::set_adv_interval_ms / set_advertising_enabled. The
 // scanner and raw-advert forwarding to HA are unaffected by the off state
 // — it only gates the device's own broadcaster role.
+#if CONFIG_NBP_BLE
 size_t build_advitvl_json(char *buf, size_t cap);
 const char *handle_advitvl_set(const char *query);
+#endif
 
 // WiFi power-save listen-interval. GET returns {"li":N}; POST takes
 // "li=N" (0..10). 0 = PS_NONE, >0 = PS_MAX_MODEM with that many DTIM
@@ -130,6 +132,7 @@ bool handle_trace_set(const char *query);
 // esp_timer so the caller can finish sending its response first.
 void schedule_reboot();
 
+#if CONFIG_NBP_BLE
 // Scan duty cycle: GET returns {"window":W,"interval":I}; POST takes
 // "window=N&interval=N" (ms each). window <= interval, both 20..10000.
 size_t build_scan_json(char *buf, size_t cap);
@@ -139,6 +142,7 @@ const char *handle_scan_set(const char *query);
 // and apply to the live scanner. Call AFTER ble_backend::start so
 // scanner::init has set up the NimBLEScan object.
 void apply_scan_from_nvs();
+#endif  // CONFIG_NBP_BLE
 
 #if CONFIG_NBP_WEB_CONSOLE
 // Install the esp_log vprintf hook so device logs mirror into an
@@ -166,12 +170,14 @@ void apply_tx_power_from_nvs();
 // frequency from the start. Default if no NVS entry: 240 MHz.
 void apply_cpu_freq_from_nvs();
 
+#if CONFIG_NBP_BLE
 // Read persisted advertising interval from NVS and apply it via
 // ble_backend::set_adv_interval_ms. Must run AFTER ble_backend::start
 // so NimBLEDevice::init has created the singleton; runs before the
 // first g_adv->start() in ble_httpd::activate or clone start_advertising
 // so the configured interval lands in the first HCI window.
 void apply_adv_interval_from_nvs();
+#endif  // CONFIG_NBP_BLE
 
 // Read persisted hostname from NVS into proxy::g_hostname. Must run
 // AFTER nvs_flash_init and BEFORE any consumer (wifi_sta, mdns_announce,

@@ -1,6 +1,12 @@
 dependencies:
   # bt_handlers calls NimBLE directly to walk services/chars/descriptors;
   # ble_backend re-exports it transitively only for public headers, not
-  # for internal includes, so list it here too.
-  h2zero/esp-nimble-cpp: "^2.5.0"
+  # for internal includes, so list it here too. Only pulled in when BLE is
+  # compiled (NBP_BLE → CONFIG_BT_NIMBLE_ENABLED) — a BLE-free build must
+  # NOT build the NimBLE-CPP sources, which #include NimBLE's syscfg.h that
+  # exists on the include path only when the bt/nimble stack is enabled.
+  h2zero/esp-nimble-cpp:
+    version: "^2.5.0"
+    rules:
+      - if: "$CONFIG{NBP_BLE} == True"
   idf: ">=5.1"

@@ -74,7 +74,13 @@ Result device_info_response(uint8_t *buf, size_t cap) {
                 proxy::MANUFACTURER);
   std::snprintf(resp.friendly_name, sizeof(resp.friendly_name), "%s",
                 proxy::FRIENDLY_NAME);
+#if CONFIG_NBP_BLE
   resp.bluetooth_proxy_feature_flags = proxy::BT_PROXY_FEATURE_FLAGS;
+#else
+  // BLE compiled out — don't advertise BluetoothProxy capability so HA
+  // doesn't try to drive a Bluetooth* protocol this build can't serve.
+  resp.bluetooth_proxy_feature_flags = 0;
+#endif
   size_t n = encode_into(buf, cap, proxyapi_DeviceInfoResponse_fields, &resp);
   return {true, proxyapi::MSG_DEVICE_INFO_RESPONSE, n, false};
 }

@@ -1,7 +1,13 @@
 ## NimBLE C++ wrapper. Pulled in via the ESP-IDF Component Manager on first
 ## `idf.py reconfigure`. Pin to a 2.5.x release line — the user verified
 ## raw-adv callbacks and CCCD subscription work cleanly in this range.
+## Gated on CONFIG_BT_NIMBLE_ENABLED (driven by the NBP_BLE master gate):
+## a BLE-free build (NBP_BLE=n) compiles no ble_backend sources and must
+## not build NimBLE-CPP, whose headers need NimBLE's syscfg.h.
 dependencies:
-  h2zero/esp-nimble-cpp: "^2.5.0"
+  h2zero/esp-nimble-cpp:
+    version: "^2.5.0"
+    rules:
+      - if: "$CONFIG{NBP_BLE} == True"
   idf:
     version: ">=5.1"

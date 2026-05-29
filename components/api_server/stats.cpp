@@ -7,7 +7,9 @@
 #if SOC_TEMP_SENSOR_SUPPORTED
 #include "driver/temperature_sensor.h"
 #endif
-#include "esp_bt.h"
+#if CONFIG_NBP_BLE
+#include "esp_bt.h"  // esp_ble_tx_power_set / esp_power_level_t (BT stack)
+#endif
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_sleep.h"
@@ -356,6 +358,7 @@ esp_err_t apply_cpu_freq_mhz(int mhz, bool light_sleep) {
   return err;
 }
 
+#if CONFIG_NBP_BLE
 esp_power_level_t dbm_to_ble_lvl(int dbm) {
   if (dbm <= -12) return ESP_PWR_LVL_N12;
   if (dbm <= -9) return ESP_PWR_LVL_N9;
@@ -370,6 +373,7 @@ esp_power_level_t dbm_to_ble_lvl(int dbm) {
 esp_err_t apply_ble_tx_dbm(int dbm) {
   return esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, dbm_to_ble_lvl(dbm));
 }
+#endif  // CONFIG_NBP_BLE
 
 esp_err_t apply_wifi_tx_dbm(int dbm) {
 #if CONFIG_NBP_WIFI
@@ -460,6 +464,7 @@ esp_err_t wifips_post(httpd_req_t *req) {
   return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
 
+#if CONFIG_NBP_BLE
 esp_err_t advitvl_get(httpd_req_t *req) {
   char buf[32];
   size_t n = build_advitvl_json(buf, sizeof(buf));
@@ -477,6 +482,7 @@ esp_err_t advitvl_post(httpd_req_t *req) {
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
+#endif  // CONFIG_NBP_BLE
 
 esp_err_t hostname_get(httpd_req_t *req) {
   // 2 * (HOSTNAME_MAX+1) + JSON scaffolding fits comfortably in 96 B.
@@ -624,6 +630,7 @@ esp_err_t stats_get(httpd_req_t *req) {
   return httpd_resp_send(req, buf, n);
 }
 
+#if CONFIG_NBP_BLE
 esp_err_t scan_get(httpd_req_t *req) {
   char buf[48];
   size_t n = build_scan_json(buf, sizeof(buf));
@@ -641,6 +648,7 @@ esp_err_t scan_post(httpd_req_t *req) {
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
+#endif  // CONFIG_NBP_BLE
 
 #if CONFIG_NBP_DEVICES_PANEL
 esp_err_t devices_get(httpd_req_t *req) {
@@ -690,8 +698,20 @@ void set_clone_stats_provider(CloneStatsProvider fn) {
 }
 
 size_t build_stats_json(char *buf, size_t cap) {
+  // BLE-sourced counters. When NBP_BLE is off the backend (scanner +
+  // GATT pool) isn't compiled, so these read as zero — the dashboard
+  // chart just shows flat BLE lines.
+#if CONFIG_NBP_BLE
   unsigned in_use = proxy::MAX_CONNECTIONS -
                     ble_backend::connection::free_slots();
+  unsigned long adverts = ble_backend::scanner::adv_count();
+  unsigned long notify_rx = ble_backend::notify_rx_total();
+  unsigned notify_handle = ble_backend::last_notify_handle();
+#else
+  unsigned in_use = 0;
+  unsigned long adverts = 0, notify_rx = 0;
+  unsigned notify_handle = 0;
+#endif
   // Fold the clone GATT image's activity into the same counters so the
   // dashboard chart reflects both transports. Provider is null until
   // main installs one (under CONFIG_NBP_CLONE).
@@ -713,11 +733,11 @@ size_t build_stats_json(char *buf, size_t cap) {
           g_writes.load(std::memory_order_relaxed) + cc.writes),
       static_cast<unsigned long>(
           g_notifies.load(std::memory_order_relaxed) + cc.notifies),
-      static_cast<unsigned long>(ble_backend::scanner::adv_count()),
+      adverts,
       in_use,
       static_cast<unsigned long>(esp_get_free_heap_size()),
-      static_cast<unsigned long>(ble_backend::notify_rx_total()),
-      ble_backend::last_notify_handle(),
+      notify_rx,
+      notify_handle,
       cpu0, cpu1, static_cast<double>(temp_c));
   if (n < 0) return 0;
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
@@ -824,6 +844,7 @@ const char *handle_txpower_set(const char *query) {
       }
     }
   }
+#if CONFIG_NBP_BLE
   if (httpd_query_key_value(query, "ble", val, sizeof(val)) == ESP_OK) {
     int dbm = std::atoi(val);
     if (dbm < -12 || dbm > 9) return "ble -12..9";
@@ -836,6 +857,7 @@ const char *handle_txpower_set(const char *query) {
       changed = true;
     }
   }
+#endif  // CONFIG_NBP_BLE
   if (!changed) return "no params or no change";
   return nullptr;
 }
@@ -934,6 +956,7 @@ const char *handle_cpufreq_set(const char *query) {
   return nullptr;
 }
 
+#if CONFIG_NBP_BLE
 // Peripheral advertising interval (ms). Stored as uint16 under NVS key
 // "adv_itvl". 0 means "use NimBLE host default" (~30..60 ms range for
 // connectable undirected adv); any other value clamps to the BLE-spec
@@ -1001,6 +1024,7 @@ const char *handle_advitvl_set(const char *query) {
   }
   return nullptr;
 }
+#endif  // CONFIG_NBP_BLE
 
 // WiFi power-save listen interval. Stored as int8 0..10 (0 = PS_NONE,
 // >0 = PS_MAX_MODEM with that many DTIM beacons between wake-ups).
@@ -1158,20 +1182,25 @@ bool handle_trace_set(const char *query) {
     for (const char *tag : NIMBLE_SCAN_TAGS) esp_log_level_set(tag, ESP_LOG_ERROR);
     for (const char *tag : NIMBLE_NOISY_TAGS) esp_log_level_set(tag, ESP_LOG_DEBUG);
     for (const char *tag : NIMBLE_CORE_TAGS) esp_log_level_set(tag, ESP_LOG_DEBUG);
+#if CONFIG_NBP_BLE
     ble_backend::scanner::pause();
+#endif
 #if CONFIG_NBP_WEB_CONSOLE
     log_ring_reset();
 #endif
     ESP_LOGI(TAG, "trace ON: scan paused, core=DEBUG, scan-tags=ERROR");
   } else {
     apply_level(g_current_nimble_level);
+#if CONFIG_NBP_BLE
     ble_backend::scanner::resume();
+#endif
     ESP_LOGI(TAG, "trace OFF: scan resumed, levels restored to %d",
              static_cast<int>(g_current_nimble_level));
   }
   return on;
 }
 
+#if CONFIG_NBP_BLE
 size_t build_scan_json(char *buf, size_t cap) {
   uint16_t window = 0, interval = 0;
   ble_backend::scanner::get_duty(&window, &interval);
@@ -1255,6 +1284,7 @@ void apply_scan_from_nvs() {
     ble_backend::scanner::set_active(active_v != 0);
   }
 }
+#endif  // CONFIG_NBP_BLE
 
 void schedule_reboot() {
   // One-shot esp_timer so the caller can finish sending its response
@@ -1274,6 +1304,7 @@ void schedule_reboot() {
   esp_timer_start_once(timer, 500000);
 }
 
+#if CONFIG_NBP_BLE
 void apply_adv_interval_from_nvs() {
   uint16_t stored = 0;
   nvs_handle_t h;
@@ -1297,6 +1328,7 @@ void apply_adv_interval_from_nvs() {
              static_cast<unsigned>(stored));
   }
 }
+#endif  // CONFIG_NBP_BLE
 
 void apply_hostname_from_nvs() {
   nvs_handle_t h;
@@ -1345,7 +1377,9 @@ void apply_tx_power_from_nvs() {
   if (nvs_read_i8(NVS_WIFI_TX_KEY, &v) == ESP_OK) g_wifi_tx_dbm = v;
   if (nvs_read_i8(NVS_BLE_TX_KEY, &v) == ESP_OK) g_ble_tx_dbm = v;
   apply_wifi_tx_dbm(g_wifi_tx_dbm);
+#if CONFIG_NBP_BLE
   apply_ble_tx_dbm(g_ble_tx_dbm);
+#endif
   ESP_LOGI(TAG, "TX power applied: wifi=%d dBm, ble=%d dBm",
            static_cast<int>(g_wifi_tx_dbm),
            static_cast<int>(g_ble_tx_dbm));
@@ -1461,6 +1495,7 @@ void register_endpoints(httpd_handle_t srv) {
                            .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &cpufreq_g);
   httpd_register_uri_handler(srv, &cpufreq_p);
+#if CONFIG_NBP_BLE
   httpd_uri_t advitvl_g = {.uri = "/advitvl",
                            .method = HTTP_GET,
                            .handler = &advitvl_get,
@@ -1471,6 +1506,7 @@ void register_endpoints(httpd_handle_t srv) {
                            .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &advitvl_g);
   httpd_register_uri_handler(srv, &advitvl_p);
+#endif  // CONFIG_NBP_BLE
   httpd_uri_t wifips_g = {.uri = "/wifips",
                           .method = HTTP_GET,
                           .handler = &wifips_get,
@@ -1491,6 +1527,7 @@ void register_endpoints(httpd_handle_t srv) {
                             .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &hostname_g);
   httpd_register_uri_handler(srv, &hostname_p);
+#if CONFIG_NBP_BLE
   httpd_uri_t scan_g = {.uri = "/scan",
                         .method = HTTP_GET,
                         .handler = &scan_get,
@@ -1501,6 +1538,7 @@ void register_endpoints(httpd_handle_t srv) {
                         .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &scan_g);
   httpd_register_uri_handler(srv, &scan_p);
+#endif  // CONFIG_NBP_BLE
 #if CONFIG_NBP_DEVICES_PANEL
   httpd_uri_t devices = {.uri = "/devices",
                          .method = HTTP_GET,

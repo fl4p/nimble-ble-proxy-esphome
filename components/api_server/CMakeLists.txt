@@ -67,3 +67,15 @@ if(EXISTS "${_nimble_hdr}")
         message(STATUS "patched setNotifyCallback into ${_nimble_hdr}")
     endif()
 endif()
+
+# Link NimBLE-CPP for bt_handlers (which #includes NimBLEDevice.h under
+# CONFIG_NBP_BLE). The esp-nimble-cpp dependency is optional (gated on
+# $CONFIG{NBP_BLE}) and the component manager doesn't auto-inject optional
+# deps into REQUIRES, so wire it explicitly — same pattern as ble_backend /
+# ble_clone / ble_httpd. A BLE-free build omits it (bt_handlers is a stub).
+if(CONFIG_NBP_BLE)
+    idf_component_get_property(nimble_lib h2zero__esp-nimble-cpp COMPONENT_LIB)
+    if(nimble_lib)
+        target_link_libraries(${COMPONENT_LIB} PUBLIC ${nimble_lib})
+    endif()
+endif()
