@@ -1,0 +1,37 @@
+name: build
+
+# Guards the NBP_BLE master gate (main/Kconfig.projbuild) from bit-rotting:
+# builds both the default BLE firmware and the BLE-free variant on the
+# pinned ESP-IDF release, so an edit that breaks either config fails CI.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ble-on          # default: NimBLE scanner/proxy + dashboard
+            defaults: sdkconfig.defaults
+          - name: ble-off         # NBP_BLE=n: WiFi/NAT/dashboard only, no NimBLE
+            defaults: sdkconfig.defaults;.github/build-no-ble.defaults
+    name: build (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v4
+
+      # wifi_creds.h is gitignored (real secrets) and the build #errors
+      # without it unless NBP_AP_FALLBACK is on. Seed the placeholder so CI
+      # exercises the default fixed-credential STA path.
+      - name: Seed placeholder WiFi credentials
+        run: cp include/wifi_creds.h.example include/wifi_creds.h
+
+      - name: Build (${{ matrix.name }})
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: release-v5.5
+          target: esp32s3
+          command: idf.py -DSDKCONFIG_DEFAULTS="${{ matrix.defaults }}" build

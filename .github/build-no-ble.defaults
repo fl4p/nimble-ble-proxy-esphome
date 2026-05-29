@@ -1,0 +1,7 @@
+# CI-only sdkconfig overlay: builds the BLE-free variant (NBP_BLE master
+# gate off). Layered after sdkconfig.defaults via SDKCONFIG_DEFAULTS in
+# .github/workflows/build.yml. On a fresh CI checkout there is no existing
+# sdkconfig, so NBP_BLE=n evaluates cleanly: nothing selects BT_ENABLED, the
+# whole NimBLE stack drops out, and the esp-nimble-cpp dependency is skipped.
+# (Named outside the `sdkconfig.*` gitignore pattern on purpose.)
+CONFIG_NBP_BLE=n
