@@ -389,6 +389,19 @@ Effective rate at the controller is the configured interval plus a
 spec-mandated 0..10 ms random delay per adv event; the dropdown labels
 reflect the rough midpoint.
 
+**Note — auto-suspend (`CONFIG_NBP_BLE_AUTO_OFF`):** `/advitvl` only sets
+*user intent* (the master on/off + interval). When the BLE auto-off
+supervisor is compiled in, advertising actually broadcasts only when the
+user switch is on **AND** the supervisor hasn't auto-suspended it. The
+supervisor suspends advertising while WiFi (STA) is connected and no
+central/clone needs the peripheral, and restores it the moment WiFi drops
+or a central connects — see the "BLE serves two independent roles" note in
+`CLAUDE.md`. So the dashboard's "advertising on" state reflects intent, not
+necessarily what's on air right now; `ble_backend::advertising_enabled()`
+reports the *combined* state, and the supervisor flips the suspend half via
+`set_advertising_auto_suspend()`. The two compose and don't fight: re-enabling
+either half resumes the same payload without a clone reconnect.
+
 ### `GET /wifips` &nbsp;·&nbsp; `POST /wifips?li=<0..10>`
 
 Get / set the WiFi STA power-save listen interval (DTIM beacons between
