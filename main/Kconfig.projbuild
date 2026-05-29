@@ -242,6 +242,30 @@ config NBP_DEVICES_PANEL
         Disable for a slimmer build that keeps the rate chart but
         drops the per-device view.
 
+config NBP_BTHOME
+    bool "Web UI: decode BTHome v2 service-data adverts (/devices column)"
+    depends on NBP_DEVICES_PANEL
+    default y
+    help
+        Decode BTHome v2 (https://bthome.io) service-data
+        advertisements (16-bit UUID 0xFCD2) inline in the scan
+        callback and surface the most recent reading (temperature,
+        humidity, battery, voltage, illuminance, motion, button,
+        power, CO2, packet id) as a "BTHome" column in the existing
+        /devices table on the dashboard.
+
+        Encrypted BTHome frames are detected and marked but not
+        decrypted — per-device key configuration is not yet
+        implemented. Unrecognized object IDs abort the rest of that
+        frame (BTHome has no separators) but preserve any fields
+        already decoded before the unknown ID.
+
+        Costs ~1.5 KB BSS (32-entry cache + scratch) plus one
+        optional mutex op per advert (only when 0xFCD2 service data
+        is present). The raw-advertisement forwarding path to Home
+        Assistant is unchanged — this is a parallel local-display
+        path.
+
 config NBP_DEV_DETAILS
     bool "Web UI: enrich /devices with appearance, connectable, vendor tag"
     depends on NBP_DEVICES_PANEL
@@ -381,29 +405,5 @@ config NBP_SMP
         encryption will return an authentication-required error on
         their characteristics; reads/writes/notifies on non-encrypted
         chars still work normally.
-
-config NBP_BTHOME
-    bool "Web UI: decode BTHome v2 service-data adverts (/devices column)"
-    depends on NBP_DEVICES_PANEL
-    default y
-    help
-        Decode BTHome v2 (https://bthome.io) service-data
-        advertisements (16-bit UUID 0xFCD2) inline in the scan
-        callback and surface the most recent reading (temperature,
-        humidity, battery, voltage, illuminance, motion, button,
-        power, CO2, packet id) as a "BTHome" column in the existing
-        /devices table on the dashboard.
-
-        Encrypted BTHome frames are detected and marked but not
-        decrypted — per-device key configuration is not yet
-        implemented. Unrecognized object IDs abort the rest of that
-        frame (BTHome has no separators) but preserve any fields
-        already decoded before the unknown ID.
-
-        Costs ~1.5 KB BSS (32-entry cache + scratch) plus one
-        optional mutex op per advert (only when 0xFCD2 service data
-        is present). The raw-advertisement forwarding path to Home
-        Assistant is unchanged — this is a parallel local-display
-        path.
 
 endmenu
