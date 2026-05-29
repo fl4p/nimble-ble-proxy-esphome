@@ -10,6 +10,7 @@
 #if CONFIG_NBP_BLE
 #include "esp_bt.h"  // esp_ble_tx_power_set / esp_power_level_t (BT stack)
 #endif
+#include "esp_app_desc.h"  // esp_app_get_description (project/version/build)
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_sleep.h"
@@ -492,6 +493,13 @@ esp_err_t hostname_get(httpd_req_t *req) {
   return httpd_resp_send(req, buf, n);
 }
 
+esp_err_t appinfo_get(httpd_req_t *req) {
+  char buf[256];
+  size_t n = build_appinfo_json(buf, sizeof(buf));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, n);
+}
+
 esp_err_t hostname_post(httpd_req_t *req) {
   // Query buffer sized for "val=" + max hostname.
   char query[proxy::HOSTNAME_MAX + 8];
@@ -902,6 +910,27 @@ size_t build_hostname_json(char *buf, size_t cap) {
   // escape anyway so the response is always valid JSON.
   int n = std::snprintf(buf, cap, "{\"hostname\":\"%s\",\"default\":\"%s\"}",
                         proxy::hostname(), proxy::DEFAULT_HOSTNAME);
+  if (n < 0) return 0;
+  return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+
+size_t build_appinfo_json(char *buf, size_t cap) {
+  // Firmware identity straight from the running image's app descriptor —
+  // the same project/version/compile-time the boot log prints. Surfacing
+  // it in the browser is the "am I on the right board / is this a stale
+  // build?" check without a serial console (see CLAUDE.md multi-board note).
+  const esp_app_desc_t *d = esp_app_get_description();
+  // First 8 bytes of the ELF SHA256, matching the boot-log identifier —
+  // enough to tell two builds apart at a glance.
+  char sha[17];
+  for (int i = 0; i < 8; ++i)
+    std::snprintf(sha + i * 2, 3, "%02x", d->app_elf_sha256[i]);
+  int n = std::snprintf(
+      buf, cap,
+      "{\"project\":\"%s\",\"version\":\"%s\",\"date\":\"%s\",\"time\":\"%s\","
+      "\"idf\":\"%s\",\"secure\":%lu,\"elf_sha256\":\"%s\"}",
+      d->project_name, d->version, d->date, d->time, d->idf_ver,
+      static_cast<unsigned long>(d->secure_version), sha);
   if (n < 0) return 0;
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
@@ -1535,6 +1564,11 @@ void register_endpoints(httpd_handle_t srv) {
                             .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &hostname_g);
   httpd_register_uri_handler(srv, &hostname_p);
+  httpd_uri_t appinfo_g = {.uri = "/appinfo",
+                           .method = HTTP_GET,
+                           .handler = &appinfo_get,
+                           .user_ctx = nullptr};
+  httpd_register_uri_handler(srv, &appinfo_g);
 #if CONFIG_NBP_BLE
   httpd_uri_t scan_g = {.uri = "/scan",
                         .method = HTTP_GET,

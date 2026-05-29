@@ -119,6 +119,7 @@ table#portmaps button.del{background:#1a1a1a;border:1px solid #7f1d1d;
   color:#fca5a5;font:inherit;padding:.1em .5em;border-radius:3px;cursor:pointer}
 table#portmaps button.del:hover{background:#3b0a0a}
 .hidden{display:none}
+#fwinfo{margin-top:.5em;opacity:.65;font-family:ui-monospace,monospace;font-size:.85em;word-break:break-word}
 #unsupported{background:#3b0a0a;color:#fca5a5;padding:1em;border-radius:6px;
   border:1px solid #7f1d1d;margin-bottom:1em}
 @media(max-width:640px){body{padding:.5em;font-size:13px}
@@ -284,7 +285,8 @@ table#portmaps button.del:hover{background:#3b0a0a}
 </div>
 
 <footer>nimble-ble-proxy dashboard &mdash; HTTP or Web Bluetooth, same
-HTML. OTA: <code>curl --data-binary @firmware.bin http://<span id=otahost>nimble-proxy.local</span>/update</code></footer>
+HTML. OTA: <code>curl --data-binary @firmware.bin http://<span id=otahost>nimble-proxy.local</span>/update</code>
+<div id=fwinfo title="From esp_app_get_description() on the running image"></div></footer>
 <script>try{document.getElementById('otahost').textContent=location.host||'nimble-proxy.local';}catch(e){}</script>
 
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
@@ -943,6 +945,14 @@ async function loadInitialValues() {
     hn.value = h.hostname;
     hn.dataset.saved = h.hostname;
   } catch (e) { /* dropdowns just stay at defaults */ }
+  // Firmware identity (esp_app_get_description). Static, so fetch once and
+  // render into the footer. Own try — older firmware lacks /appinfo (404).
+  try {
+    const fw = await apiJson('GET /appinfo');
+    const el = document.getElementById('fwinfo');
+    el.textContent = `${fw.project} v${fw.version} · built ${fw.date} ${fw.time}` +
+                     ` · IDF ${fw.idf} · ${fw.elf_sha256}`;
+  } catch (e) { /* /appinfo absent on older builds */ }
 }
 
 // ---- control wiring ---------------------------------------------------

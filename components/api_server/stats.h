@@ -109,6 +109,12 @@ void apply_wifi_ps_from_nvs();
 // or end with '-' or '.'. These mirror RFC 1123 hostname conventions so
 // the value is usable as the mDNS local name (`<name>.local`).
 size_t build_hostname_json(char *buf, size_t cap);
+
+// Firmware identity from esp_app_get_description(): project name, version,
+// build date/time, IDF version, secure-version, and the short ELF SHA256.
+// GET-only (/appinfo) — static for the life of the running image. Lets the
+// dashboard show "which build/board am I talking to" without serial.
+size_t build_appinfo_json(char *buf, size_t cap);
 const char *handle_hostname_set(const char *query);
 
 #ifdef CONFIG_NBP_SMP
