@@ -191,6 +191,42 @@ config NBP_BLE_HTTPD
         one of them gets advertised at a time. A real coordination
         layer can be added later.
 
+config NBP_BLE_AUTO_OFF
+    bool "Auto-quiesce the BLE radio when nothing needs it"
+    default n
+    help
+        When on, a small supervisor task watches who actually needs the
+        radio and quiesces it when idle, in two independent tiers:
+
+          - Central role (the continuous, duty-cycled scan — the dominant
+            power draw): paused whenever NO ESPHome API client is
+            connected AND no GATT links are open AND BLE clone is
+            inactive. Resumed instantly when any of those reappears.
+
+          - Peripheral role (advertising the ble_httpd dashboard / clone
+            mirror): suspended only when WiFi (STA) is connected AND no
+            central is connected to us AND clone is inactive. Kept ON
+            whenever WiFi is down, because then BLE is the only path to
+            the dashboard (see NBP_BLE_HTTPD).
+
+        When both tiers are idle and no links exist, the controller has
+        no scan/adv/connection activity and drops to its lowest idle
+        power without a full deinit — so the cloned/ble_httpd GATT DB
+        (one-shot in NimBLE) survives and the radio comes straight back.
+
+        Transitions to "needed" are immediate; transitions to "idle" wait
+        NBP_BLE_AUTO_OFF_IDLE_SECS to avoid churn on brief HA/WiFi blips.
+
+config NBP_BLE_AUTO_OFF_IDLE_SECS
+    int "Auto-off: idle grace period before quiescing (seconds)"
+    depends on NBP_BLE_AUTO_OFF
+    default 30
+    help
+        How long a role must stay continuously idle before it is
+        quiesced. Guards against toggling the radio on every HA
+        reconnect or transient WiFi drop. Re-activation is always
+        immediate regardless of this value.
+
 config NBP_DEVICES_PANEL
     bool "Web UI: live device table (/devices + dashboard table)"
     default y

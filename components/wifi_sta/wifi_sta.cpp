@@ -33,6 +33,7 @@
 #include "esp_http_server.h"
 #endif
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 
@@ -42,6 +43,11 @@ namespace {
 
 constexpr const char *TAG = "wifi";
 constexpr int BIT_GOT_IP = BIT0;
+
+// Live STA connectivity, tracked off the WiFi/IP events. Distinct from
+// BIT_GOT_IP (which latches once at first IP for the boot wait and is
+// never cleared on disconnect). Read via is_connected().
+std::atomic<bool> g_sta_connected{false};
 
 // Mirrored from api_server/stats.cpp — both ends read/write the same
 // key. Kept duplicated here to avoid pulling the whole api_server
@@ -98,6 +104,7 @@ void on_wifi_event(void * /*arg*/, esp_event_base_t base, int32_t id,
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
     esp_wifi_connect();
   } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+    g_sta_connected.store(false, std::memory_order_relaxed);
     ESP_LOGW(TAG, "disconnected; retrying");
     esp_wifi_connect();
   }
@@ -108,6 +115,7 @@ void on_ip_event(void * /*arg*/, esp_event_base_t base, int32_t id,
   if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
     auto *evt = static_cast<ip_event_got_ip_t *>(data);
     ESP_LOGI(TAG, "got IP " IPSTR, IP2STR(&evt->ip_info.ip));
+    g_sta_connected.store(true, std::memory_order_relaxed);
     xEventGroupSetBits(g_events, BIT_GOT_IP);
   }
 }
@@ -386,6 +394,10 @@ void start_and_wait_for_ip() {
 #else
   xEventGroupWaitBits(g_events, BIT_GOT_IP, pdFALSE, pdTRUE, portMAX_DELAY);
 #endif
+}
+
+bool is_connected() {
+  return g_sta_connected.load(std::memory_order_relaxed);
 }
 
 }  // namespace wifi_sta

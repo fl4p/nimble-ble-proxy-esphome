@@ -103,7 +103,7 @@ NimBLE singleton without a circular dep on `api_server`.
 
 ## Build profiles
 
-Four Kconfig switches under `nimble-ble-proxy` choose what gets compiled in:
+These Kconfig switches under `nimble-ble-proxy` choose what gets compiled in:
 
 | Kconfig | Default | What it adds |
 |---|---|---|
@@ -115,6 +115,7 @@ Four Kconfig switches under `nimble-ble-proxy` choose what gets compiled in:
 | `CONFIG_NBP_SMP` | `n` | Static-passkey pairing as central (paired upstream peripherals). Passkey is set via `POST /clone?passkey=N` |
 | `CONFIG_NBP_DEVICES_PANEL` | `y` | 64-entry devices-seen table + `/devices` + dashboard table |
 | `CONFIG_NBP_WEB_CONSOLE` | `y` | 64 KiB log ring + `/log` + on-page console |
+| `CONFIG_NBP_BLE_AUTO_OFF` | `n` | Supervisor task that quiesces the BLE radio when idle: pauses the central scan when no API client / GATT link / clone needs it, and suspends advertising when WiFi is up and no central/clone needs the peripheral (kept on when WiFi is down so the BLE dashboard stays reachable). Idle grace `CONFIG_NBP_BLE_AUTO_OFF_IDLE_SECS` (default 30 s); re-activation is immediate. |
 
 Two common profiles:
 

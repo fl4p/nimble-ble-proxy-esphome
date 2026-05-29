@@ -52,4 +52,36 @@ void set_adv_interval_ms(uint16_t ms);
 bool advertising_enabled();
 void set_advertising_enabled(bool on);
 
+// Auto-suspend gate for advertising, owned by the power supervisor and
+// orthogonal to the user master switch above. Advertising actually runs
+// only when (user-enabled AND NOT auto-suspended); advertising_enabled()
+// reports that combined state so every adv start path honors both. The
+// supervisor sets this true to silence the broadcaster role when WiFi is
+// up and no central/clone needs it, and false to restore it. NVS-free —
+// it tracks live conditions, not user intent.
+void set_advertising_auto_suspend(bool suspend);
+
+// Optional radio auto-quiesce supervisor (CONFIG_NBP_BLE_AUTO_OFF). Watches
+// who needs the radio and powers down the two BLE roles independently:
+//   - central scan: paused when no API client + no GATT links + no clone
+//   - peripheral adv: suspended when WiFi up + no central + no clone
+// Both come back instantly when needed; idle→off waits the configured
+// grace period. The predicates that touch other components (api_server,
+// wifi_sta, ble_clone) are injected by main to avoid link-time cycles,
+// mirroring publish::install.
+namespace power {
+
+struct Hooks {
+  bool (*api_client_connected)();  // any ESPHome API client connected
+  bool (*wifi_connected)();        // STA associated + has IP (false ⇒ keep adv up)
+  bool (*clone_active)();          // BLE clone enabled/running
+};
+
+// Spawn the supervisor task. Idempotent; second call is a no-op. Null
+// hook pointers are treated as "role needed" (conservative — never
+// quiesce on missing information).
+void init(const Hooks &hooks);
+
+}  // namespace power
+
 }  // namespace ble_backend

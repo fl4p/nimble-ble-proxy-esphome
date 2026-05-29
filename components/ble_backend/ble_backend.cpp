@@ -10,6 +10,12 @@
 
 #include <atomic>
 
+#if CONFIG_NBP_BLE_AUTO_OFF
+#include "NimBLEServer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
+
 namespace ble_backend {
 
 namespace {
@@ -30,8 +36,36 @@ std::atomic<uint16_t> g_adv_interval_units{0};
 
 // Master enable for the device's own peripheral advertising. Default on.
 // Flipped via the /advitvl config surface (ms=-1 = off) at boot and
-// runtime; every adv start path checks advertising_enabled() first.
+// runtime; this is user intent and the only half persisted to NVS.
 std::atomic<bool> g_adv_enabled{true};
+
+// Live auto-suspend gate, driven by the power supervisor (independent of
+// the user switch above). Advertising actually runs only when the user
+// enabled it AND it is not auto-suspended. Not persisted.
+std::atomic<bool> g_adv_auto_suspend{false};
+
+// Combined "may we advertise right now?" — what every adv start path and
+// advertising_enabled() consult.
+bool adv_allowed() {
+  return g_adv_enabled.load(std::memory_order_relaxed) &&
+         !g_adv_auto_suspend.load(std::memory_order_relaxed);
+}
+
+// Reconcile the radio to a freshly-computed allowed state. Stop adv when
+// it just became disallowed; (re)start it when it just became allowed.
+// Idempotent: a no-op when the allowed state didn't actually change or
+// the radio already matches. Safe to call before NimBLE init (adv null).
+void apply_adv_state(bool now_allowed, bool was_allowed) {
+  auto *adv = NimBLEDevice::getAdvertising();
+  if (adv == nullptr) return;
+  if (!now_allowed) {
+    if (adv->isAdvertising()) adv->stop();
+  } else if (!was_allowed) {
+    // NimBLE keeps the last advertising payload across stop(), so start()
+    // resumes the cloned/dashboard adv without a central reconnect.
+    if (!adv->isAdvertising()) adv->start();
+  }
+}
 
 struct ble_gap_event_listener g_evt_listener;
 
@@ -94,35 +128,33 @@ void set_adv_interval_ms(uint16_t ms) {
   // Hot-restart: if we're currently advertising, stop+start so the new
   // interval lands in the next HCI window. If not advertising, the
   // configured params will be used on the next start() call. Honor the
-  // master switch so an interval change can't resurrect advertising that
-  // the user disabled via POST /advitvl?ms=-1.
+  // master switch (and the auto-suspend gate) so an interval change can't
+  // resurrect advertising that the user disabled via POST /advitvl?ms=-1
+  // or that the power supervisor suspended.
   if (adv->isAdvertising()) {
     adv->stop();
-    if (g_adv_enabled.load(std::memory_order_relaxed)) adv->start();
+    if (adv_allowed()) adv->start();
   }
 }
 
 bool advertising_enabled() {
-  return g_adv_enabled.load(std::memory_order_relaxed);
+  // Reports the *combined* state (user switch AND not auto-suspended), so
+  // existing callers that gate adv start paths on this honor both.
+  return adv_allowed();
 }
 
 void set_advertising_enabled(bool on) {
-  bool was = g_adv_enabled.exchange(on, std::memory_order_relaxed);
-
   // Pre-init (NimBLEDevice::getAdvertising() is null until start()): the
   // flag is stored and the gated start paths honor it once the host is up.
-  auto *adv = NimBLEDevice::getAdvertising();
-  if (adv == nullptr) return;
+  bool was_allowed = adv_allowed();
+  g_adv_enabled.store(on, std::memory_order_relaxed);
+  apply_adv_state(adv_allowed(), was_allowed);
+}
 
-  if (!on) {
-    // Kill switch: drop any in-flight advertising immediately.
-    if (adv->isAdvertising()) adv->stop();
-  } else if (!was) {
-    // Re-enable after a disable. NimBLE keeps the last advertising payload
-    // across stop(), so start() resumes the cloned/dashboard adv without
-    // waiting for the next central reconnect to re-trigger it.
-    if (!adv->isAdvertising()) adv->start();
-  }
+void set_advertising_auto_suspend(bool suspend) {
+  bool was_allowed = adv_allowed();
+  g_adv_auto_suspend.store(suspend, std::memory_order_relaxed);
+  apply_adv_state(adv_allowed(), was_allowed);
 }
 
 void start() {
@@ -170,5 +202,102 @@ void on_api_client_disconnect() {
   scanner::stop_forwarding();
   connection::disconnect_all();
 }
+
+#if CONFIG_NBP_BLE_AUTO_OFF
+namespace power {
+
+namespace {
+
+constexpr const char *PTAG = "ble.pwr";
+constexpr TickType_t TICK = pdMS_TO_TICKS(2000);
+// Idle ticks (of TICK each) a role must stay unneeded before we quiesce
+// it. At least 1 so a 0-second config still debounces one tick.
+constexpr int IDLE_TICKS =
+    (CONFIG_NBP_BLE_AUTO_OFF_IDLE_SECS * 1000 / 2000) > 0
+        ? (CONFIG_NBP_BLE_AUTO_OFF_IDLE_SECS * 1000 / 2000)
+        : 1;
+
+Hooks g_hooks{};
+std::atomic<bool> g_running{false};
+
+// Null hook ⇒ assume the role is needed (never quiesce on missing info).
+bool call_or(bool (*fn)(), bool dflt) { return fn ? fn() : dflt; }
+
+// A central is connected to *us* (peripheral role) — ble_httpd dashboard
+// or a clone-mirror consumer. NimBLEServer is null until something
+// creates it (ble_httpd::start / clone), so no server ⇒ no centrals.
+bool peripheral_central_connected() {
+  auto *srv = NimBLEDevice::getServer();
+  return srv != nullptr && srv->getConnectedCount() > 0;
+}
+
+void supervisor_task(void *) {
+  int central_idle = 0;
+  int periph_idle = 0;
+  bool scan_quiesced = false;
+  bool adv_suspended = false;
+
+  for (;;) {
+    vTaskDelay(TICK);
+
+    const bool clone = call_or(g_hooks.clone_active, false);
+    const bool api = call_or(g_hooks.api_client_connected, true);
+    const bool wifi = call_or(g_hooks.wifi_connected, false);
+    const bool gatt_links =
+        connection::free_slots() < proxy::MAX_CONNECTIONS;
+
+    // Central scan (the dominant draw): needed by anyone consuming
+    // advertisements or holding/​seeking a GATT link.
+    const bool central_needed = api || gatt_links || clone;
+    // Peripheral advertising: needed whenever WiFi is down (BLE is then
+    // the only path to the dashboard), or a central is attached, or clone
+    // is broadcasting its mirror.
+    const bool peripheral_needed =
+        !wifi || peripheral_central_connected() || clone;
+
+    if (central_needed) {
+      central_idle = 0;
+      if (scan_quiesced) {
+        scanner::resume();
+        scan_quiesced = false;
+        ESP_LOGI(PTAG, "central needed → scan resumed");
+      }
+    } else if (!scan_quiesced && ++central_idle >= IDLE_TICKS) {
+      scanner::pause();
+      scan_quiesced = true;
+      ESP_LOGI(PTAG, "central idle %ds → scan paused",
+               CONFIG_NBP_BLE_AUTO_OFF_IDLE_SECS);
+    }
+
+    if (peripheral_needed) {
+      periph_idle = 0;
+      if (adv_suspended) {
+        set_advertising_auto_suspend(false);
+        adv_suspended = false;
+        ESP_LOGI(PTAG, "peripheral needed → advertising restored");
+      }
+    } else if (!adv_suspended && ++periph_idle >= IDLE_TICKS) {
+      set_advertising_auto_suspend(true);
+      adv_suspended = true;
+      ESP_LOGI(PTAG, "peripheral idle %ds (WiFi up) → advertising suspended",
+               CONFIG_NBP_BLE_AUTO_OFF_IDLE_SECS);
+    }
+  }
+}
+
+}  // namespace
+
+void init(const Hooks &hooks) {
+  if (g_running.exchange(true)) return;
+  g_hooks = hooks;
+  // 3 KB stack: the task only reads atomics + calls NimBLE getters and
+  // scanner start/stop. Priority 4 — below the NimBLE host task, above idle.
+  xTaskCreate(&supervisor_task, "ble_pwr", 3072, nullptr, 4, nullptr);
+  ESP_LOGI(PTAG, "BLE auto-off supervisor started (idle grace %ds)",
+           CONFIG_NBP_BLE_AUTO_OFF_IDLE_SECS);
+}
+
+}  // namespace power
+#endif  // CONFIG_NBP_BLE_AUTO_OFF
 
 }  // namespace ble_backend

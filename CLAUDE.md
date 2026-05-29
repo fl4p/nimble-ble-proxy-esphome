@@ -36,6 +36,39 @@
   app (it keeps running the old image). After flashing, reboot explicitly via
   `POST /reboot` (or an esptool reset) and re-check the compile time.
 
+## BLE serves two independent roles — don't conflate them when "turning BLE off"
+
+- **The web dashboard is reachable over BLE, not just WiFi.** `ble_httpd`
+  (`CONFIG_NBP_BLE_HTTPD`) exposes an HTTP-style request/response transport over
+  a NimBLE *peripheral* GATT service (advertises a dashboard UUID; `dispatch()`
+  serves `/advitvl`, clone config, web-console, etc.). It's the out-of-band admin
+  path **when WiFi is off/down** — i.e. BLE is a recovery channel, the same way a
+  provisioning radio is. (WiFi provisioning fallback itself is SoftAP+web, see
+  `NBP_AP_FALLBACK` in `wifi_sta.cpp` — a *separate* recovery path.)
+- So BLE has two separable roles: **central/observer** (scan adverts → forward to
+  HA; GATT client to proxied peers — gated by "API client subscribed" +
+  "cloning active") and **peripheral** (ble_httpd dashboard + ble_clone mirrors —
+  needed whenever WiFi is down or a BLE dashboard session is live).
+- **Therefore any "power BLE completely off" logic must require BOTH roles idle:**
+  no ESPHome API client AND cloning inactive AND WiFi connected AND no active/recent
+  ble_httpd GATT session. The WiFi-connected condition is correct *because* of
+  ble_httpd (WiFi up ⇒ dashboard reachable another way). A live ble_httpd dashboard
+  connection is NOT an "API client" — gate on it separately or you'll cut off the
+  Web Bluetooth UI. Prefer powering down just the (expensive, duty-cycled) central
+  scan while leaving the cheap connectable advert up; full controller deinit only
+  when the peripheral side is also idle. WiFi-down must reliably + quickly re-init
+  BLE and re-`activate()` advertising (debounce flaps) or the device is unreachable
+  during the very outage the BLE dashboard exists for.
+- **Implemented** as `CONFIG_NBP_BLE_AUTO_OFF` (default n): a supervisor task
+  in `ble_backend.cpp` (`power::init`, predicates injected from `main.cpp`)
+  pauses the central scan when no API client + no GATT links + clone inactive,
+  and auto-suspends advertising when WiFi is up + no central connected + clone
+  inactive (composed with the user `/advitvl` master switch via
+  `set_advertising_auto_suspend`). Idle→off waits `NBP_BLE_AUTO_OFF_IDLE_SECS`
+  (default 30); re-activation is immediate. It does *radio quiesce*, not full
+  `NimBLEDevice::deinit()` — deinit would tear down the one-shot clone/ble_httpd
+  GATT DB and is deliberately avoided. `wifi_sta::is_connected()` is the WiFi gate.
+
 ## WebSocket bridge (NBP_WS_PROXY)
 
 - Gated off by default. When on, `GET ws://<host>/api` tunnels the plaintext

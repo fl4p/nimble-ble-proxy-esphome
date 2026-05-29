@@ -276,6 +276,30 @@ extern "C" void app_main() {
   // no-op until init() has been called by ble_backend::start).
   api_server::stats::apply_scan_from_nvs();
 
+#if CONFIG_NBP_BLE_AUTO_OFF
+  // Radio auto-quiesce. Wired last so every subsystem the supervisor
+  // queries is already up. Predicates are injected here — main is the
+  // only edge that knows api_server + wifi_sta + ble_clone, keeping
+  // ble_backend free of link-time deps on them (publish::install pattern).
+  {
+    ble_backend::power::Hooks pwr_hooks{};
+#if CONFIG_NBP_WIFI
+    pwr_hooks.api_client_connected = &api_server::has_active_client;
+    pwr_hooks.wifi_connected = &wifi_sta::is_connected;
+#else
+    // No WiFi build: there is never an API client, and BLE is the only
+    // dashboard transport — so central may quiesce freely, but the
+    // peripheral (advertising) must always stay up (wifi_connected=false).
+    pwr_hooks.api_client_connected = [] { return false; };
+    pwr_hooks.wifi_connected = [] { return false; };
+#endif
+#if CONFIG_NBP_CLONE
+    pwr_hooks.clone_active = [] { return ble_clone::config::snapshot().enabled; };
+#endif
+    ble_backend::power::init(pwr_hooks);
+  }
+#endif
+
 #if CONFIG_NBP_CLONE_BOOT_GUARD
   // Arm the "boot stable" mark. If we survive CONFIG_NBP_CLONE_BOOT_GUARD_SECS
   // without a crash-class reset, the pending flag is cleared in NVS and
