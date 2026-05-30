@@ -61,6 +61,26 @@ void set_advertising_enabled(bool on);
 // it tracks live conditions, not user intent.
 void set_advertising_auto_suspend(bool suspend);
 
+// Full runtime BLE shutdown (the dashboard BLE-TX "off" choice). Tears down
+// the entire NimBLE stack — host + controller — via NimBLEDevice::deinit,
+// reclaiming the stack's heap and ending all BLE airtime. This is heavier and
+// more destructive than the auto-off radio quiesce: the ble_httpd recovery
+// dashboard and any clone mirror are torn down too, and (like WiFi-off) it is
+// runtime-only — there is no live re-enable, a reboot brings BLE back at its
+// configured settings. Idempotent. powered_off() reports the latched state
+// (used by api_server to surface "off" and to stay clear of the now-freed
+// scanner/connection singletons after shutdown).
+bool power_off();
+bool powered_off();
+
+// Reversible radio quiesce for an OTA download (vs the destructive power_off):
+// pauses the central scan and suspends advertising so coex can't starve the
+// firmware upload, holding that state against the auto-off supervisor. Restore
+// with resume_after_ota() — called only on OTA failure, since a successful OTA
+// reboots. Wired into ota::set_quiesce_hooks by main.
+void quiesce_for_ota();
+void resume_after_ota();
+
 // Optional radio auto-quiesce supervisor (CONFIG_NBP_BLE_AUTO_OFF). Watches
 // who needs the radio and powers down the two BLE roles independently:
 //   - central scan: paused when no API client + no GATT links + no clone

@@ -23,6 +23,10 @@ constexpr const char *TAG = "ota";
 
 httpd_handle_t g_srv = nullptr;
 
+// Radio-quiesce hooks (see ota.h). Set by main; null ⇒ no quiescing.
+QuiesceFn g_quiesce_begin = nullptr;
+QuiesceFn g_quiesce_end = nullptr;
+
 #if CONFIG_NBP_OTA
 // Chunk size for streaming POST body → OTA flash writes. Small enough
 // to keep stack/heap pressure low; large enough to amortize HTTP recv
@@ -63,12 +67,18 @@ esp_err_t update_post(httpd_req_t *req) {
   ESP_LOGI(TAG, "writing to partition %s @ 0x%08lx (%lu bytes)", target->label,
            target->address, target->size);
 
+  // Free the radio for the transfer: drop the SoftAP and pause the BLE scan
+  // so coex can't starve the upload. Restored on any failure return below; on
+  // success the reboot restores them. (No-op if main wired no hooks.)
+  if (g_quiesce_begin) g_quiesce_begin();
+
   esp_ota_handle_t handle = 0;
   // Size=OTA_SIZE_UNKNOWN lets the OTA layer figure it out from the
   // image header — works even if Content-Length is wrong/missing.
   esp_err_t err = esp_ota_begin(target, OTA_SIZE_UNKNOWN, &handle);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_ota_begin: %s", esp_err_to_name(err));
+    if (g_quiesce_end) g_quiesce_end();
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                         "ota_begin failed");
     return ESP_FAIL;
@@ -85,6 +95,7 @@ esp_err_t update_post(httpd_req_t *req) {
       if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
       ESP_LOGE(TAG, "recv failed: %d", n);
       esp_ota_abort(handle);
+      if (g_quiesce_end) g_quiesce_end();
       httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed");
       return ESP_FAIL;
     }
@@ -93,6 +104,7 @@ esp_err_t update_post(httpd_req_t *req) {
       ESP_LOGE(TAG, "esp_ota_write @ %u: %s", static_cast<unsigned>(total),
                esp_err_to_name(err));
       esp_ota_abort(handle);
+      if (g_quiesce_end) g_quiesce_end();
       httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                           "ota_write failed");
       return ESP_FAIL;
@@ -103,6 +115,7 @@ esp_err_t update_post(httpd_req_t *req) {
   err = esp_ota_end(handle);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_ota_end: %s (bad image?)", esp_err_to_name(err));
+    if (g_quiesce_end) g_quiesce_end();
     httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                         "ota_end failed — bad image?");
     return ESP_FAIL;
@@ -111,6 +124,7 @@ esp_err_t update_post(httpd_req_t *req) {
   err = esp_ota_set_boot_partition(target);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "set_boot_partition: %s", esp_err_to_name(err));
+    if (g_quiesce_end) g_quiesce_end();
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
                         "set_boot failed");
     return ESP_FAIL;
@@ -185,5 +199,10 @@ void start() {
 }
 
 httpd_handle_t handle() { return g_srv; }
+
+void set_quiesce_hooks(QuiesceFn begin, QuiesceFn end) {
+  g_quiesce_begin = begin;
+  g_quiesce_end = end;
+}
 
 }  // namespace ota

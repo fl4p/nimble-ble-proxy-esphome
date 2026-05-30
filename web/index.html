@@ -197,6 +197,7 @@ table#portmaps button.del:hover{background:#3b0a0a}
         <option value=-6>-6</option><option value=-3>-3</option>
         <option value=0>0</option><option value=3>3</option>
         <option value=6>6</option><option value=9>9</option>
+        <option value=off>off (shut down BLE)</option>
       </select> dBm</label>
       <!-- Peripheral advertising interval. "off" disables the device's
            own broadcaster entirely (clone mirror / ble_httpd) — the
@@ -913,7 +914,10 @@ async function loadInitialValues() {
   const cpu = document.getElementById('cpu');
   try {
     const l = await apiJson('GET /level');   lvl.value = l.nimble;
-    const p = await apiJson('GET /txpower'); wtx.value = p.wifi; btx.value = p.ble;
+    const p = await apiJson('GET /txpower'); wtx.value = p.wifi;
+    // ble_off (full deinit, reboot to re-enable) shows as "off"; otherwise the
+    // last configured dBm. Older firmware without ble_off just sets the dBm.
+    btx.value = p.ble_off ? 'off' : p.ble;
     wtx.disabled = p.wifi === 0;
     const f = await apiJson('GET /cpufreq'); cpu.value = f.mhz;
     document.getElementById('ls').checked = !!f.ls;
@@ -968,7 +972,17 @@ function wireControls() {
       .catch(err => alert(err));
   };
   document.getElementById('btx').onchange = e => {
-    apiText('POST /txpower?ble=' + e.target.value).catch(err => alert(err));
+    const v = e.target.value;
+    // "off" fully shuts BLE down (NimBLE deinit) — no live re-enable, only a
+    // reboot brings it back. Confirm, and revert the dropdown if cancelled.
+    if (v === 'off' && !confirm(
+        'Shut down BLE completely?\n\nThis deinitialises the NimBLE stack ' +
+        '(scanner, proxy, BLE dashboard, clone). It cannot be re-enabled ' +
+        'live — the device must reboot to bring BLE back.')) {
+      loadInitialValues();  // restore the prior selection from the device
+      return;
+    }
+    apiText('POST /txpower?ble=' + v).catch(err => alert(err));
   };
   document.getElementById('cpu').onchange = e => {
     apiText('POST /cpufreq?mhz=' + e.target.value).catch(err => alert(err));

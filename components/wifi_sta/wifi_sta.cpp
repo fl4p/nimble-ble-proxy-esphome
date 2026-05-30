@@ -326,6 +326,16 @@ void compose_ap_ssid(char *out, size_t cap) {
 void start_and_wait_for_ip() {
   g_events = xEventGroupCreate();
 
+  // Silence the WiFi driver's per-association state-machine churn and the
+  // SoftAP PMF SA-Query/disassoc flood — all I-level under tag "wifi" — plus
+  // the DHCP-server "assigned IP" info lines (tag "esp_netif_lwip"). Under
+  // coex-induced AP-client flapping these dominate both the serial console
+  // and the /log web console. WARN keeps genuine WiFi warnings/errors (and
+  // our own "disconnected; retrying") visible. esp_log_level_set is global
+  // per-tag, so this one call also covers the AP side started by nat_router.
+  esp_log_level_set("wifi", ESP_LOG_WARN);
+  esp_log_level_set("esp_netif_lwip", ESP_LOG_WARN);
+
   ESP_ERROR_CHECK(esp_netif_init());
   esp_netif_t *netif = esp_netif_create_default_wifi_sta();
   esp_netif_set_hostname(netif, proxy::hostname());

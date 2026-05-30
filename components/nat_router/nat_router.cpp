@@ -2,6 +2,7 @@
 
 #ifdef CONFIG_NBP_NAT_ROUTER
 
+#include "esp_coexist.h"  // esp_coex_preference_set — bias RF to WiFi for NAT
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -75,6 +76,9 @@ uint32_t g_sta_ip = 0;  // STA IP, network byte order; NAPT external addr
 char g_ap_ssid[33] = {0};
 char g_ap_psk[64] = {0};
 bool g_enabled = true;  // runtime SoftAP on/off (NVS-persisted)
+// Whether pause_for_ota() actually dropped the AP, so resume_after_ota()
+// only brings it back if it had been up (don't resurrect a user-disabled AP).
+bool g_ota_resume_ap = false;
 
 // Format a network-order IPv4 (ESP32 is little-endian, so the low byte is
 // the first octet) into dotted-quad.
@@ -240,6 +244,14 @@ void ap_up() {
     esp_netif_dhcps_start(g_ap);
   }
   esp_wifi_set_mode(WIFI_MODE_APSTA);
+  // Bias the WiFi/BLE coexistence arbiter toward WiFi while repeating. On
+  // this single-radio S3 a ~50%-duty BLE scan competing with APSTA traffic
+  // starves WiFi management frames — the SoftAP's PMF SA-Query exchange times
+  // out, clients get disassoc'd (reason 209) and reconnect-storm, which both
+  // hammers the heap and makes the dashboard crawl. PREFER_WIFI (vs the
+  // BALANCE default) gives WiFi more RF opportunity; BLE scan/forwarding is
+  // best-effort here anyway. Restored to BALANCE in ap_down().
+  esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
   configure_ap();
   set_ap_dns();
   // The AP netif comes up asynchronously (WIFI_EVENT_AP_START handler), but
@@ -282,6 +294,9 @@ void ap_down() {
   if (g_ap != nullptr) esp_netif_napt_disable(g_ap);
   remove_all_live();
   esp_wifi_set_mode(WIFI_MODE_STA);
+  // No SoftAP to protect anymore — hand RF arbitration back to BALANCE so the
+  // BLE scan/proxy regains its share when the device is STA-only.
+  esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
   g_enabled = false;
   ESP_LOGI(TAG, "NAT SoftAP disabled; radio back to STA-only");
 }
@@ -568,6 +583,26 @@ esp_err_t portmap_post(httpd_req_t *req) {
 }
 
 }  // namespace
+
+void pause_for_ota() {
+  // Drop the SoftAP for the duration of an OTA so the radio isn't split
+  // between APSTA forwarding and the upload. ap_down() keeps the STA link
+  // (and thus the OTA TCP stream + dashboard) up — only the AP goes away.
+  g_ota_resume_ap = g_enabled;
+  if (g_enabled) {
+    ESP_LOGI(TAG, "OTA: dropping SoftAP to free the radio");
+    ap_down();
+  }
+}
+
+void resume_after_ota() {
+  // Only on OTA failure (success reboots). Restore the AP iff we dropped it.
+  if (g_ota_resume_ap) {
+    ESP_LOGI(TAG, "OTA failed: restoring SoftAP");
+    ap_up();
+  }
+  g_ota_resume_ap = false;
+}
 
 void start() {
   load_ap_creds();

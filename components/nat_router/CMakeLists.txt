@@ -13,6 +13,7 @@ idf_component_register(
         "../../include"
     REQUIRES
         esp_wifi
+        esp_coex
         esp_netif
         esp_event
         esp_http_server

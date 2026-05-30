@@ -163,6 +163,29 @@ extern "C" void app_main() {
   wifi_sta::start_and_wait_for_ip();
   mdns_announce::start();
   ota::start();
+  // Free the single radio for the duration of an OTA upload: drop the SoftAP
+  // and pause the BLE scan so coex can't starve the transfer (the
+  // SA-Query/heap death-spiral that makes a loaded device's OTA crawl and time
+  // out). Restored on failure; a successful OTA reboots. The lambdas are
+  // captureless → convert to plain function pointers; the bodies #if out to
+  // no-ops in WiFi-only / BLE-only / non-NAT builds.
+  ota::set_quiesce_hooks(
+      []() {
+#if CONFIG_NBP_NAT_ROUTER
+        nat_router::pause_for_ota();
+#endif
+#if CONFIG_NBP_BLE
+        ble_backend::quiesce_for_ota();
+#endif
+      },
+      []() {
+#if CONFIG_NBP_BLE
+        ble_backend::resume_after_ota();
+#endif
+#if CONFIG_NBP_NAT_ROUTER
+        nat_router::resume_after_ota();
+#endif
+      });
   // Piggyback the stats UI on the OTA httpd so we don't burn an extra
   // LWIP socket budget on a second listener.
   api_server::stats::register_endpoints(ota::handle());

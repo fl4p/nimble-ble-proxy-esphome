@@ -420,7 +420,8 @@ esp_err_t nvs_write_i8(const char *key, int8_t v) {
 }
 
 esp_err_t txpower_get(httpd_req_t *req) {
-  char buf[32];
+  // {"wifi":-20,"ble":-12,"ble_off":false} is ~38 chars — 32 truncated it.
+  char buf[48];
   size_t n = build_txpower_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
@@ -828,8 +829,18 @@ size_t build_txpower_json(char *buf, size_t cap) {
 #else
   int wifi = 0;
 #endif
-  int n = std::snprintf(buf, cap, "{\"wifi\":%d,\"ble\":%d}", wifi,
-                        static_cast<int>(g_ble_tx_dbm));
+  // ble_off true ⇒ BLE was fully shut down at runtime (NimBLEDevice::deinit);
+  // the dashboard renders the BLE-TX dropdown as "off" and reboot re-enables.
+  // "ble" still carries the last configured dBm so the prior value is restored
+  // in the UI. (No BLE compiled in ⇒ false; the BLE UI is hidden either way.)
+#if CONFIG_NBP_BLE
+  bool ble_off = ble_backend::powered_off();
+#else
+  bool ble_off = false;
+#endif
+  int n = std::snprintf(buf, cap, "{\"wifi\":%d,\"ble\":%d,\"ble_off\":%s}", wifi,
+                        static_cast<int>(g_ble_tx_dbm),
+                        ble_off ? "true" : "false");
   if (n < 0) return 0;
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
@@ -862,15 +873,27 @@ const char *handle_txpower_set(const char *query) {
   }
 #if CONFIG_NBP_BLE
   if (httpd_query_key_value(query, "ble", val, sizeof(val)) == ESP_OK) {
-    int dbm = std::atoi(val);
-    if (dbm < -12 || dbm > 9) return "ble -12..9";
-    if (dbm != g_ble_tx_dbm) {
-      if (apply_ble_tx_dbm(dbm) != ESP_OK) return "ble tx apply failed";
-      g_ble_tx_dbm = static_cast<int8_t>(dbm);
-      nvs_write_i8(NVS_BLE_TX_KEY, g_ble_tx_dbm);
-      ESP_LOGI(TAG, "ble tx -> %d dBm (persisted)",
-               static_cast<int>(g_ble_tx_dbm));
-      changed = true;
+    if (std::strcmp(val, "off") == 0) {
+      // Full BLE shutdown — deinit the NimBLE stack. Runtime-only and not
+      // persisted: a reboot brings BLE back at the stored dBm, so the device
+      // can't be locked out of BLE the way it can't be bricked over WiFi-off.
+      if (!ble_backend::powered_off()) {
+        if (!ble_backend::power_off()) return "ble off failed";
+        ESP_LOGI(TAG, "ble off (runtime full deinit; reboot to re-enable)");
+        changed = true;
+      }
+    } else {
+      int dbm = std::atoi(val);
+      if (dbm < -12 || dbm > 9) return "ble -12..9 or off";
+      if (ble_backend::powered_off()) return "ble off; reboot to re-enable";
+      if (dbm != g_ble_tx_dbm) {
+        if (apply_ble_tx_dbm(dbm) != ESP_OK) return "ble tx apply failed";
+        g_ble_tx_dbm = static_cast<int8_t>(dbm);
+        nvs_write_i8(NVS_BLE_TX_KEY, g_ble_tx_dbm);
+        ESP_LOGI(TAG, "ble tx -> %d dBm (persisted)",
+                 static_cast<int>(g_ble_tx_dbm));
+        changed = true;
+      }
     }
   }
 #endif  // CONFIG_NBP_BLE

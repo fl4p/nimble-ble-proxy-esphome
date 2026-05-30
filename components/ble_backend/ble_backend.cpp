@@ -10,10 +10,11 @@
 
 #include <atomic>
 
-#if CONFIG_NBP_BLE_AUTO_OFF
-#include "NimBLEServer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+#if CONFIG_NBP_BLE_AUTO_OFF
+#include "NimBLEServer.h"
 #endif
 
 namespace ble_backend {
@@ -203,6 +204,61 @@ void on_api_client_disconnect() {
   connection::disconnect_all();
 }
 
+// Runtime full BLE shutdown — the "off" choice on the dashboard's BLE TX
+// dropdown. Unlike the auto-off supervisor (which only quiesces the radio,
+// keeping the host/controller and the ble_httpd/clone GATT DB alive), this
+// tears the whole NimBLE stack down via NimBLEDevice::deinit(true): host +
+// controller deinit, ~heap reclaimed, no BLE airtime at all. Consequences,
+// by design (see CLAUDE.md "BLE serves two independent roles"): the ble_httpd
+// recovery dashboard and any clone mirror are gone until reboot, and re-init
+// mid-session is deliberately not supported — like WiFi-off, this is
+// runtime-only and reboot brings BLE back at its configured settings.
+std::atomic<bool> g_powered_off{false};
+
+bool powered_off() { return g_powered_off.load(std::memory_order_relaxed); }
+
+bool power_off() {
+  if (g_powered_off.exchange(true)) return true;  // already off — idempotent
+#if CONFIG_NBP_BLE_AUTO_OFF
+  // The auto-off supervisor task touches NimBLE singletons (getServer,
+  // scanner resume/pause). It checks g_powered_off at the top of each loop
+  // and then idles, but it may be mid-iteration right now. Wait past one full
+  // supervisor tick so any in-flight iteration finishes and the next one sees
+  // the flag — then no other task races our deinit. (2 s tick; rare action.)
+  vTaskDelay(pdMS_TO_TICKS(2100));
+#endif
+  scanner::stop_forwarding();
+  // deinit(true): stop scan, disconnect all links, delete the server/scan/
+  // advertising objects, and disable+deinit the BT controller.
+  NimBLEDevice::deinit(true);
+  ESP_LOGI(TAG, "BLE powered off (full deinit; reboot to re-enable)");
+  return true;
+}
+
+// Reversible radio quiesce for the duration of an OTA download (contrast
+// power_off, which fully deinits). Pause the central scan and suspend our
+// advertising so coex can't starve the firmware upload; restore on failure.
+// While quiesced the auto-off supervisor stands down — without this it would
+// re-resume the scan within a tick (an API client is connected during OTA, so
+// "central needed" is true). On OTA success the device reboots.
+std::atomic<bool> g_ota_quiesce{false};
+
+bool ota_quiesced() { return g_ota_quiesce.load(std::memory_order_relaxed); }
+
+void quiesce_for_ota() {
+  g_ota_quiesce.store(true, std::memory_order_relaxed);
+  scanner::pause();
+  set_advertising_auto_suspend(true);
+  ESP_LOGI(TAG, "OTA: scan paused + advertising suspended to free the radio");
+}
+
+void resume_after_ota() {
+  g_ota_quiesce.store(false, std::memory_order_relaxed);
+  scanner::resume();
+  set_advertising_auto_suspend(false);  // supervisor (if any) re-evaluates
+  ESP_LOGI(TAG, "OTA failed: BLE radio restored");
+}
+
 #if CONFIG_NBP_BLE_AUTO_OFF
 namespace power {
 
@@ -239,6 +295,11 @@ void supervisor_task(void *) {
 
   for (;;) {
     vTaskDelay(TICK);
+
+    // Stand down while BLE is powered off (deinit — singletons gone, reboot to
+    // revive) or quiesced for an OTA (we hold the scan paused on purpose; don't
+    // let "central needed" re-resume it mid-upload).
+    if (powered_off() || ota_quiesced()) continue;
 
     const bool clone = call_or(g_hooks.clone_active, false);
     const bool api = call_or(g_hooks.api_client_connected, true);

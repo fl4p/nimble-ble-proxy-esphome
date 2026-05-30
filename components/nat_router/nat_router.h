@@ -27,6 +27,14 @@ void start();
 // ota::handle(); a null handle disables the endpoints.
 void register_endpoints(void *httpd_handle);
 
+// Drop / restore the SoftAP around an OTA download so the radio isn't split
+// between APSTA forwarding and the firmware upload (see ota::set_quiesce_hooks).
+// pause_for_ota() tears the AP down (the STA link stays up, so the OTA stream
+// and dashboard survive); resume_after_ota() brings it back only if it had
+// been up — invoked solely on OTA failure, since success reboots. Wired by main.
+void pause_for_ota();
+void resume_after_ota();
+
 }  // namespace nat_router
 
 #endif  // CONFIG_NBP_NAT_ROUTER

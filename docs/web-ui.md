@@ -101,10 +101,18 @@ Layout (top → bottom):
    - **CPU** — `freq` (80 / 160 / 240 MHz), `light sleep` checkbox.
    - **WiFi** — `TX` (off / 8 / 11 / 14 / 17 / 20 / 21 dBm), `PS` (off /
      1×DTIM / 3 / 5 / 10).
-   - **BLE** — `TX` (-12..+9 dBm in 3 dB steps), `adv` (default / 100 /
-     200 / 500 / 1000 / 2000 ms — annotated with the resulting rate),
-     `scan` duty preset (50 % / 25 % / 10 % / 3 %), `active scan`
-     checkbox, `log` (NimBLE log level 0–5).
+   - **BLE** — `TX` (-12..+9 dBm in 3 dB steps, plus **`off`**), `adv`
+     (default / 100 / 200 / 500 / 1000 / 2000 ms — annotated with the
+     resulting rate), `scan` duty preset (50 % / 25 % / 10 % / 3 %),
+     `active scan` checkbox, `log` (NimBLE log level 0–5). The `off`
+     entry (`POST /txpower?ble=off`) **fully shuts BLE down** —
+     `NimBLEDevice::deinit`, host + controller — not just a radio
+     quiesce: the scanner/proxy, the BLE dashboard (`ble_httpd`) and any
+     clone mirror all go away. It is runtime-only with **no live
+     re-enable** (a reboot brings BLE back at the stored dBm), so the UI
+     `confirm()`s first and reverts the dropdown on cancel. `/txpower`
+     reports the state as `ble_off`; while off, a dBm POST is rejected
+     ("reboot to re-enable").
    - **device** — `name` (hostname text field with validation and a
      blue/green/red border state), `reboot device` button (red, with a
      `confirm()` guard; turns blue and re-labels "reboot to apply" after

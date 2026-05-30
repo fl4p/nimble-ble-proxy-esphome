@@ -45,6 +45,29 @@
   (`components/api_proto/api_subset.options`). Diagnose live with
   `GET /stats.json` (`heap`) + `GET /log` (grep `SA Query` / `xTaskCreate`).
 
+- **Coex arbitration: bias to WiFi while the SoftAP is up.** The single radio's
+  WiFi/BLE coexistence preference defaults to `ESP_COEX_PREFER_BALANCE`; under
+  APSTA + a BLE scan that lets BLE steal enough airtime that the SoftAP's PMF
+  SA-Query exchange times out (the loop above). `nat_router::ap_up()` calls
+  **`esp_coex_preference_set(ESP_COEX_PREFER_WIFI)`** (header `esp_coexist.h`,
+  the **only** API call into esp_coex — add `esp_coex` to the component's
+  `REQUIRES`, it is *not* pulled in transitively by `esp_wifi`), and `ap_down()`
+  restores `BALANCE` so a STA-only / BLE-proxy build regains BLE's share. This
+  trades some BLE scan/connection throughput for WiFi/AP stability — the right
+  call for a repeater, where BLE is best-effort. `esp_coex_preference_set` is
+  current in IDF 5.5 (not deprecated); SW coexist (`ESP_COEX_SW_COEXIST_ENABLE`)
+  must be on (it is by default). Note the BLE scan is *also* already duty-cut to
+  ~3–50% (`proxy::SCAN_INTERVAL_MS`/`SCAN_WINDOW_MS`, runtime `/duty`).
+
+- **WiFi driver log spam is silenced at WARN.** Under coex-induced AP-client
+  flapping the IDF WiFi driver floods both serial and `/log` with I-level
+  state-machine churn (`wifi:state: …`, `<ba-add>`, the SA-Query/disassoc
+  lines) plus DHCP-server "assigned IP" notices. `wifi_sta::start_and_wait_for_ip()`
+  sets `esp_log_level_set("wifi", ESP_LOG_WARN)` + `esp_log_level_set(
+  "esp_netif_lwip", ESP_LOG_WARN)` (global per-tag — one call covers the AP side
+  too). WARN keeps genuine driver warnings/errors and our own "disconnected;
+  retrying". To debug a WiFi/coex issue, raise it back to INFO.
+
 - **Feature opt-ins must live in `sdkconfig.defaults`, not menuconfig-only.**
   `sdkconfig` is gitignored/generated; `rm sdkconfig && idf.py reconfigure`
   (or a fresh checkout) regenerates it *purely* from `sdkconfig.defaults` and
@@ -102,6 +125,48 @@
   (default 30); re-activation is immediate. It does *radio quiesce*, not full
   `NimBLEDevice::deinit()` — deinit would tear down the one-shot clone/ble_httpd
   GATT DB and is deliberately avoided. `wifi_sta::is_connected()` is the WiFi gate.
+- **The dashboard BLE-TX "off" option DOES do the full deinit** the auto-off
+  supervisor avoids. The BLE TX-power dropdown has an `off` entry → `POST
+  /txpower?ble=off` → `ble_backend::power_off()` → `NimBLEDevice::deinit(true)`
+  (host + controller). It's the explicit "I really want BLE gone" switch, so it
+  accepts the consequences the auto-off path won't: ble_httpd + clone are torn
+  down, and there is **no live re-enable** — like WiFi-off (`?wifi=0`) it is
+  runtime-only and **a reboot brings BLE back** at the stored dBm (so it can't
+  lock you out the way it can't brick). `powered_off()` latches the state;
+  `build_txpower_json` surfaces it as `"ble_off":true` (the dropdown shows
+  "off"); the auto-off supervisor early-`continue`s on it so it never touches
+  the freed singletons. The dashboard `confirm()`s before sending it.
+
+## OTA over a loaded device — quiesce the radio during the upload
+
+- **A firmware upload competes for the single radio and gets starved.** On a
+  busy NAT build (`/update` POST of ~1.3 MB) the SoftAP forward path + BLE scan
+  + coex leave so little airtime for the upload's TCP stream that it crawls to a
+  few KB/s and times out — the same SA-Query/heap death-spiral as above, now
+  triggered by the OTA's own traffic. Symptom: `curl --data-binary @fw.bin …`
+  uploads ~80–90% then `(28) timed out`. (An aborted OTA is **harmless** — it
+  writes the *inactive* slot and only switches on a fully-validated image, so
+  the device keeps running the old firmware.)
+- **Fix: the OTA handler frees the radio for the transfer's duration.**
+  `ota::set_quiesce_hooks(begin, end)` (wired in `main.cpp`, same provider-
+  callback pattern as the stats providers so `ota` keeps no dep on
+  `nat_router`/`ble_backend`). `begin` fires once the upload starts:
+  `nat_router::pause_for_ota()` drops the SoftAP via `ap_down()` (**STA link
+  stays up** — that's what carries the upload + dashboard, so the OTA survives
+  it) and `ble_backend::quiesce_for_ota()` pauses the central scan + suspends
+  advertising. `end` fires **only on failure** to restore both (success
+  reboots, which restores everything). Two gotchas: (1) the BLE auto-off
+  supervisor would re-resume the scan within a tick ("central needed" — an API
+  client is attached during OTA), so `quiesce_for_ota` sets a flag the
+  supervisor early-`continue`s on; (2) `pause_for_ota` only restores the AP if
+  it had been up (`g_ota_resume_ap`) — don't resurrect a user-disabled SoftAP.
+- **Manual recovery / forced quiesce** if a device is already too saturated to
+  flash: `POST /nat?enabled=0` sheds the SoftAP load live (verified: heap
+  20→77 KB, temp 57→44 °C, page 60 s→0.7 s in seconds), then OTA flies. Re-enable
+  with `?enabled=1` (NVS-persisted, so it also survives reboot — remember to turn
+  it back on). Diagnose the quiesce live (non-destructively) by POSTing a short
+  bogus image: it fails validation without rebooting and leaves `OTA: dropping
+  SoftAP` / `scan paused` / `restoring SoftAP` in `/log`.
 
 ## `CONFIG_NBP_BLE` — compile-time master gate (vs the runtime auto-off above)
 

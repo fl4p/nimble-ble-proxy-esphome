@@ -230,6 +230,50 @@ def test_txpower_roundtrip():
     post("/txpower?wifi=13")  # leave at the cool value
 
 
+def test_ble_txpower():
+    print("[ble txpower round-trip + off field]")
+    f = get_json("/txpower")
+    # BLE-free builds report ble_off:false and a static ble dBm; the field is
+    # always present so the dashboard can render the "off" state.
+    check("txpower exposes ble_off field", "ble_off" in f, str(f))
+    if f.get("ble_off"):
+        # BLE already shut down (someone ran the off test without rebooting);
+        # nothing more to round-trip until a reboot brings BLE back.
+        print("  ble_off already set — skipping dBm round-trip")
+        return
+    post("/txpower?ble=-6")
+    check("ble tx set to -6", get_json("/txpower").get("ble") == -6, "")
+    post("/txpower?ble=-9")
+    check("ble tx set to -9", get_json("/txpower").get("ble") == -9, "")
+    # Validation: out-of-range dBm and a junk value are both rejected (4xx),
+    # and BLE must NOT have been shut down as a side effect.
+    st, body = post("/txpower?ble=99")
+    check("ble tx 99 rejected (4xx)", 400 <= st < 500, f"got {st}: {body}")
+    check("ble still on after bad value", not get_json("/txpower").get("ble_off"), "")
+
+
+def test_ble_off_reboot():
+    # Destructive: ble=off fully deinits the NimBLE stack; only a reboot brings
+    # BLE back. Gated behind --reboot for that reason.
+    print("[ble off → reboot recovery]  (disruptive)")
+    if get_json("/txpower").get("ble_off"):
+        print("  ble already off; rebooting to restore first")
+        post("/reboot"); time.sleep(4); wait_up(60)
+    post("/txpower?ble=off")
+    f = get_json("/txpower")
+    check("ble_off true after ?ble=off", f.get("ble_off") is True, str(f))
+    # A dBm set is refused while off (reboot-to-re-enable contract).
+    st, _ = post("/txpower?ble=0")
+    check("ble dBm set refused while off (4xx)", 400 <= st < 500, f"got {st}")
+    print("  rebooting to bring BLE back...")
+    post("/reboot"); time.sleep(4)
+    if not wait_up(60):
+        check("device back after reboot", False, "did not return in 60s")
+        return
+    check("ble_off cleared after reboot",
+          get_json("/txpower").get("ble_off") is False, "")
+
+
 def test_wifips_roundtrip():
     print("[wifips round-trip]")
     post("/wifips?li=0")
@@ -303,10 +347,12 @@ def main() -> int:
     test_cpufreq_roundtrip()
     test_cpufreq_validation()
     test_txpower_roundtrip()
+    test_ble_txpower()
     test_wifips_roundtrip()
     test_ws_bridge()
     if args.reboot:
         test_cpufreq_persistence()
+        test_ble_off_reboot()
 
     print(f"\n{_PASS} passed, {_FAIL} failed")
     return 0 if _FAIL == 0 else 1
