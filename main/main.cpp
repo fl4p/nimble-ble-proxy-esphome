@@ -229,6 +229,15 @@ extern "C" void app_main() {
   // run before register_endpoints so the GET reflects the live AP state.
   nat_router::start();
   nat_router::register_endpoints(ota::handle());
+#if CONFIG_NBP_NAT_THROUGHPUT
+  // Bridge SoftAP byte counters into /stats.json so the dashboard renders
+  // the repeater-throughput chart. Same edge-component pattern as the clone
+  // provider above: api_server stays free of any nat_router dependency.
+  api_server::stats::set_nat_throughput_provider(
+      [](api_server::stats::NatThroughput *out) {
+        nat_router::get_ap_throughput(&out->ap_rx_bytes, &out->ap_tx_bytes);
+      });
+#endif
 #endif
 #endif
 

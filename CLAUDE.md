@@ -225,6 +225,47 @@
   this natively (`CONFIG_LWIP_DHCPS_REPORT_CLIENT_HOSTNAME`) — prefer that
   if/when the project moves to IDF 6 and drop the hook.
 
+## SoftAP throughput (NBP_NAT_THROUGHPUT) — a second lwIP hook
+
+- `/nat`'s sibling feature: the dashboard's **repeater throughput chart**
+  (down/up KB/s) comes from cumulative `ap_rx`/`ap_tx` byte counters in
+  `/stats.json`. Gated on `CONFIG_NBP_NAT_THROUGHPUT` (default y, `depends on
+  NBP_NAT_ROUTER`); off ⇒ the whole thing compiles out and lwIP's forward
+  path is untouched. The dashboard chart (`#chart3`, `.nat-only` in
+  `web/index.html`) self-reveals only when `ap_rx` appears in `/stats.json`,
+  so non-router / gate-off builds show nothing.
+- **Don't reach for lwIP MIB2 / `netif->mib2_counters` here — it's a dead
+  end.** Those `ifinoctets`/`ifoutoctets` fields exist (under a global
+  `MIB2_STATS=1`, which itself needs `LWIP_STATS=1` or opt.h force-zeroes it)
+  but lwIP core only ever increments them on the loopback/ppp/lowpan paths —
+  **never** the ESP32 WiFi ethernet netif, and esp_netif exposes no byte
+  counters either. They read a flat 0. (Verified the hard way.)
+- Mechanism instead: an **observe-only `LWIP_HOOK_IP4_CANFORWARD` hook**,
+  declared alongside the dhcps hook in `nbp_lwip_hooks.h` and implemented in
+  `nat_router.cpp` (`nbp_ip4_canforward`, `extern "C"`). `ip4_canforward()`
+  calls it for **every** forwarded datagram — both NAT directions, since
+  inbound packets are de-NAT'd to the client IP and then re-forwarded. It
+  adds `p->tot_len` to a portMUX-guarded up/down tally (classified by whether
+  the host-order dest is in the AP subnet, published by `ap_up()`), then
+  returns **-1** ("no decision") so the normal forward-eligibility check runs
+  unchanged. `get_ap_throughput()` reads the tally; `main.cpp` bridges it into
+  `/stats.json` via a `set_nat_throughput_provider` callback (same
+  edge-component pattern as the clone-stats provider — `api_server` keeps no
+  dependency on `nat_router`).
+- **Same IDF-coupling caveats as the dhcps hook.** The counter symbol is
+  pulled into the link exactly like `nbp_dhcps_post_state`: lwIP's `ip4.c`
+  references it `U`, `nat_router` defines it `T`, IDF's `--start-group`
+  resolves the order. On an IDF bump re-verify it still fires:
+  `nm build/.../ip4.c.obj | grep nbp_ip4_canforward` should show `U`. The hook
+  is injected via the same `ESP_IDF_LWIP_HOOK_FILENAME` wiring (root
+  `CMakeLists.txt`, gated on `NBP_NAT_ROUTER`).
+- **Gotcha when adding the Kconfig option itself:** a plain `idf.py build`
+  did **not** write the new `CONFIG_NBP_NAT_THROUGHPUT` into an already-
+  generated `sdkconfig` — it silently compiled the feature out (gate
+  undefined → treated as 0). Took an explicit `idf.py reconfigure` to
+  materialise the `default y`. Watch for this whenever adding a Kconfig symbol
+  to a configured tree.
+
 ## WebSocket bridge (NBP_WS_PROXY)
 
 - Gated off by default. When on, `GET ws://<host>/api` tunnels the plaintext

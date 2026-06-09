@@ -23,10 +23,39 @@
 // on (LWIP_IP_FORWARD / LWIP_IPV4_NAPT), so they're visible here.
 #include "lwip/ip4_addr.h"
 #include "lwip/lwip_napt.h"
+#include "lwip/pbuf.h"  // struct pbuf (tot_len) for the forward-count hook
+
+// Forward-count hook declaration (LWIP_HOOK_IP4_CANFORWARD). Lives in the
+// dhcps_hostname component's include dir, available here via REQUIRES.
+#include "nbp_lwip_hooks.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#if CONFIG_NBP_NAT_THROUGHPUT
+namespace {
+
+// Forwarded-byte tallies for the dashboard throughput chart. Updated from
+// the lwIP forward hook (nbp_ip4_canforward, below) which runs in the
+// TCP/IP task, and read from the httpd task via get_ap_throughput — so the
+// 64-bit values are guarded by a portMUX. These live at file scope (not in
+// the nat_router anonymous namespace) because the extern "C" hook is a
+// global-scope symbol that lwIP links against and must reach them too.
+//   g_ap_down_bytes: forwarded TOWARD an AP client (dest in the AP subnet)
+//   g_ap_up_bytes:   forwarded the other way (client -> STA uplink)
+portMUX_TYPE g_thru_mux = portMUX_INITIALIZER_UNLOCKED;
+uint64_t g_ap_down_bytes = 0;
+uint64_t g_ap_up_bytes = 0;
+// SoftAP subnet, host byte order, published by nat_router::start(). Until
+// the mask is non-zero the hook can't classify, so it attributes traffic to
+// "up" (the common case — client uplink dominates and misattributing a few
+// boot-time packets is harmless for a rate chart).
+uint32_t g_ap_net_host = 0;
+uint32_t g_ap_mask_host = 0;
+
+}  // namespace
+#endif  // CONFIG_NBP_NAT_THROUGHPUT
 
 namespace nat_router {
 
@@ -242,6 +271,17 @@ void ap_up() {
     esp_netif_dhcps_stop(g_ap);
     esp_netif_set_ip_info(g_ap, &ap_ip);
     esp_netif_dhcps_start(g_ap);
+#if CONFIG_NBP_NAT_THROUGHPUT
+    // Publish the AP subnet (host byte order) so the forward hook can tell
+    // client-bound traffic from uplink traffic. lwIP hands the hook the
+    // destination in host order, so match in the same space.
+    uint32_t ip_h = lwip_ntohl(ap_ip.ip.addr);
+    uint32_t mask_h = lwip_ntohl(ap_ip.netmask.addr);
+    portENTER_CRITICAL(&g_thru_mux);
+    g_ap_mask_host = mask_h;
+    g_ap_net_host = ip_h & mask_h;
+    portEXIT_CRITICAL(&g_thru_mux);
+#endif
   }
   esp_wifi_set_mode(WIFI_MODE_APSTA);
   // Bias the WiFi/BLE coexistence arbiter toward WiFi while repeating. On
@@ -652,6 +692,40 @@ void register_endpoints(void *httpd_handle) {
   ESP_LOGI(TAG, "NAT config at /nat, port-forwarding at /portmap");
 }
 
+#if CONFIG_NBP_NAT_THROUGHPUT
+void get_ap_throughput(uint64_t *rx_bytes, uint64_t *tx_bytes) {
+  // rx = bytes from clients (uplink), tx = bytes to clients (downlink).
+  portENTER_CRITICAL(&g_thru_mux);
+  uint64_t up = g_ap_up_bytes;
+  uint64_t down = g_ap_down_bytes;
+  portEXIT_CRITICAL(&g_thru_mux);
+  if (rx_bytes) *rx_bytes = up;
+  if (tx_bytes) *tx_bytes = down;
+}
+#endif  // CONFIG_NBP_NAT_THROUGHPUT
+
 }  // namespace nat_router
+
+#if CONFIG_NBP_NAT_THROUGHPUT
+// lwIP forward hook (LWIP_HOOK_IP4_CANFORWARD). Runs in the TCP/IP task for
+// every datagram about to be forwarded — including both NAT directions, since
+// inbound packets are de-NAT'd to the client IP and then re-forwarded. We add
+// the IP-layer byte count to the up/down tally and return -1 so lwIP's normal
+// forward-eligibility check proceeds unchanged. Global C linkage: lwIP links
+// against this symbol; nat_router.o is pulled into the image to resolve it.
+extern "C" int nbp_ip4_canforward(struct pbuf *p, u32_t dest) {
+  if (p != nullptr) {
+    portENTER_CRITICAL(&g_thru_mux);
+    if (g_ap_mask_host != 0 &&
+        (dest & g_ap_mask_host) == g_ap_net_host) {
+      g_ap_down_bytes += p->tot_len;  // toward an AP client
+    } else {
+      g_ap_up_bytes += p->tot_len;  // from a client, out the uplink
+    }
+    portEXIT_CRITICAL(&g_thru_mux);
+  }
+  return -1;  // no decision — let ip4_canforward() decide as usual
+}
+#endif  // CONFIG_NBP_NAT_THROUGHPUT
 
 #endif  // CONFIG_NBP_NAT_ROUTER

@@ -35,8 +35,8 @@ html{scrollbar-color:#2a2a2a #0a0a0a;scrollbar-width:thin}
 ::-webkit-scrollbar-thumb:hover{background:#3a3a3a}
 h1,h2{font-size:1.1em;margin:0 0 1em}
 h2{margin-top:1.5em}
-#chart,#chart2{background:#1a1a1a;padding:.5em;border-radius:6px;display:block;max-width:100%}
-#chart2{margin-top:.5em}
+#chart,#chart2,#chart3{background:#1a1a1a;padding:.5em;border-radius:6px;display:block;max-width:100%}
+#chart2,#chart3{margin-top:.5em}
 #console{background:#0a0a0a;color:#d4d4d4;
   font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
   padding:.5em;border-radius:6px;width:100%;max-width:920px;
@@ -143,6 +143,9 @@ table#portmaps button.del:hover{background:#3b0a0a}
   <div id=chart></div>
   <br>
   <div id=chart2></div>
+  <!-- NAT/repeater throughput; hidden until /stats.json reports ap_rx
+       (i.e. an NBP_NAT_ROUTER build). See applyCaps(). -->
+  <div id=chart3 class="nat-only hidden"></div>
 
   <h2 class=ble-only>devices seen</h2>
   <div class="devwrap ble-only"><table id=devices><thead><tr>
@@ -466,6 +469,7 @@ async function connect() {
       document.getElementById('app').classList.remove('hidden');
       if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
       if (u_cpu)   u_cpu  .setSize({ width: chartW(chart2El), height: 200 });
+      if (g_nat && u_thru) u_thru.setSize({ width: chartW(chart3El), height: 200 });
       loadInitialValues();
       startPolling();
       return;
@@ -503,6 +507,7 @@ async function connect() {
   // that the wrapper is visible, give the charts the real width.
   if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
   if (u_cpu)   u_cpu  .setSize({ width: chartW(chart2El), height: 200 });
+  if (g_nat && u_thru) u_thru.setSize({ width: chartW(chart3El), height: 200 });
 
   await loadInitialValues();
   startPolling();
@@ -517,11 +522,13 @@ function disconnect() {
 const N = 120;
 const t = [], r = [], w = [], n = [], a = [], c = [], h = [];
 const c0 = [], c1 = [], tc = [], tcA = [];
+const rx = [], tx = [];  // NAT SoftAP throughput, KB/s (up from / down to clients)
 for (let i = 0; i < N; i++) {
   t.push(i - N + 1);
   r.push(null); w.push(null); n.push(null); a.push(null);
   c.push(null); h.push(null);
   c0.push(null); c1.push(null); tc.push(null); tcA.push(null);
+  rx.push(null); tx.push(null);
 }
 const ma = (arr, k) => {
   let s = 0, n = 0;
@@ -534,8 +541,9 @@ const fmt1 = (u, v) => v == null ? '--' : v.toFixed(1);
 const chartW = el => Math.min(900, el.clientWidth - 16);
 const chartEl  = document.getElementById('chart');
 const chart2El = document.getElementById('chart2');
+const chart3El = document.getElementById('chart3');
 
-let u_rates, u_cpu;
+let u_rates, u_cpu, u_thru;
 function initCharts() {
   u_rates = new uPlot({
     width: chartW(chartEl), height: 320,
@@ -573,6 +581,25 @@ function initCharts() {
       { label: 'temp°C', scale: 'temp', stroke: '#22d3ee', width: 2, value: fmt1 },
     ],
   }, [t, c0, c1, tcA], chart2El);
+
+  // Repeater (SoftAP) throughput, KB/s. "down" = bytes the device sent to
+  // its NAT clients (their download), "up" = bytes received from clients.
+  // Created even on non-NAT builds (cheap); the container stays hidden via
+  // .nat-only until applyCaps() sees ap_rx in /stats.json.
+  u_thru = new uPlot({
+    width: chartW(chart3El), height: 200,
+    scales: { x: { time: false }, y: {} },
+    axes: [
+      { stroke: '#aaa', grid: { stroke: '#333' } },
+      { stroke: '#aaa', grid: { stroke: '#333' },
+        values: (u, vs) => vs.map(v => v + ' KB/s') },
+    ],
+    series: [
+      { label: 't (s ago)' },
+      { label: 'down KB/s', stroke: '#34d399', width: 2, value: fmt1 },
+      { label: 'up KB/s',   stroke: '#f59e0b', width: 2, value: fmt1 },
+    ],
+  }, [t, tx, rx], chart3El);
 }
 
 // ---- polling loops ----------------------------------------------------
@@ -586,11 +613,23 @@ let g_prev = null, g_prevT = null;
 // hide the BLE-only UI (.ble-only) once and skip the /devices poll. null
 // until the first stats tick; applied a single time.
 let g_ble = null;
+// NAT-router capability, learned from the presence of "ap_rx" in
+// /stats.json (only NBP_NAT_ROUTER builds install the throughput provider).
+// Latches true the first time the field appears; until then the throughput
+// chart (.nat-only) stays hidden. Sizing is deferred to here because the
+// container has zero width while hidden (chartW would go negative).
+let g_nat = null;
 function applyCaps(s) {
-  if (g_ble !== null || typeof s.ble === 'undefined') return;
-  g_ble = !!s.ble;
-  if (!g_ble) {
-    document.querySelectorAll('.ble-only').forEach(el => el.classList.add('hidden'));
+  if (g_ble === null && typeof s.ble !== 'undefined') {
+    g_ble = !!s.ble;
+    if (!g_ble) {
+      document.querySelectorAll('.ble-only').forEach(el => el.classList.add('hidden'));
+    }
+  }
+  if (g_nat !== true && typeof s.ap_rx !== 'undefined') {
+    g_nat = true;
+    document.querySelectorAll('.nat-only').forEach(el => el.classList.remove('hidden'));
+    if (u_thru) u_thru.setSize({ width: chartW(chart3El), height: 200 });
   }
 }
 
@@ -616,6 +655,18 @@ async function tickStats() {
       shiftPush(tcA, ma(tc, 10));
       u_rates.setData([t, r, w, n, a, c, h]);
       u_cpu.setData([t, c0, c1, tcA]);
+      // SoftAP throughput → KB/s. ap_rx = bytes from clients (their upload),
+      // ap_tx = bytes to clients (their download). delta() drops the
+      // negative step on a 32-bit octet-counter wrap, so a wrap shows one
+      // gap rather than a downward spike.
+      if (s.ap_rx !== undefined) {
+        const up   = delta(s.ap_rx, g_prev.ap_rx, dt);
+        const down = delta(s.ap_tx, g_prev.ap_tx, dt);
+        shiftPush(rx, up   == null ? null : up   / 1024);
+        shiftPush(tx, down == null ? null : down / 1024);
+        u_thru.setData([t, tx, rx]);
+        u_thru.setLegend({ idx: N - 1 });
+      }
       // uPlot's legend defaults to showing the value under the cursor;
       // with no cursor it renders '--'. Pin it to the latest sample so
       // glancing at the legend always shows current values.
@@ -1206,6 +1257,7 @@ function wireControls() {
   addEventListener('resize', () => {
     if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
     if (u_cpu)   u_cpu  .setSize({ width: chartW(chart2El), height: 200 });
+    if (g_nat && u_thru) u_thru.setSize({ width: chartW(chart3El), height: 200 });
   });
 }
 
@@ -1228,6 +1280,7 @@ wireControls();
     document.getElementById('app').classList.remove('hidden');
     if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
     if (u_cpu)   u_cpu  .setSize({ width: chartW(chart2El), height: 200 });
+    if (g_nat && u_thru) u_thru.setSize({ width: chartW(chart3El), height: 200 });
     loadInitialValues();
     startPolling();
   } else if (!navigator.bluetooth) {

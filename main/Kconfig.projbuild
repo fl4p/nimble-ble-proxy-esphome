@@ -167,6 +167,24 @@ config NBP_NAT_PORTMAP_MAX
         Capped at 32 by lwIP's IP_PORTMAP_MAX. Each slot costs a few
         bytes of BSS plus one NVS blob entry.
 
+config NBP_NAT_THROUGHPUT
+    bool "Report SoftAP throughput (dashboard repeater chart)"
+    depends on NBP_NAT_ROUTER
+    default y
+    help
+        Tally bytes forwarded between the SoftAP clients and the STA
+        uplink, split by direction, and expose them as "ap_rx"/"ap_tx"
+        in /stats.json so the dashboard can draw a live repeater
+        throughput chart (KB/s up/down). The chart self-hides when the
+        fields are absent, so turning this off cleanly removes it.
+
+        Implemented as an observe-only lwIP forward hook
+        (LWIP_HOOK_IP4_CANFORWARD in nat_router.cpp) that adds each
+        forwarded datagram's length to an up/down counter and returns
+        "no decision". Cost is a short critical section per forwarded
+        packet plus two 64-bit counters; off, the hook compiles out
+        entirely and lwIP's forward path is untouched.
+
 config NBP_BLE
     bool "Enable BLE (NimBLE scanner/proxy + all BLE features)"
     default y

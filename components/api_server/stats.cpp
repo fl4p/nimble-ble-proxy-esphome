@@ -50,6 +50,7 @@ std::atomic<uint32_t> g_notifies{0};
 // 32-bit aligned pointer for our targets, and the only meaningful read
 // is "non-null → invoke".
 CloneStatsProvider g_clone_stats_provider = nullptr;
+NatThroughputProvider g_nat_throughput_provider = nullptr;
 
 #if CONFIG_NBP_WEB_CONSOLE
 // ---- log ring buffer ----
@@ -633,7 +634,9 @@ void sample_cpu_pct(int *cpu0, int *cpu1) {
 }
 
 esp_err_t stats_get(httpd_req_t *req) {
-  char buf[256];
+  // 256 covered the base object; the optional ap_rx/ap_tx 64-bit byte
+  // counters (NAT builds) add ~50 chars, so size with headroom.
+  char buf[320];
   size_t n = build_stats_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
@@ -706,6 +709,10 @@ void set_clone_stats_provider(CloneStatsProvider fn) {
   g_clone_stats_provider = fn;
 }
 
+void set_nat_throughput_provider(NatThroughputProvider fn) {
+  g_nat_throughput_provider = fn;
+}
+
 size_t build_stats_json(char *buf, size_t cap) {
   // BLE-sourced counters. When NBP_BLE is off the backend (scanner +
   // GATT pool) isn't compiled, so these read as zero — the dashboard
@@ -743,7 +750,7 @@ size_t build_stats_json(char *buf, size_t cap) {
       "{\"reads\":%lu,\"writes\":%lu,\"notifies\":%lu,\"adverts\":%lu,"
       "\"connections\":%u,\"heap\":%lu,"
       "\"notify_rx\":%lu,\"last_notify_handle\":%u,"
-      "\"cpu0\":%d,\"cpu1\":%d,\"temp_c\":%.1f,\"ble\":%s}",
+      "\"cpu0\":%d,\"cpu1\":%d,\"temp_c\":%.1f,\"ble\":%s",
       static_cast<unsigned long>(
           g_reads.load(std::memory_order_relaxed) + cc.reads),
       static_cast<unsigned long>(
@@ -757,6 +764,23 @@ size_t build_stats_json(char *buf, size_t cap) {
       notify_handle,
       cpu0, cpu1, static_cast<double>(temp_c), ble_cap);
   if (n < 0) return 0;
+  // NAT-router SoftAP throughput, only when a provider is installed (i.e.
+  // NBP_NAT_ROUTER builds). Cumulative byte counters; the dashboard turns
+  // them into a KB/s rate. Omitted entirely on non-router builds so the
+  // throughput chart self-hides. (No '}' yet — close after this.)
+  if (g_nat_throughput_provider && static_cast<size_t>(n) < cap) {
+    NatThroughput nt{};
+    g_nat_throughput_provider(&nt);
+    int m = std::snprintf(
+        buf + n, cap - n, ",\"ap_rx\":%llu,\"ap_tx\":%llu",
+        static_cast<unsigned long long>(nt.ap_rx_bytes),
+        static_cast<unsigned long long>(nt.ap_tx_bytes));
+    if (m > 0) n += m;
+  }
+  if (static_cast<size_t>(n) < cap) {
+    int m = std::snprintf(buf + n, cap - n, "}");
+    if (m > 0) n += m;
+  }
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
 

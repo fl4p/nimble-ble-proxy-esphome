@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 #include "sdkconfig.h"
 
 #ifdef CONFIG_NBP_NAT_ROUTER
@@ -34,6 +36,16 @@ void register_endpoints(void *httpd_handle);
 // been up — invoked solely on OTA failure, since success reboots. Wired by main.
 void pause_for_ota();
 void resume_after_ota();
+
+#if CONFIG_NBP_NAT_THROUGHPUT
+// Cumulative bytes forwarded between the SoftAP clients and the STA uplink
+// since boot, tallied by the lwIP forward hook (nbp_ip4_canforward):
+// *rx_bytes = bytes forwarded FROM AP clients (their uplink, NAT'd out),
+// *tx_bytes = bytes forwarded TO AP clients (their downlink). Monotonic
+// 64-bit; the dashboard differentiates them into a KB/s rate. Gated on
+// CONFIG_NBP_NAT_THROUGHPUT.
+void get_ap_throughput(uint64_t *rx_bytes, uint64_t *tx_bytes);
+#endif
 
 }  // namespace nat_router
 

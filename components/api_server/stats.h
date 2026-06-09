@@ -27,6 +27,20 @@ struct CloneCounters {
 using CloneStatsProvider = void (*)(CloneCounters *out);
 void set_clone_stats_provider(CloneStatsProvider fn);
 
+// Optional provider that lets /stats.json report NAT-router (SoftAP)
+// throughput without api_server depending on nat_router. main wires it up
+// at boot under CONFIG_NBP_NAT_ROUTER (forwarding to
+// nat_router::get_ap_throughput); pass nullptr to detach. When a provider
+// is installed, build_stats_json emits cumulative "ap_rx"/"ap_tx" byte
+// counters and the dashboard renders the throughput chart; when absent the
+// fields are omitted (BLE-only / non-router builds) and the chart hides.
+struct NatThroughput {
+  uint64_t ap_rx_bytes;  // octets received from SoftAP clients (their uplink)
+  uint64_t ap_tx_bytes;  // octets sent to SoftAP clients (their downlink)
+};
+using NatThroughputProvider = void (*)(NatThroughput *out);
+void set_nat_throughput_provider(NatThroughputProvider fn);
+
 // Build the same JSON body that /stats.json returns into a caller-
 // supplied buffer. Returns bytes written (truncated at cap-1 by
 // snprintf semantics). Safe to call from any task. The CPU-percent
