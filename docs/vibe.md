@@ -1,3 +1,33 @@
+# How to vibe
+
+* this is 100% LLM-coded, didnt wrote a single line
+* the trick: bring the LLM agent in the full loop (end2end)
+* the better the full coverage, the better the results
+* its obvious that LLM make mistakes, let them find them and adjust
+* Let it write small tests for basic assumptions, then build on that
+* Get a second chip and let the agent control it too, to be able to instantly test wifi connection
+* then you can watch sipping your coffee
+* API can be obscure and buggy, the LLM with struggle with the same problems as humans
+* take your time to chat with the LLM, ask what the agent did, if it checked the documentation
+* LLM have limited attention and they get biased
+* My prompt before closing a topic was mostly: tests? docs? commits?
+* Ask the LLM if the agent harness is compatible with our tooling, and let it write new tools or change existing to speedup
+  iterations. E.g. `idf.py monitor` is made for humans and didn't work well inside the agent harness. I just told the agent to
+  code their own. Otherwise you will see it trying idf.py monitor over and over again, noticing that it doesn't work as
+  it expected.
+
+
+# Some of my prompts
+
+I captured some of my early prompts, because I thought I would need them later to build a specification or so.
+Then I noticed, clean code is actual enough and far more expressive and complete than a specification. I could
+turn the code at any time into a spec. In the end I spent most of the time watching the claude agent getting things
+fixed.
+
+
+```
+
+
 I want to build a standalone ESP32-S3 firmware that speaks the aioesphomeapi protocol over plaintext TCP so unmodified
 Home Assistant treats it as a regular ESPHome Bluetooth proxy, but with NimBLE as the BLE backend instead of Bluedroid (
 which ESPHome uses). Scope is BLE proxy only — no sensors, switches, OTA, or other ESPHome features — implementing just
@@ -51,3 +81,5 @@ for reference you can use https://github.com/martin-ger/esp32_nat_router
 and https://github.com/dchristl/esp32_nat_router_extended (i have a local copy.
 Port mappings can be configured through the website.
 create a new component for that.
+
+```

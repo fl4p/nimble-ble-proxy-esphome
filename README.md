@@ -5,23 +5,17 @@ plaintext protocol so unmodified Home Assistant treats it as a regular ESPHome
 Bluetooth proxy — but with **[NimBLE](https://github.com/h2zero/esp-nimble-cpp)**
 as the BLE backend instead of Bluedroid.
 
-I started this little project because the regular esphome proxy didn't connect
-to my sketchy Bluetooth BMS, so I vide-coded my own. This began as fun-project,
+Besides a BLE proxy it is:
+* NAT router
+* Bluetooth device repeater/cloner
+* ESP32 energy consumption playground: you can control many energy saving settings on the web dashboard and watch the internal chip temperature dropping.
+* Boilerplate for any coex WiFi/Bluetooth projects with web-interface
 
-* more stable, complete, energy saving than other esp32 NAT routers i use
-* this is 100% LLM-coded, didnt wrote a single line
-* the trick: bring the LLM agent in the full loop
-* Let it write small tests for basic assumptions, then build on that
-* Get a second chip and let the agent control it too, to be able to instantly test wifi connection
-* then you can watch sipping your coffee
-* API can be obscure and buggy, the LLM with struggle with the same problems as humans
-* take your time to chat with the LLM, ask what the agent did, if it checked the documentation
-* LLM have limited attention and they get biased
-* My prompt before closing a topic was mostly: tests? docs? commits?
-* Ask the LLM if the agent harness is compatible with our tooling, and let it write new tools or change existing to speedup
-  iterations. E.g. `idf.py monitor` is made for humans and didn't work well inside the agent harness. I just told the agent to
-  code their own. Otherwise you will see it trying idf.py monitor over and over again, noticing that it doesn't work as
-  it expected.
+I started this little project because the regular esphome proxy didn't connect
+to my sketchy Bluetooth BMS, so I [vide-coded](docs/vibe.md) my own. This began as fun-project, and it
+has become a more stable, complete and energy saving Wifi/Ble/Repeater/Bridge than other esp32 NAT routers I have used.
+
+
 
 
 * Esphome BLE proxy, you can use it outside of esphome env with their client libr (`TODO`)
