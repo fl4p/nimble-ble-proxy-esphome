@@ -5,18 +5,10 @@ plaintext protocol so unmodified Home Assistant treats it as a regular ESPHome
 Bluetooth proxy — but with **[NimBLE](https://github.com/h2zero/esp-nimble-cpp)**
 as the BLE backend instead of Bluedroid.
 
-Besides a BLE proxy it is:
-* NAT router
-* Bluetooth device repeater/cloner
-* ESP32 energy consumption playground: you can control many energy saving settings on the web dashboard and watch the internal chip temperature dropping.
-* Boilerplate for any coex WiFi/Bluetooth projects with web-interface
-
 I started this little project because the regular esphome proxy didn't connect
 to my sketchy Bluetooth BMS, so I [vide-coded](docs/vibe.md) my own. This began as fun-project, and it
 has become a more stable, complete and energy saving Wifi/Ble/Repeater/Bridge than other esp32 NAT routers I have used.
-
-
-
+Specifically it is or can be:
 
 * Esphome BLE proxy, you can use it outside of esphome env with their client libr (`TODO`)
 * BLE cloner/repeater: connect to a device, copy all its ble services/characteristics and start advertising them and
@@ -24,6 +16,7 @@ has become a more stable, complete and energy saving Wifi/Ble/Repeater/Bridge th
 * BLE scanner: decodes BTHome enconded advertisement packages and looks up vendor detaisls
 * SoftAP NAT router with port-mappings
 * Many energy saving knobs to explore the power saving capabilities of an esp32/s3 chip
+* Boilerplate for any coex WiFi/Bluetooth projects with web-interface
 
 ## Why
 
