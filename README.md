@@ -5,6 +5,32 @@ plaintext protocol so unmodified Home Assistant treats it as a regular ESPHome
 Bluetooth proxy — but with **[NimBLE](https://github.com/h2zero/esp-nimble-cpp)**
 as the BLE backend instead of Bluedroid.
 
+I started this little project because the regular esphome proxy didn't connect
+to my sketchy Bluetooth BMS, so I vide-coded my own. This began as fun-project,
+
+* more stable, complete, energy saving than other esp32 NAT routers i use
+* this is 100% LLM-coded, didnt wrote a single line
+* the trick: bring the LLM agent in the full loop
+* Let it write small tests for basic assumptions, then build on that
+* Get a second chip and let the agent control it too, to be able to instantly test wifi connection
+* then you can watch sipping your coffee
+* API can be obscure and buggy, the LLM with struggle with the same problems as humans
+* take your time to chat with the LLM, ask what the agent did, if it checked the documentation
+* LLM have limited attention and they get biased
+* My prompt before closing a topic was mostly: tests? docs? commits?
+* Ask the LLM if the agent harness is compatible with our tooling, and let it write new tools or change existing to speedup
+  iterations. E.g. `idf.py monitor` is made for humans and didn't work well inside the agent harness. I just told the agent to
+  code their own. Otherwise you will see it trying idf.py monitor over and over again, noticing that it doesn't work as
+  it expected.
+
+
+* Esphome BLE proxy, you can use it outside of esphome env with their client libr (`TODO`)
+* BLE cloner/repeater: connect to a device, copy all its ble services/characteristics and start advertising them and
+  passthrough all reads/writes/notifies. Useful for ble range extension without wifi.
+* BLE scanner: decodes BTHome enconded advertisement packages and looks up vendor detaisls
+* SoftAP NAT router with port-mappings
+* Many energy saving knobs to explore the power saving capabilities of an esp32/s3 chip
+
 ## Why
 
 Home Assistant's ESPHome integration is the easy path to extending Bluetooth
@@ -31,13 +57,13 @@ client accepts the device as a Bluetooth proxy:
 - **Handshake & housekeeping** — `Hello`, `Connect`, `Ping`, `DeviceInfo`,
   `ListEntities`/`ListEntitiesDone`, `SubscribeLogs` (silently accepted).
 - **Bluetooth proxy surface** (~15 messages) —
-  - Raw advertisement subscribe/unsubscribe + batched
-    `BluetoothLERawAdvertisementsResponse` stream.
-  - Connection-slot bookkeeping
-    (`SubscribeBluetoothConnectionsFree` / `BluetoothConnectionsFreeResponse`).
-  - GATT connect / disconnect with MTU exchange.
-  - GATT service / characteristic / descriptor discovery (chunked).
-  - GATT read / write / notify (with CCCD subscription).
+    - Raw advertisement subscribe/unsubscribe + batched
+      `BluetoothLERawAdvertisementsResponse` stream.
+    - Connection-slot bookkeeping
+      (`SubscribeBluetoothConnectionsFree` / `BluetoothConnectionsFreeResponse`).
+    - GATT connect / disconnect with MTU exchange.
+    - GATT service / characteristic / descriptor discovery (chunked).
+    - GATT read / write / notify (with CCCD subscription).
 - **Feature flags** advertised: `PASSIVE_SCAN | ACTIVE_CONNECTIONS | REMOTE_CACHING | RAW_ADVERTISEMENTS` (`0x27`).
 - **mDNS** — announces `_esphomelib._tcp` with the TXT records HA's discovery
   flow expects (`platform=ESP32`, `network=wifi`, `mac=…`, `version=…`, etc.).
@@ -105,18 +131,18 @@ NimBLE singleton without a circular dep on `api_server`.
 
 These Kconfig switches under `nimble-ble-proxy` choose what gets compiled in:
 
-| Kconfig | Default | What it adds |
-|---|---|---|
-| `CONFIG_NBP_WIFI` | `y` | STA + mDNS + dashboard httpd + aioesphomeapi server + embedded dashboard HTML |
-| `CONFIG_NBP_OTA` | `y` | `POST /update` HTTP OTA endpoint. Turn off for a lockdown build where firmware updates require serial. |
-| `CONFIG_NBP_AP_FALLBACK` | `n` | When STA can't associate within `CONFIG_NBP_AP_FALLBACK_SECS`, fall back to a SoftAP at `<hostname>-setup` (192.168.4.1) with a one-page form that POSTs credentials to NVS and reboots. Replaces edit-`wifi_creds.h`-and-reflash for first-time setup. |
-| `CONFIG_NBP_NAT_ROUTER` | `n` | SoftAP + NAPT out the STA uplink, with `/nat` (status + AP creds) and `/portmap` (inbound forwards). `/nat` also lists connected clients — MAC, leased IP, RSSI, and DHCP hostname (captured via a custom lwIP hook; see `components/dhcps_hostname`). Shown in the dashboard NAT panel. |
-| `CONFIG_NBP_BLE_HTTPD` | `n` | GATT request/response service (Web Bluetooth dashboard) |
-| `CONFIG_NBP_CLONE` | `n` | Clone supervisor, upstream client, local GATT mirror, `/clone` endpoint |
-| `CONFIG_NBP_SMP` | `n` | Static-passkey pairing as central (paired upstream peripherals). Passkey is set via `POST /clone?passkey=N` |
-| `CONFIG_NBP_DEVICES_PANEL` | `y` | 64-entry devices-seen table + `/devices` + dashboard table |
-| `CONFIG_NBP_WEB_CONSOLE` | `y` | 64 KiB log ring + `/log` + on-page console |
-| `CONFIG_NBP_BLE_AUTO_OFF` | `n` | Supervisor task that quiesces the BLE radio when idle: pauses the central scan when no API client / GATT link / clone needs it, and suspends advertising when WiFi is up and no central/clone needs the peripheral (kept on when WiFi is down so the BLE dashboard stays reachable). Idle grace `CONFIG_NBP_BLE_AUTO_OFF_IDLE_SECS` (default 30 s); re-activation is immediate. |
+| Kconfig                    | Default | What it adds                                                                                                                                                                                                                                                                                                                                                                    |
+|----------------------------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `CONFIG_NBP_WIFI`          | `y`     | STA + mDNS + dashboard httpd + aioesphomeapi server + embedded dashboard HTML                                                                                                                                                                                                                                                                                                   |
+| `CONFIG_NBP_OTA`           | `y`     | `POST /update` HTTP OTA endpoint. Turn off for a lockdown build where firmware updates require serial.                                                                                                                                                                                                                                                                          |
+| `CONFIG_NBP_AP_FALLBACK`   | `n`     | When STA can't associate within `CONFIG_NBP_AP_FALLBACK_SECS`, fall back to a SoftAP at `<hostname>-setup` (192.168.4.1) with a one-page form that POSTs credentials to NVS and reboots. Replaces edit-`wifi_creds.h`-and-reflash for first-time setup.                                                                                                                         |
+| `CONFIG_NBP_NAT_ROUTER`    | `n`     | SoftAP + NAPT out the STA uplink, with `/nat` (status + AP creds) and `/portmap` (inbound forwards). `/nat` also lists connected clients — MAC, leased IP, RSSI, and DHCP hostname (captured via a custom lwIP hook; see `components/dhcps_hostname`). Shown in the dashboard NAT panel.                                                                                        |
+| `CONFIG_NBP_BLE_HTTPD`     | `n`     | GATT request/response service (Web Bluetooth dashboard)                                                                                                                                                                                                                                                                                                                         |
+| `CONFIG_NBP_CLONE`         | `n`     | Clone supervisor, upstream client, local GATT mirror, `/clone` endpoint                                                                                                                                                                                                                                                                                                         |
+| `CONFIG_NBP_SMP`           | `n`     | Static-passkey pairing as central (paired upstream peripherals). Passkey is set via `POST /clone?passkey=N`                                                                                                                                                                                                                                                                     |
+| `CONFIG_NBP_DEVICES_PANEL` | `y`     | 64-entry devices-seen table + `/devices` + dashboard table                                                                                                                                                                                                                                                                                                                      |
+| `CONFIG_NBP_WEB_CONSOLE`   | `y`     | 64 KiB log ring + `/log` + on-page console                                                                                                                                                                                                                                                                                                                                      |
+| `CONFIG_NBP_BLE_AUTO_OFF`  | `n`     | Supervisor task that quiesces the BLE radio when idle: pauses the central scan when no API client / GATT link / clone needs it, and suspends advertising when WiFi is up and no central/clone needs the peripheral (kept on when WiFi is down so the BLE dashboard stays reachable). Idle grace `CONFIG_NBP_BLE_AUTO_OFF_IDLE_SECS` (default 30 s); re-activation is immediate. |
 
 Two common profiles:
 
