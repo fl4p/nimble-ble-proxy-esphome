@@ -29,9 +29,17 @@ jobs:
       - name: Seed placeholder WiFi credentials
         run: cp include/wifi_creds.h.example include/wifi_creds.h
 
+      # nanopb runtime + generator is gitignored (cloned per-host, see
+      # components/api_proto/generate.sh). CMake FATAL_ERRORs without it.
+      # Clone on the runner; the workspace is mounted into the build container.
+      - name: Vendor nanopb
+        run: git clone --depth 1 https://github.com/nanopb/nanopb.git components/api_proto/nanopb
+
       - name: Build (${{ matrix.name }})
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: release-v5.5
           target: esp32s3
-          command: idf.py -DSDKCONFIG_DEFAULTS="${{ matrix.defaults }}" build
+          # nanopb_generator.py (run by CMake) needs protobuf + a protoc;
+          # install both inside the IDF container before building.
+          command: pip install protobuf grpcio-tools && idf.py -DSDKCONFIG_DEFAULTS="${{ matrix.defaults }}" build
