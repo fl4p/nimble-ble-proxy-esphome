@@ -33,6 +33,18 @@
 #include <cstdlib>
 #include <cstring>
 
+// esp_coex_preference_set lives in IDF's coexist.c, which is only compiled
+// when software (or external) WiFi/BLE coexistence is enabled — and SW coex
+// is only on when BT is enabled. In a BLE-free build (CONFIG_NBP_BLE=n) the
+// symbol doesn't exist, so calling it is an undefined-reference link error.
+// There's also nothing to arbitrate without a second radio user, so make the
+// preference call a no-op when coex isn't built in.
+#if CONFIG_ESP_COEX_SW_COEXIST_ENABLE || CONFIG_ESP_COEX_EXTERNAL_COEXIST_ENABLE
+#define NBP_COEX_PREFER(p) esp_coex_preference_set(p)
+#else
+#define NBP_COEX_PREFER(p) ((void)0)
+#endif
+
 #if CONFIG_NBP_NAT_THROUGHPUT
 namespace {
 
@@ -291,7 +303,7 @@ void ap_up() {
   // hammers the heap and makes the dashboard crawl. PREFER_WIFI (vs the
   // BALANCE default) gives WiFi more RF opportunity; BLE scan/forwarding is
   // best-effort here anyway. Restored to BALANCE in ap_down().
-  esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
+  NBP_COEX_PREFER(ESP_COEX_PREFER_WIFI);
   configure_ap();
   set_ap_dns();
   // The AP netif comes up asynchronously (WIFI_EVENT_AP_START handler), but
@@ -336,7 +348,7 @@ void ap_down() {
   esp_wifi_set_mode(WIFI_MODE_STA);
   // No SoftAP to protect anymore — hand RF arbitration back to BALANCE so the
   // BLE scan/proxy regains its share when the device is STA-only.
-  esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+  NBP_COEX_PREFER(ESP_COEX_PREFER_BALANCE);
   g_enabled = false;
   ESP_LOGI(TAG, "NAT SoftAP disabled; radio back to STA-only");
 }
