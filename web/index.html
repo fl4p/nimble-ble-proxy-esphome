@@ -146,6 +146,8 @@ table#portmaps button.del:hover{background:#3b0a0a}
   <!-- NAT/repeater throughput; hidden until /stats.json reports ap_rx
        (i.e. an NBP_NAT_ROUTER build). See applyCaps(). -->
   <div id=chart3 class="nat-only hidden"></div>
+  <!-- WiFi link quality, 1 h. Hidden until /wifihist answers (liveness build). -->
+  <div id=chart4 class=hidden></div>
 
   <h2 class=ble-only>devices seen</h2>
   <div class="devwrap ble-only"><table id=devices><thead><tr>
@@ -542,8 +544,9 @@ const chartW = el => Math.min(900, el.clientWidth - 16);
 const chartEl  = document.getElementById('chart');
 const chart2El = document.getElementById('chart2');
 const chart3El = document.getElementById('chart3');
+const chart4El = document.getElementById('chart4');
 
-let u_rates, u_cpu, u_thru;
+let u_rates, u_cpu, u_thru, u_wifi;
 function initCharts() {
   u_rates = new uPlot({
     width: chartW(chartEl), height: 320,
@@ -675,6 +678,61 @@ async function tickStats() {
     }
     g_prev = s; g_prevT = now;
   } catch (e) { /* ignore poll errors; reconnect path handles drops */ }
+}
+
+// WiFi link-quality history (1 h). The device holds the ring buffer and serves
+// the whole series at /wifihist, so it survives a page reload — unlike the
+// in-browser rolling charts above. null until first fetch; false latches the
+// chart off on older firmware that lacks the endpoint (404).
+let g_wifihist = null;
+function initWifiChart() {
+  u_wifi = new uPlot({
+    width: chartW(chart4El), height: 220,
+    scales: { x: { time: false }, y: {}, ms: {} },
+    axes: [
+      { stroke: '#aaa', grid: { stroke: '#333' },
+        values: (u, vs) => vs.map(v => v + 'm') },
+      { stroke: '#aaa', grid: { stroke: '#333' },
+        values: (u, vs) => vs.map(v => v + ' dBm') },
+      { side: 1, scale: 'ms', stroke: '#22d3ee', grid: { show: false }, size: 50,
+        values: (u, vs) => vs.map(v => v + ' ms') },
+    ],
+    series: [
+      { label: 't (min ago)' },
+      { label: 'uplink dBm', stroke: '#4ade80', width: 2 },
+      { label: 'client dBm', stroke: '#f472b6', width: 2 },
+      { label: 'RTT ms', scale: 'ms', stroke: '#22d3ee', width: 2, value: fmt1 },
+      { label: 'loss%', scale: 'ms', stroke: '#ef4444', width: 1, dash: [4, 4], value: fmt1 },
+    ],
+  }, [[0], [null], [null], [null], [null]], chart4El);
+}
+async function tickWifiHist() {
+  if (g_wifihist === false) return;
+  try {
+    const d = await apiJson('GET /wifihist');
+    if (g_wifihist === null) {
+      g_wifihist = true;
+      chart4El.classList.remove('hidden');
+      initWifiChart();
+      u_wifi.setSize({ width: chartW(chart4El), height: 220 });
+    }
+    const n = d.count || 0, iv = d.interval || 30;
+    const xs = [], loss = [];
+    // Rolling loss% over a ~5-min window (window length scales with cadence).
+    const win = Math.max(1, Math.round(300 / iv));
+    for (let i = 0; i < n; i++) {
+      xs.push(-((n - 1 - i) * iv) / 60);
+      let lost = 0, seen = 0;
+      for (let j = Math.max(0, i - win + 1); j <= i; j++) {
+        seen++; if (d.rtt[j] === null) lost++;
+      }
+      loss.push(seen ? (100 * lost / seen) : null);
+    }
+    u_wifi.setData([xs, d.rssi, d.ap, d.rtt, loss]);
+    u_wifi.setLegend({ idx: n - 1 });
+  } catch (e) {
+    if (g_wifihist === null) g_wifihist = false;  // endpoint absent (old fw)
+  }
 }
 
 let g_logSeq = 0;
@@ -950,6 +1008,8 @@ function startPolling() {
   g_pollTimers.push(setInterval(tickDevices, 1000)); tickDevices();
   // NAT status changes slowly (client joins, manual edits) — 3 s is plenty.
   g_pollTimers.push(setInterval(loadNat,     3000)); loadNat();
+  // WiFi history is a device-side ring sampled every ~30 s; 15 s poll is ample.
+  g_pollTimers.push(setInterval(tickWifiHist, 15000)); tickWifiHist();
 }
 function stopPolling() {
   for (const id of g_pollTimers) clearInterval(id);

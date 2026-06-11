@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace liveness_wdt {
@@ -33,5 +34,18 @@ const char *set_params(int enabled, int interval_s, int threshold);
 // Force the failure counter to the threshold so the next tick reboots — proves
 // the recovery path end-to-end without having to wedge the network.
 void force_fail_test();
+
+// One WiFi-quality sample, recorded once per probe cycle (cadence = interval_s,
+// so the ring spans one hour at the 30 s default).
+struct WifiSample {
+  int8_t sta_rssi;    // uplink: STA→home-AP RSSI, dBm; 0 = unknown
+  int8_t ap_rssi;     // downlink: weakest associated client, dBm; 0 = none
+  uint16_t rtt_ms;    // uplink reachability RTT; 0xFFFF = probe failed (loss)
+  uint8_t sta_count;  // associated clients
+};
+
+// Copy the most-recent samples, oldest→newest, into out[] (up to `max`).
+// Returns the number written; *interval_s (if non-null) gets the sample cadence.
+size_t get_history(WifiSample *out, size_t max, uint32_t *interval_s);
 
 }  // namespace liveness_wdt

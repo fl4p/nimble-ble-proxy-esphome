@@ -14,6 +14,7 @@ idf_component_register(
     REQUIRES
         wifi_sta
         esp_netif
+        esp_wifi
         lwip
         nvs_flash
         esp_timer

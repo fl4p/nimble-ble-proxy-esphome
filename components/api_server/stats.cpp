@@ -544,6 +544,58 @@ esp_err_t liveness_post(httpd_req_t *req) {
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
+
+// One WiFi-quality field across all samples, emitted as a JSON array. Chunked
+// so we never need a multi-KB buffer; `null` marks an unknown/lost value.
+enum WifiField { WF_RSSI, WF_AP, WF_RTT, WF_STA };
+void wifihist_emit(httpd_req_t *req, const char *name, WifiField f,
+                   const liveness_wdt::WifiSample *s, size_t n, bool comma_after) {
+  char b[768];
+  int p = snprintf(b, sizeof(b), "\"%s\":[", name);
+  for (size_t i = 0; i < n; ++i) {
+    if (p > static_cast<int>(sizeof(b)) - 16) {
+      httpd_resp_send_chunk(req, b, p);
+      p = 0;
+    }
+    if (i) b[p++] = ',';
+    bool isnull = false;
+    int v = 0;
+    switch (f) {
+      case WF_RSSI: v = s[i].sta_rssi;  isnull = (s[i].sta_rssi == 0); break;
+      case WF_AP:   v = s[i].ap_rssi;   isnull = (s[i].ap_rssi == 0); break;
+      case WF_RTT:  v = s[i].rtt_ms;    isnull = (s[i].rtt_ms == 0xFFFF); break;
+      case WF_STA:  v = s[i].sta_count; break;
+    }
+    if (isnull) {
+      std::memcpy(b + p, "null", 4);
+      p += 4;
+    } else {
+      p += snprintf(b + p, sizeof(b) - p, "%d", v);
+    }
+  }
+  b[p++] = ']';
+  if (comma_after) b[p++] = ',';
+  httpd_resp_send_chunk(req, b, p);
+}
+
+esp_err_t wifihist_get(httpd_req_t *req) {
+  // static: keeps ~720 B off the httpd task stack; httpd serializes requests.
+  static liveness_wdt::WifiSample buf[120];
+  uint32_t interval = 30;
+  size_t n = liveness_wdt::get_history(buf, 120, &interval);
+  httpd_resp_set_type(req, "application/json");
+  char head[64];
+  int hn = snprintf(head, sizeof(head), "{\"interval\":%u,\"count\":%u,",
+                    static_cast<unsigned>(interval), static_cast<unsigned>(n));
+  httpd_resp_send_chunk(req, head, hn);
+  wifihist_emit(req, "rssi", WF_RSSI, buf, n, true);
+  wifihist_emit(req, "ap", WF_AP, buf, n, true);
+  wifihist_emit(req, "rtt", WF_RTT, buf, n, true);
+  wifihist_emit(req, "sta", WF_STA, buf, n, false);
+  httpd_resp_send_chunk(req, "}", 1);
+  httpd_resp_send_chunk(req, nullptr, 0);
+  return ESP_OK;
+}
 #endif  // CONFIG_NBP_LIVENESS_WDT
 
 esp_err_t hostname_post(httpd_req_t *req) {
@@ -1671,6 +1723,11 @@ void register_endpoints(httpd_handle_t srv) {
                             .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &liveness_g);
   httpd_register_uri_handler(srv, &liveness_p);
+  httpd_uri_t wifihist_g = {.uri = "/wifihist",
+                            .method = HTTP_GET,
+                            .handler = &wifihist_get,
+                            .user_ctx = nullptr};
+  httpd_register_uri_handler(srv, &wifihist_g);
 #endif
 #if CONFIG_NBP_BLE
   httpd_uri_t scan_g = {.uri = "/scan",

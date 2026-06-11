@@ -10,7 +10,9 @@
 #include "esp_netif.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
 #include "nvs.h"
@@ -51,7 +53,23 @@ std::atomic<uint32_t> g_last_ok_s{0};
 std::atomic<bool> g_have_ok{false};
 std::atomic<bool> g_force_test{false};
 
+// Rolling WiFi-quality history: one sample per probe cycle. 120 @ the 30 s
+// default = one hour. ~720 B; guarded by a mutex (httpd reader vs probe writer).
+constexpr size_t HIST_LEN = 120;
+WifiSample g_hist[HIST_LEN];
+size_t g_hist_head = 0;     // next slot to write
+uint32_t g_hist_total = 0;  // total samples ever recorded
+SemaphoreHandle_t g_hist_mtx = nullptr;
+
 uint32_t uptime_s() { return static_cast<uint32_t>(esp_timer_get_time() / 1000000); }
+
+// Clamp a microsecond duration into the uint16 ms field (0xFFFF reserved for loss).
+uint16_t clamp_rtt_ms(int64_t us) {
+  int64_t ms = us / 1000;
+  if (ms < 0) ms = 0;
+  if (ms > 0xFFFE) ms = 0xFFFE;
+  return static_cast<uint16_t>(ms);
+}
 
 void load_nvs() {
   nvs_handle_t h;
@@ -117,17 +135,60 @@ bool reachable(uint32_t ip_be, uint16_t port) {
   return ok;
 }
 
-// Probe the STA default gateway (port 80) and the broker. Reachable if either responds.
-bool probe_cycle() {
+// Probe the STA default gateway (port 80) and the broker. Reachable if either
+// responds; *rtt_ms gets the connect latency of whichever answered (0xFFFF on
+// total failure).
+bool probe_cycle(uint16_t *rtt_ms) {
   uint32_t gw_be = 0;
   esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
   esp_netif_ip_info_t info = {};
   if (sta != nullptr && esp_netif_get_ip_info(sta, &info) == ESP_OK) gw_be = info.gw.addr;
 
-  if (gw_be != 0 && reachable(gw_be, 80)) return true;
+  if (gw_be != 0) {
+    int64_t t0 = esp_timer_get_time();
+    if (reachable(gw_be, 80)) {
+      *rtt_ms = clamp_rtt_ms(esp_timer_get_time() - t0);
+      return true;
+    }
+  }
   uint32_t broker_be = ::inet_addr(BROKER_IP);
-  if (broker_be != INADDR_NONE && reachable(broker_be, BROKER_PORT)) return true;
+  if (broker_be != INADDR_NONE) {
+    int64_t t0 = esp_timer_get_time();
+    if (reachable(broker_be, BROKER_PORT)) {
+      *rtt_ms = clamp_rtt_ms(esp_timer_get_time() - t0);
+      return true;
+    }
+  }
+  *rtt_ms = 0xFFFF;
   return false;
+}
+
+// Snapshot RSSI (uplink via STA AP-record, downlink via the weakest associated
+// client) and append a sample to the ring. Called once per probe cycle.
+void record_sample(bool ok, uint16_t rtt_ms) {
+  WifiSample s{};
+  s.rtt_ms = ok ? rtt_ms : 0xFFFF;
+
+  wifi_ap_record_t ap{};
+  if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) s.sta_rssi = ap.rssi;
+
+  wifi_sta_list_t sl{};
+  if (esp_wifi_ap_get_sta_list(&sl) == ESP_OK) {
+    s.sta_count = static_cast<uint8_t>(sl.num);
+    int8_t worst = 0;
+    for (int i = 0; i < sl.num; ++i) {
+      int8_t r = sl.sta[i].rssi;
+      if (i == 0 || r < worst) worst = r;
+    }
+    s.ap_rssi = worst;
+  }
+
+  if (g_hist_mtx == nullptr) return;
+  xSemaphoreTake(g_hist_mtx, portMAX_DELAY);
+  g_hist[g_hist_head] = s;
+  g_hist_head = (g_hist_head + 1) % HIST_LEN;
+  ++g_hist_total;
+  xSemaphoreGive(g_hist_mtx);
 }
 
 [[noreturn]] void do_reboot(const char *why) {
@@ -155,7 +216,22 @@ bool probe_cycle() {
     if (now - last_probe_s < g_interval_s.load()) continue;
     last_probe_s = now;
 
-    if (probe_cycle()) {
+    // A disassociated STA is the native reconnect path's job, not ours.
+    // Rebooting on top of an in-progress reconnect — common on a weak link that
+    // keeps dropping and re-associating — just throws the progress away. So
+    // hold the counter at 0 while the link is down (record the outage for the
+    // chart) and reboot only for an associated-but-dead path: a true wedge.
+    if (!wifi_sta::is_connected()) {
+      g_failures.store(0);
+      record_sample(false, 0xFFFF);
+      continue;
+    }
+
+    uint16_t rtt = 0xFFFF;
+    bool ok = probe_cycle(&rtt);
+    record_sample(ok, rtt);
+
+    if (ok) {
       g_failures.store(0);
       g_last_ok_s.store(now);
       g_have_ok.store(true);
@@ -174,6 +250,7 @@ bool probe_cycle() {
 void start() {
   if (g_started.exchange(true)) return;
   load_nvs();
+  g_hist_mtx = xSemaphoreCreateMutex();
   xTaskCreate(&task, "liveness", 4096, nullptr, 3, nullptr);
   ESP_LOGI(TAG, "started: interval=%us threshold=%u enabled=%d",
            (unsigned)g_interval_s.load(), (unsigned)g_threshold.load(), g_enabled.load());
@@ -200,6 +277,20 @@ const char *set_params(int enabled, int interval_s, int threshold) {
 }
 
 void force_fail_test() { g_force_test.store(true); }
+
+size_t get_history(WifiSample *out, size_t max, uint32_t *interval_s) {
+  if (interval_s) *interval_s = g_interval_s.load();
+  if (g_hist_mtx == nullptr || out == nullptr || max == 0) return 0;
+  xSemaphoreTake(g_hist_mtx, portMAX_DELAY);
+  size_t avail = g_hist_total < HIST_LEN ? g_hist_total : HIST_LEN;
+  size_t n = avail < max ? avail : max;
+  // oldest index, then skip forward if the caller wants fewer than available.
+  size_t oldest = (g_hist_total < HIST_LEN) ? 0 : g_hist_head;
+  size_t start = (oldest + (avail - n)) % HIST_LEN;
+  for (size_t i = 0; i < n; ++i) out[i] = g_hist[(start + i) % HIST_LEN];
+  xSemaphoreGive(g_hist_mtx);
+  return n;
+}
 
 }  // namespace liveness_wdt
 
