@@ -32,6 +32,7 @@ idf_component_register(
         log
         lwip
         nvs_flash
+        liveness_wdt
 )
 
 # Patch the managed esp-nimble-cpp header to add `setNotifyCallback`.

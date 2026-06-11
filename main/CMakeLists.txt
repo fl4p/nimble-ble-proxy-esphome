@@ -11,4 +11,5 @@ idf_component_register(
         ble_httpd
         ws_proxy
         nat_router
+        liveness_wdt
 )

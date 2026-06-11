@@ -26,6 +26,10 @@
 #include "proxy_config.h"
 #include "scanner.h"
 
+#if CONFIG_NBP_LIVENESS_WDT
+#include "liveness_wdt.h"
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cstdarg>
@@ -501,6 +505,46 @@ esp_err_t appinfo_get(httpd_req_t *req) {
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
 }
+
+#if CONFIG_NBP_LIVENESS_WDT
+esp_err_t liveness_get(httpd_req_t *req) {
+  liveness_wdt::State s = liveness_wdt::get_state();
+  char buf[160];
+  char age[16];
+  if (s.last_ok_age_s == UINT32_MAX)
+    std::strcpy(age, "null");
+  else
+    snprintf(age, sizeof(age), "%u", static_cast<unsigned>(s.last_ok_age_s));
+  int n = snprintf(buf, sizeof(buf),
+                   "{\"enabled\":%s,\"interval\":%u,\"threshold\":%u,"
+                   "\"failures\":%u,\"last_ok_s\":%s}",
+                   s.enabled ? "true" : "false", static_cast<unsigned>(s.interval_s),
+                   static_cast<unsigned>(s.threshold), static_cast<unsigned>(s.failures), age);
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, n);
+}
+
+esp_err_t liveness_post(httpd_req_t *req) {
+  char query[96];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
+  }
+  char val[12];
+  if (httpd_query_key_value(query, "test", val, sizeof(val)) == ESP_OK && atoi(val) != 0) {
+    liveness_wdt::force_fail_test();
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"ok\":true,\"test\":true}", 23);
+  }
+  int en = -1, intv = -1, thr = -1;
+  if (httpd_query_key_value(query, "enabled", val, sizeof(val)) == ESP_OK) en = atoi(val) ? 1 : 0;
+  if (httpd_query_key_value(query, "interval", val, sizeof(val)) == ESP_OK) intv = atoi(val);
+  if (httpd_query_key_value(query, "threshold", val, sizeof(val)) == ESP_OK) thr = atoi(val);
+  const char *err = liveness_wdt::set_params(en, intv, thr);
+  if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+#endif  // CONFIG_NBP_LIVENESS_WDT
 
 esp_err_t hostname_post(httpd_req_t *req) {
   // Query buffer sized for "val=" + max hostname.
@@ -1616,6 +1660,18 @@ void register_endpoints(httpd_handle_t srv) {
                            .handler = &appinfo_get,
                            .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &appinfo_g);
+#if CONFIG_NBP_LIVENESS_WDT
+  httpd_uri_t liveness_g = {.uri = "/liveness",
+                            .method = HTTP_GET,
+                            .handler = &liveness_get,
+                            .user_ctx = nullptr};
+  httpd_uri_t liveness_p = {.uri = "/liveness",
+                            .method = HTTP_POST,
+                            .handler = &liveness_post,
+                            .user_ctx = nullptr};
+  httpd_register_uri_handler(srv, &liveness_g);
+  httpd_register_uri_handler(srv, &liveness_p);
+#endif
 #if CONFIG_NBP_BLE
   httpd_uri_t scan_g = {.uri = "/scan",
                         .method = HTTP_GET,

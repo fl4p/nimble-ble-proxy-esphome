@@ -34,6 +34,39 @@ config NBP_OTA
         re-flash via serial picks ota_0 by default. To roll back to
         a single-slot factory layout edit partitions.csv.
 
+config NBP_LIVENESS_WDT
+    bool "Self-recovery liveness watchdog (reboot on upstream-LAN loss)"
+    depends on NBP_WIFI
+    default y
+    help
+        Spawn a supervisor task that probes upstream LAN reachability
+        (STA default gateway + a known-open host) every
+        NBP_LIVENESS_INTERVAL_SECS. After NBP_LIVENESS_THRESHOLD
+        consecutive cycles where ALL targets are unreachable, it calls
+        esp_restart().
+
+        Recovers a total network wedge (a WiFi/coex livelock under heavy
+        forwarded throughput) where tasks stay alive — so the IDF
+        Task-WDT never fires — but the IP path is dead, which otherwise
+        needs a physical power-cycle. Runtime-tunable / disable via
+        POST /liveness?enabled=0; GET /liveness reports state.
+
+config NBP_LIVENESS_INTERVAL_SECS
+    int "Liveness: seconds between probe cycles"
+    depends on NBP_LIVENESS_WDT
+    default 30
+    range 5 3600
+
+config NBP_LIVENESS_THRESHOLD
+    int "Liveness: consecutive failed cycles before reboot"
+    depends on NBP_LIVENESS_WDT
+    default 6
+    range 1 60
+    help
+        Default 6 × 30 s ≈ 3 min of sustained unreachability before a
+        reboot — comfortably longer than a normal STA reconnect, so a
+        brief AP blip self-heals without rebooting.
+
 config NBP_AP_FALLBACK
     bool "SoftAP fallback + provisioning page when STA can't associate"
     depends on NBP_WIFI

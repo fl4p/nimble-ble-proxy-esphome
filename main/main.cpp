@@ -13,6 +13,10 @@
 #include "wifi_sta.h"
 #endif
 
+#if CONFIG_NBP_LIVENESS_WDT
+#include "liveness_wdt.h"
+#endif
+
 #if CONFIG_NBP_CLONE
 #include "clone.h"
 #include "clone_config.h"
@@ -189,6 +193,12 @@ extern "C" void app_main() {
   // Piggyback the stats UI on the OTA httpd so we don't burn an extra
   // LWIP socket budget on a second listener.
   api_server::stats::register_endpoints(ota::handle());
+#if CONFIG_NBP_LIVENESS_WDT
+  // Self-recovery: reboot if the upstream LAN goes unreachable for a sustained
+  // window (a WiFi/coex livelock under heavy forwarded throughput keeps tasks
+  // alive — so the Task-WDT never fires — while the IP path is dead).
+  liveness_wdt::start();
+#endif
 #if CONFIG_NBP_BLE
   // Wire the ble_backend → api_server publish hook before either starts
   // accepting traffic. Order between start() calls doesn't matter as
