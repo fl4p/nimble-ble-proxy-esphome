@@ -35,8 +35,8 @@ html{scrollbar-color:#2a2a2a #0a0a0a;scrollbar-width:thin}
 ::-webkit-scrollbar-thumb:hover{background:#3a3a3a}
 h1,h2{font-size:1.1em;margin:0 0 1em}
 h2{margin-top:1.5em}
-#chart,#chart2,#chart3{background:#1a1a1a;padding:.5em;border-radius:6px;display:block;max-width:100%}
-#chart2,#chart3{margin-top:.5em}
+#chart,#chart2,#chart3,#chart4{background:#1a1a1a;padding:.5em;border-radius:6px;display:block;max-width:100%}
+#chart,#chart3,#chart4{margin-top:.5em}
 #console{background:#0a0a0a;color:#d4d4d4;
   font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
   padding:.5em;border-radius:6px;width:100%;max-width:920px;
@@ -140,23 +140,9 @@ table#portmaps button.del:hover{background:#3b0a0a}
 </div>
 
 <div id=app class=hidden>
-  <div id=chart></div>
-  <br>
-  <div id=chart2></div>
-  <!-- NAT/repeater throughput; hidden until /stats.json reports ap_rx
-       (i.e. an NBP_NAT_ROUTER build). See applyCaps(). -->
-  <div id=chart3 class="nat-only hidden"></div>
-  <!-- WiFi link quality, 1 h. Hidden until /wifihist answers (liveness build). -->
-  <div id=chart4 class=hidden></div>
-
-  <h2 class=ble-only>devices seen</h2>
-  <div class="devwrap ble-only"><table id=devices><thead><tr>
-    <th>MAC</th><th>type</th><th>name</th><th class=r>RSSI</th>
-    <th class=r>adv/s</th><th class=r>total</th>
-    <th class=r>age</th><th>tag</th><th>BTHome</th><th></th>
-  </tr></thead><tbody></tbody></table></div>
-
-  <!-- Tunables grouped by subsystem: CPU → WiFi → BLE → device.
+  <!-- Tunables grouped by subsystem: CPU → WiFi → BLE → device. Placed
+       first so the device is configured up top, with the CPU/temp chart
+       directly below showing the thermal effect of those settings.
        Each group is a flex-wrap row that collapses cleanly on narrow
        viewports. "BLE scan" here means central-role scanning (advert
        collection for HA + clone upstream discovery); peripheral-mode
@@ -248,6 +234,23 @@ table#portmaps button.del:hover{background:#3b0a0a}
       <button id=reboot class=danger>reboot device</button>
     </div>
   </div>
+
+  <!-- CPU/temp chart sits right under the tunables that drive it, then
+       BLE activity, WiFi link, and NAT throughput. -->
+  <div id=chart2></div>
+  <div id=chart></div>
+  <!-- WiFi link quality, 1 h. Hidden until /wifihist answers (liveness build). -->
+  <div id=chart4 class=hidden></div>
+  <!-- NAT/repeater throughput; hidden until /stats.json reports ap_rx
+       (i.e. an NBP_NAT_ROUTER build). See applyCaps(). -->
+  <div id=chart3 class="nat-only hidden"></div>
+
+  <h2 class=ble-only>devices seen</h2>
+  <div class="devwrap ble-only"><table id=devices><thead><tr>
+    <th>MAC</th><th>type</th><th>name</th><th class=r>RSSI</th>
+    <th class=r>adv/s</th><th class=r>total</th>
+    <th class=r>age</th><th>tag</th><th>BTHome</th><th></th>
+  </tr></thead><tbody></tbody></table></div>
 
   <!-- NAT router panel. Hidden unless GET /nat succeeds (i.e. the
        firmware was built with CONFIG_NBP_NAT_ROUTER); loadNat() unhides
@@ -554,7 +557,7 @@ function initCharts() {
     axes: [
       { stroke: '#aaa', grid: { stroke: '#333' } },
       { stroke: '#aaa', grid: { stroke: '#333' } },
-      { side: 1, scale: 'kb', stroke: '#9ca3af', grid: { show: false }, size: 52,
+      { side: 1, scale: 'kb', stroke: '#9ca3af', grid: { show: false }, size: 64,
         values: (u, vs) => vs.map(v => v + ' KB') },
     ],
     series: [
@@ -594,7 +597,7 @@ function initCharts() {
     scales: { x: { time: false }, y: {} },
     axes: [
       { stroke: '#aaa', grid: { stroke: '#333' } },
-      { stroke: '#aaa', grid: { stroke: '#333' },
+      { stroke: '#aaa', grid: { stroke: '#333' }, size: 58,
         values: (u, vs) => vs.map(v => v + ' KB/s') },
     ],
     series: [
@@ -692,9 +695,9 @@ function initWifiChart() {
     axes: [
       { stroke: '#aaa', grid: { stroke: '#333' },
         values: (u, vs) => vs.map(v => v + 'm') },
-      { stroke: '#aaa', grid: { stroke: '#333' },
+      { stroke: '#aaa', grid: { stroke: '#333' }, size: 72,
         values: (u, vs) => vs.map(v => v + ' dBm') },
-      { side: 1, scale: 'ms', stroke: '#22d3ee', grid: { show: false }, size: 50,
+      { side: 1, scale: 'ms', stroke: '#22d3ee', grid: { show: false }, size: 64,
         values: (u, vs) => vs.map(v => v + ' ms') },
     ],
     series: [
