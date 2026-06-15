@@ -1,0 +1,10 @@
+- [Alert sound on manual prompts](feedback_alert_sound.md) — play `afplay /System/Library/Sounds/Glass.aiff &` when the user needs to click in another window (BLE Connect, browser pickers, etc.)
+- [No AskUserQuestion for ops choices](feedback_no_ask_user_question.md) — for reversible "which port / which proc" decisions, just make the call or describe the situation in text; reserve AskUserQuestion for design/scope.
+- [BLE clone gotchas](feedback_clone_gotchas.md) — 5 critical gotchas: disconnect before Server::start(), skip descriptor mirroring, CONFIG_BT_NIMBLE_DYNAMIC_SERVICE=y, async connect only, WDT 30s.
+- [WiFi/BLE coex priority](feedback_coex_wifi_priority.md) — bias radio to WiFi when SoftAP is up via `esp_coex_preference_set(ESP_COEX_PREFER_WIFI)` to avoid SA-Query timeouts and client flapping.
+- [Silent-device recovery](feedback_silent_device_recovery.md) — if the ESP32 stops emitting on serial, try `esptool --before default_reset` on both /dev/cu.usbmodem* ports.
+- [Clone test targets + PINs](project_clone_targets.md) — SmartShunt PIN 123456, fugu-flat 70:04:1D:A4:EA:36 PIN 654321; switching targets requires `/passkey?val=` too (no per-target PIN today).
+- [No RSSI-distance in UI](feedback_no_rssi_distance.md) — don't surface BLE distance estimates from RSSI+TX; indoor multipath makes them useless. RSSI dBm itself is fine.
+- [Device config needs POST](feedback_device_curl_post.md) — config endpoints (wifips, txpower, etc.) only apply via `curl -X POST`; a bare curl is a GET that silently reads.
+- [Power-mgmt = instability](feedback_wifi_ps_instability.md) — CPU light-sleep (not WiFi PS) was the real cause of hangs/unreachability; both now default OFF (g_light_sleep=false, DEFAULT_WIFI_LI=0). Recover live via POST /cpufreq?ls=0 + /wifips?li=0.
+- [NAT SoftAP runs hot](feedback_nat_ap_heat.md) — NAT/APSTA keeps the radio at 100% duty → ~60°C (vs 35°C STA-only); RF not CPU. Mitigate with WiFi PS + lower TX power, not a bug.
