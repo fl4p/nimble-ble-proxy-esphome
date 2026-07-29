@@ -11,7 +11,6 @@ const variantSelect = el("variantSelect");
 const baudSelect = el("baudSelect");
 const connectButton = el("connectButton");
 const flashButton = el("flashButton");
-const disconnectButton = el("disconnectButton");
 const support = el("support");
 const chipStatus = el("chipStatus");
 const assetStatus = el("assetStatus");
@@ -185,13 +184,18 @@ async function getSerialPort() {
   return navigator.serial.requestPort({});
 }
 
+function setConnectionButtonConnected(connected) {
+  connectButton.textContent = connected ? "Disconnect" : "Connect";
+  connectButton.classList.toggle("primary", !connected);
+  connectButton.classList.toggle("danger", connected);
+}
+
 async function connectAndDetect() {
   if (!checkSupport()) return;
   connectButton.disabled = true;
   setProgress(0);
   try {
     port = await getSerialPort();
-    appendLog(`Selected serial port: ${formatSerialPortInfo(port)}`);
     transport = new Transport(port, true);
     loader = new ESPLoader({
       transport,
@@ -199,6 +203,7 @@ async function connectAndDetect() {
       terminal,
       debugLogging: false,
     });
+    appendLog(`Selected serial port: ${formatSerialPortInfo(port)}`);
     detectedChipName = await loader.main();
     detectedTarget = normalizeTarget(detectedChipName || loader.chip?.CHIP_NAME || "");
     if (!supportedTargets.includes(detectedTarget)) {
@@ -206,7 +211,7 @@ async function connectAndDetect() {
     }
     chipStatus.textContent = `${detectedChipName} → ${detectedTarget}`;
     appendLog(`Detected target: ${detectedTarget}`);
-    disconnectButton.disabled = false;
+    setConnectionButtonConnected(true);
     updateSelectedAsset();
   } catch (error) {
     chipStatus.textContent = "not connected";
@@ -275,13 +280,20 @@ async function disconnect() {
   detectedTarget = null;
   detectedChipName = null;
   chipStatus.textContent = "not connected";
-  disconnectButton.disabled = true;
+  setConnectionButtonConnected(false);
   updateSelectedAsset();
 }
 
-connectButton.addEventListener("click", connectAndDetect);
+async function toggleConnection() {
+  if (transport) {
+    await disconnect();
+    return;
+  }
+  await connectAndDetect();
+}
+
+connectButton.addEventListener("click", toggleConnection);
 flashButton.addEventListener("click", flashDetectedChip);
-disconnectButton.addEventListener("click", disconnect);
 releaseSelect.addEventListener("change", updateSelectedAsset);
 variantSelect.addEventListener("change", updateSelectedAsset);
 

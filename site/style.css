@@ -73,7 +73,7 @@ h2 { margin-bottom: 0; }
 
 .controls {
   display: grid;
-  grid-template-columns: minmax(220px, 1.4fr) minmax(220px, 1fr) minmax(130px, .5fr);
+  grid-template-columns: minmax(220px, 1fr) minmax(130px, .5fr);
   gap: 1rem;
 }
 
@@ -121,9 +121,16 @@ button.success {
 
 .actions {
   display: flex;
+  align-items: flex-start;
   flex-wrap: wrap;
   gap: .75rem;
   margin: 1rem 0;
+}
+
+.connect-stack {
+  display: grid;
+  gap: .75rem;
+  min-width: 220px;
 }
 
 .status-grid {

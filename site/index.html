@@ -19,10 +19,6 @@
       <div class="support" id="support"></div>
       <div class="controls">
         <label>
-          Release
-          <select id="releaseSelect"></select>
-        </label>
-        <label>
           Image
           <select id="variantSelect">
             <option value="ble-on">BLE proxy + WiFi dashboard</option>
@@ -40,9 +36,14 @@
         </label>
       </div>
       <div class="actions">
-        <button id="connectButton" type="button" class="primary">Connect</button>
+        <div class="connect-stack">
+          <button id="connectButton" type="button" class="primary">Connect</button>
+          <label>
+            Release
+            <select id="releaseSelect"></select>
+          </label>
+        </div>
         <button id="flashButton" type="button" class="success" disabled>Flash</button>
-        <button id="disconnectButton" type="button" disabled>Disconnect</button>
       </div>
       <dl class="status-grid">
         <div>
