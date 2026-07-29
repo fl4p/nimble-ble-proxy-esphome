@@ -9,7 +9,6 @@ const el = (id) => document.getElementById(id);
 const releaseSelect = el("releaseSelect");
 const variantSelect = el("variantSelect");
 const baudSelect = el("baudSelect");
-const refreshButton = el("refreshButton");
 const connectButton = el("connectButton");
 const flashButton = el("flashButton");
 const disconnectButton = el("disconnectButton");
@@ -226,7 +225,6 @@ async function flashDetectedChip() {
 
   flashButton.disabled = true;
   connectButton.disabled = true;
-  refreshButton.disabled = true;
   setProgress(0);
   try {
     const data = await downloadAsset(asset);
@@ -248,7 +246,6 @@ async function flashDetectedChip() {
   } finally {
     flashButton.disabled = false;
     connectButton.disabled = false;
-    refreshButton.disabled = false;
   }
 }
 
@@ -268,9 +265,6 @@ async function disconnect() {
   updateSelectedAsset();
 }
 
-refreshButton.addEventListener("click", () => loadReleases().catch((error) => {
-  releasesEl.textContent = `Failed to load releases: ${error.message || error}`;
-}));
 connectButton.addEventListener("click", connectAndDetect);
 flashButton.addEventListener("click", flashDetectedChip);
 disconnectButton.addEventListener("click", disconnect);
