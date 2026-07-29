@@ -71,12 +71,6 @@ h2 { margin-bottom: 0; }
 .support.ok { color: var(--ok); }
 .support.bad { color: var(--danger); }
 
-.controls {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(130px, .5fr);
-  gap: 1rem;
-}
-
 label {
   display: grid;
   gap: .45rem;
@@ -120,17 +114,36 @@ button.success {
 }
 
 .actions {
-  display: flex;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  gap: .75rem;
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) auto;
+  align-items: start;
+  gap: 1rem;
   margin: 1rem 0;
 }
 
 .connect-stack {
   display: grid;
   gap: .75rem;
-  min-width: 220px;
+}
+
+.connect-stack > button {
+  justify-self: start;
+}
+
+.picker-row {
+  display: grid;
+  grid-template-columns: minmax(160px, .45fr) minmax(240px, 1fr);
+  gap: 1rem;
+}
+
+.flash-stack {
+  display: flex;
+  align-items: end;
+  gap: .75rem;
+}
+
+.flash-stack label {
+  min-width: 130px;
 }
 
 .status-grid {
@@ -218,5 +231,6 @@ a { color: var(--accent); }
 
 @media (max-width: 760px) {
   main { padding: 2rem 0; }
-  .controls, .status-grid { grid-template-columns: 1fr; }
+  .actions, .picker-row, .status-grid { grid-template-columns: 1fr; }
+  .flash-stack { align-items: stretch; }
 }
