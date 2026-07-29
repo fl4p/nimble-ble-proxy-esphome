@@ -120,7 +120,7 @@ function getProvisioningConfig() {
 
 function updateSoftApFields() {
   const enabled = softApEnabled.checked;
-  softApFields.setAttribute("aria-disabled", enabled ? "false" : "true");
+  softApFields.hidden = !enabled;
   softApSsid.disabled = !enabled;
   softApPsk.disabled = !enabled;
 }
