@@ -217,10 +217,16 @@ async function connectAndDetect() {
   }
 }
 
+function hostedFirmwareUrl(asset) {
+  const release = selectedRelease();
+  return `firmware/${encodeURIComponent(release.tag_name)}/${encodeURIComponent(asset.name)}`;
+}
+
 async function downloadAsset(asset) {
-  appendLog(`Downloading ${asset.name}…`);
-  const response = await fetch(asset.browser_download_url);
-  if (!response.ok) throw new Error(`Download failed with HTTP ${response.status}`);
+  const url = hostedFirmwareUrl(asset);
+  appendLog(`Downloading ${url}…`);
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Download failed with HTTP ${response.status}: ${url}`);
   return new Uint8Array(await response.arrayBuffer());
 }
 

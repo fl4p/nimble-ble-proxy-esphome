@@ -23,6 +23,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      - name: Stage latest release firmware
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""')"
+          if [ -n "$tag" ]; then
+            mkdir -p "site/firmware/$tag"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*-flash.bin' --dir "site/firmware/$tag" --clobber
+          fi
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
