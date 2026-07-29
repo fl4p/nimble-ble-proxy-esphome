@@ -4,8 +4,7 @@
 
 // wifi_creds.h is required for a fixed-credential STA build. With
 // NBP_AP_FALLBACK=y, runtime provisioning via the SoftAP page replaces
-// the header; an empty WIFI_SSID just means "go straight to AP" on
-// first boot.
+// the header when no compile-time SSID is available.
 #if __has_include("wifi_creds.h")
 #include "wifi_creds.h"
 #elif CONFIG_NBP_AP_FALLBACK
@@ -34,6 +33,7 @@
 #endif
 
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 
@@ -136,7 +136,6 @@ void on_ip_event(void * /*arg*/, esp_event_base_t base, int32_t id,
 // most phones will offer to open the AP's "config" page automatically.
 
 constexpr const char *AP_TAG = "wifi-ap";
-constexpr const char *AP_PSK = "nimble-proxy";  // WPA2-PSK; 8+ chars req
 constexpr uint8_t AP_CHANNEL = 1;
 constexpr uint8_t AP_MAX_CONN = 2;
 
@@ -162,6 +161,13 @@ const char *AP_PAGE_HTML =
 // Naive form-urlencoded value extractor: finds `key=` in `src`, copies
 // the value (up to '&' or end) into `out` with simple percent-decoding
 // for '+' → space and "%hh". Returns true if key was found.
+bool is_hex_string(const char *s) {
+  for (; *s; ++s) {
+    if (!std::isxdigit(static_cast<unsigned char>(*s))) return false;
+  }
+  return true;
+}
+
 bool form_get(const char *src, const char *key, char *out, size_t cap) {
   out[0] = '\0';
   size_t klen = std::strlen(key);
@@ -223,13 +229,23 @@ esp_err_t ap_wifi_post(httpd_req_t *req) {
   }
   buf[total] = '\0';
 
-  char ssid[33] = {0};
-  char psk[65] = {0};
+  char ssid[34] = {0};
+  char psk[66] = {0};
   if (!form_get(buf, "ssid", ssid, sizeof(ssid)) || ssid[0] == '\0') {
     httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing ssid");
     return ESP_FAIL;
   }
+  if (std::strlen(ssid) > 32) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ssid too long");
+    return ESP_FAIL;
+  }
   form_get(buf, "psk", psk, sizeof(psk));  // may be empty (open AP)
+  size_t psk_len = std::strlen(psk);
+  if ((psk_len > 0 && psk_len < 8) || psk_len > 64 ||
+      (psk_len == 64 && !is_hex_string(psk))) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid password");
+    return ESP_FAIL;
+  }
 
   nvs_handle_t h;
   if (nvs_open(NVS_WIFI_NS, NVS_READWRITE, &h) != ESP_OK) {
@@ -285,11 +301,9 @@ void compose_ap_ssid(char *out, size_t cap) {
   std::strncpy(reinterpret_cast<char *>(ap.ap.ssid), ssid,
                sizeof(ap.ap.ssid) - 1);
   ap.ap.ssid_len = static_cast<uint8_t>(std::strlen(ssid));
-  std::strncpy(reinterpret_cast<char *>(ap.ap.password), AP_PSK,
-               sizeof(ap.ap.password) - 1);
   ap.ap.channel = AP_CHANNEL;
   ap.ap.max_connection = AP_MAX_CONN;
-  ap.ap.authmode = WIFI_AUTH_WPA2_PSK;
+  ap.ap.authmode = WIFI_AUTH_OPEN;
 
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
   ESP_ERROR_CHECK(esp_wifi_start());
@@ -313,8 +327,8 @@ void compose_ap_ssid(char *out, size_t cap) {
   httpd_register_uri_handler(srv, &root);
   httpd_register_uri_handler(srv, &post);
 
-  ESP_LOGW(AP_TAG, "SoftAP up: SSID='%s' PSK='%s' — http://192.168.4.1/",
-           ssid, AP_PSK);
+  ESP_LOGW(AP_TAG, "SoftAP up: SSID='%s' (open) — http://192.168.4.1/",
+           ssid);
 
   // Block forever; ap_wifi_post reboots the device on success.
   while (true) vTaskDelay(portMAX_DELAY);
@@ -348,11 +362,9 @@ void start_and_wait_for_ip() {
   ESP_ERROR_CHECK(esp_event_handler_instance_register(
       IP_EVENT, IP_EVENT_STA_GOT_IP, &on_ip_event, nullptr, nullptr));
 
-  // Credentials: NVS overrides compile-time defaults from wifi_creds.h.
-  // With NBP_AP_FALLBACK=y the defaults may be empty strings — that's
-  // the "no creds set yet, go straight to AP" path below.
   char ssid[33] = {0};
   char psk[65] = {0};
+
   if (!read_creds_from_nvs(ssid, sizeof(ssid), psk, sizeof(psk))) {
     std::strncpy(ssid, WIFI_SSID, sizeof(ssid) - 1);
     std::strncpy(psk, WIFI_PASSWORD, sizeof(psk) - 1);
@@ -360,17 +372,15 @@ void start_and_wait_for_ip() {
 
 #if CONFIG_NBP_AP_FALLBACK
   if (ssid[0] == '\0') {
-    ESP_LOGW(TAG, "no SSID configured; entering AP provisioning");
+    ESP_LOGW(TAG, "no WiFi credentials configured; entering AP provisioning");
     enter_ap_provisioning();  // [[noreturn]]
   }
 #endif
 
   wifi_config_t wc = {};
-  std::strncpy(reinterpret_cast<char *>(wc.sta.ssid), ssid,
-               sizeof(wc.sta.ssid) - 1);
-  std::strncpy(reinterpret_cast<char *>(wc.sta.password), psk,
-               sizeof(wc.sta.password) - 1);
-  wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+  std::memcpy(wc.sta.ssid, ssid, std::strlen(ssid));
+  std::memcpy(wc.sta.password, psk, std::strlen(psk));
+  wc.sta.threshold.authmode = psk[0] == '\0' ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
 
   // Power-save: persisted listen_interval (DTIM beacons between RX
   // wakeups). 0 means PS_NONE (radio always on, lowest RX latency,

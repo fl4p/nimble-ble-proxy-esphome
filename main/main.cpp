@@ -4,6 +4,7 @@
 #include "ble_backend.h"
 #include "proxy_config.h"
 #include "stats.h"
+#include "serial_provision.h"
 
 #if CONFIG_NBP_WIFI
 #include "api_server.h"
@@ -135,6 +136,10 @@ extern "C" void app_main() {
   ESP_ERROR_CHECK(esp_event_loop_create_default());
 
   ESP_LOGI(TAG, "nimble-ble-proxy %s booting", proxy::VERSION);
+
+#if CONFIG_NBP_WIFI
+  serial_provision::poll_boot_window();
+#endif
 
 #if CONFIG_NBP_CLONE_BOOT_GUARD
   // Check before any clone code runs so config::load() can be overridden

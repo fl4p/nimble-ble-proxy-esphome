@@ -1,8 +1,8 @@
 // Copy this file to wifi_creds.h (which is gitignored) and fill in your
 // network. The build will fail with a clear error if wifi_creds.h is
 // missing — unless NBP_AP_FALLBACK is enabled, in which case the header
-// becomes optional and the device drops into a SoftAP provisioning
-// page on first boot.
+// becomes optional and the device drops into a SoftAP provisioning page
+// whenever no SSID is stored in NVS or compiled into wifi_creds.h.
 
 #pragma once
 

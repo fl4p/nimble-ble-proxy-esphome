@@ -12,4 +12,5 @@ idf_component_register(
         ws_proxy
         nat_router
         liveness_wdt
+        serial_provision
 )

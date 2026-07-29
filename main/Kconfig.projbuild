@@ -70,11 +70,13 @@ config NBP_LIVENESS_THRESHOLD
 config NBP_AP_FALLBACK
     bool "SoftAP fallback + provisioning page when STA can't associate"
     depends on NBP_WIFI
-    default n
+    default y
     help
-        If the WiFi STA can't get an IP within NBP_AP_FALLBACK_SECS
-        (bad creds, AP down, no creds set at all), bring up a SoftAP
-        named "<hostname>-setup" and serve a single page at
+        If no SSID is stored in NVS or compiled into wifi_creds.h,
+        bring up a SoftAP immediately. If credentials exist but the
+        WiFi STA can't get an IP within NBP_AP_FALLBACK_SECS (bad
+        creds, AP down), bring up the same SoftAP named
+        "<hostname>-setup" and serve a single page at
         http://192.168.4.1/ that exposes:
           POST /wifi?ssid=...&psk=...   write to NVS, then reboot
         Replaces the "edit wifi_creds.h + re-flash" workflow with a
@@ -84,7 +86,8 @@ config NBP_AP_FALLBACK
         Credential lookup order at boot:
           1. NVS namespace "wifi", keys "ssid" / "psk" (set via /wifi)
           2. WIFI_SSID / WIFI_PASSWORD from include/wifi_creds.h, if
-             that header exists (now optional with this gate on)
+             that header exists; with this path the normal STA timeout
+             applies before SoftAP fallback
           3. neither set → go straight to AP fallback
 
         Costs ~15 KB flash and one extra netif + httpd code path that
