@@ -54,6 +54,7 @@ jobs:
           # nanopb_generator.py (run by CMake) needs protobuf + a protoc;
           # install both inside the IDF container before building.
           command: |
+            set -e
             pip install protobuf grpcio-tools
             idf.py -DSDKCONFIG_DEFAULTS="${{ matrix.variant.defaults }}" build
             name="${{ matrix.target }}-${{ matrix.variant.name }}"
