@@ -7,11 +7,11 @@ on:
     branches: [main]
     tags: ['v*']
     paths-ignore:
-      - 'site/**'
+      - 'web-flasher/**'
       - '.github/workflows/pages.yml'
   pull_request:
     paths-ignore:
-      - 'site/**'
+      - 'web-flasher/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 

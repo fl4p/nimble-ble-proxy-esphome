@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - site/**
+      - web-flasher/**
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -29,11 +29,11 @@ jobs:
         run: |
           tag="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""')"
           if [ -n "$tag" ]; then
-            mkdir -p "site/firmware/$tag"
-            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*-flash.bin' --dir "site/firmware/$tag" --clobber
+            mkdir -p "web-flasher/firmware/$tag"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*-flash.bin' --dir "web-flasher/firmware/$tag" --clobber
           fi
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: web-flasher
       - id: deployment
         uses: actions/deploy-pages@v4
