@@ -137,6 +137,20 @@ button.success {
   gap: 1rem;
 }
 
+.softap-toggle {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+}
+
+.softap-toggle input {
+  min-height: auto;
+}
+
+#softApFields[aria-disabled="true"] {
+  opacity: .5;
+}
+
 .flash-stack {
   display: flex;
   align-items: end;

@@ -43,6 +43,20 @@
               <input id="wifiPsk" type="password" autocomplete="current-password" placeholder="optional">
             </label>
           </div>
+          <label class="softap-toggle">
+            <input id="softApEnabled" type="checkbox" checked>
+            Enable SoftAP repeater after WiFi connects
+          </label>
+          <div class="wifi-row" id="softApFields">
+            <label>
+              SoftAP SSID
+              <input id="softApSsid" type="text" autocomplete="off" placeholder="firmware default">
+            </label>
+            <label>
+              SoftAP password
+              <input id="softApPsk" type="password" autocomplete="new-password" placeholder="firmware default">
+            </label>
+          </div>
         </div>
         <div class="flash-stack">
           <label>

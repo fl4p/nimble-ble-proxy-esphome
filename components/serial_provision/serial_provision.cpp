@@ -22,16 +22,27 @@ namespace serial_provision {
 namespace {
 
 constexpr const char *TAG = "serial_prov";
-constexpr const char *PREFIX = "NBP-PROV1 ";
+constexpr const char *WIFI_PREFIX = "NBP-PROV1 ";
+constexpr const char *NAT_PREFIX = "NBP-NAT1 ";
 constexpr const char *NVS_WIFI_NS = "wifi";
 constexpr const char *NVS_WIFI_SSID = "ssid";
 constexpr const char *NVS_WIFI_PSK = "psk";
+constexpr const char *NVS_NAT_NS = "nat";
+constexpr const char *NVS_NAT_ENABLED = "enabled";
+constexpr const char *NVS_NAT_AP_SSID = "ap_ssid";
+constexpr const char *NVS_NAT_AP_PSK = "ap_psk";
 constexpr int BOOT_WINDOW_MS = 10000;
 constexpr int POLL_MS = 50;
 
 struct RxLine {
-  char data[256] = {};
+  char data[512] = {};
   size_t len = 0;
+};
+
+struct LineResult {
+  bool handled = false;
+  bool reboot = false;
+  const char *ack = nullptr;
 };
 
 int b64_value(char c) {
@@ -103,13 +114,25 @@ bool store_wifi_creds(const char *ssid, const char *psk) {
   return err == ESP_OK;
 }
 
-bool handle_line(char *line) {
-  if (std::strncmp(line, PREFIX, std::strlen(PREFIX)) != 0) return false;
+bool store_nat_config(bool enabled, const char *ssid, const char *psk,
+                      bool update_ssid, bool update_psk) {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NAT_NS, NVS_READWRITE, &h) != ESP_OK) return false;
+  esp_err_t err = nvs_set_u8(h, NVS_NAT_ENABLED, enabled ? 1 : 0);
+  if (err == ESP_OK && update_ssid) err = nvs_set_str(h, NVS_NAT_AP_SSID, ssid);
+  if (err == ESP_OK && update_psk) err = nvs_set_str(h, NVS_NAT_AP_PSK, psk);
+  if (err == ESP_OK) err = nvs_commit(h);
+  nvs_close(h);
+  return err == ESP_OK;
+}
 
-  char *ssid_b64 = line + std::strlen(PREFIX);
+LineResult handle_wifi_line(char *line) {
+  if (std::strncmp(line, WIFI_PREFIX, std::strlen(WIFI_PREFIX)) != 0) return {};
+
+  char *ssid_b64 = line + std::strlen(WIFI_PREFIX);
   while (*ssid_b64 == ' ') ++ssid_b64;
   char *psk_b64 = std::strchr(ssid_b64, ' ');
-  if (psk_b64 == nullptr) return false;
+  if (psk_b64 == nullptr) return {true, false, nullptr};
   *psk_b64++ = '\0';
   while (*psk_b64 == ' ') ++psk_b64;
 
@@ -122,29 +145,88 @@ bool handle_line(char *line) {
   char psk[65] = {};
   if (!decode_b64_token(ssid_b64, ssid, sizeof(ssid), 32) || ssid[0] == '\0') {
     ESP_LOGW(TAG, "invalid provisioning SSID");
-    return false;
+    return {true, false, nullptr};
   }
   if (!decode_b64_token(psk_b64, psk, sizeof(psk), 64)) {
     ESP_LOGW(TAG, "invalid provisioning PSK");
-    return false;
+    return {true, false, nullptr};
   }
   size_t psk_len = std::strlen(psk);
   if (psk_len > 0 && psk_len < 8) {
     ESP_LOGW(TAG, "invalid provisioning PSK length");
-    return false;
+    return {true, false, nullptr};
   }
   if (psk_len == 64 && !is_hex_string(psk)) {
     ESP_LOGW(TAG, "64-byte provisioning PSK must be hex");
-    return false;
+    return {true, false, nullptr};
   }
 
   if (!store_wifi_creds(ssid, psk)) {
     ESP_LOGE(TAG, "failed to store provisioned WiFi credentials");
-    return false;
+    return {true, false, nullptr};
   }
 
   ESP_LOGI(TAG, "stored provisioned WiFi credentials for SSID '%s'", ssid);
-  return true;
+  return {true, true, "NBP-PROV-OK\n"};
+}
+
+LineResult handle_nat_line(char *line) {
+  if (std::strncmp(line, NAT_PREFIX, std::strlen(NAT_PREFIX)) != 0) return {};
+
+  char *enabled_token = line + std::strlen(NAT_PREFIX);
+  while (*enabled_token == ' ') ++enabled_token;
+  char *ssid_b64 = std::strchr(enabled_token, ' ');
+  if (ssid_b64 == nullptr) return {true, false, nullptr};
+  *ssid_b64++ = '\0';
+  while (*ssid_b64 == ' ') ++ssid_b64;
+  char *psk_b64 = std::strchr(ssid_b64, ' ');
+  if (psk_b64 == nullptr) return {true, false, nullptr};
+  *psk_b64++ = '\0';
+  while (*psk_b64 == ' ') ++psk_b64;
+
+  char *end = psk_b64 + std::strlen(psk_b64);
+  while (end > psk_b64 && std::isspace(static_cast<unsigned char>(end[-1]))) {
+    *--end = '\0';
+  }
+
+  if (std::strlen(enabled_token) != 1 ||
+      (enabled_token[0] != '0' && enabled_token[0] != '1')) {
+    ESP_LOGW(TAG, "invalid SoftAP enabled flag");
+    return {true, false, nullptr};
+  }
+  const bool enabled = enabled_token[0] == '1';
+
+  const bool update_ssid = enabled && std::strcmp(ssid_b64, "-") != 0;
+  const bool update_psk = enabled && std::strcmp(psk_b64, "-") != 0;
+  char ssid[33] = {};
+  char psk[64] = {};
+  if (update_ssid && !decode_b64_token(ssid_b64, ssid, sizeof(ssid), 32)) {
+    ESP_LOGW(TAG, "invalid SoftAP SSID");
+    return {true, false, nullptr};
+  }
+  if (update_psk && !decode_b64_token(psk_b64, psk, sizeof(psk), 63)) {
+    ESP_LOGW(TAG, "invalid SoftAP PSK");
+    return {true, false, nullptr};
+  }
+  size_t psk_len = std::strlen(psk);
+  if (update_psk && psk_len < 8) {
+    ESP_LOGW(TAG, "invalid SoftAP PSK length");
+    return {true, false, nullptr};
+  }
+
+  if (!store_nat_config(enabled, ssid, psk, update_ssid, update_psk)) {
+    ESP_LOGE(TAG, "failed to store SoftAP provisioning settings");
+    return {true, false, nullptr};
+  }
+
+  ESP_LOGI(TAG, "stored SoftAP provisioning settings: %s", enabled ? "enabled" : "disabled");
+  return {true, false, "NBP-NAT-OK\n"};
+}
+
+LineResult handle_line(char *line) {
+  LineResult result = handle_nat_line(line);
+  if (result.handled) return result;
+  return handle_wifi_line(line);
 }
 
 constexpr uart_port_t CONSOLE_UART =
@@ -193,12 +275,14 @@ void append_rx(RxLine *line, uint8_t byte) {
   if (byte == '\r') return;
   if (byte == '\n') {
     line->data[line->len] = '\0';
-    if (handle_line(line->data)) {
-      const char *ok = "NBP-PROV-OK\n";
-      write_uart0(ok);
+    LineResult result = handle_line(line->data);
+    if (result.ack != nullptr) {
+      write_uart0(result.ack);
 #if SOC_USB_SERIAL_JTAG_SUPPORTED
-      write_usb_serial_jtag(ok);
+      write_usb_serial_jtag(result.ack);
 #endif
+    }
+    if (result.reboot) {
       vTaskDelay(pdMS_TO_TICKS(200));
       esp_restart();
     }

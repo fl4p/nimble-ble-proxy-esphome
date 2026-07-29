@@ -11,6 +11,10 @@ const variantSelect = el("variantSelect");
 const baudSelect = el("baudSelect");
 const wifiSsid = el("wifiSsid");
 const wifiPsk = el("wifiPsk");
+const softApEnabled = el("softApEnabled");
+const softApFields = el("softApFields");
+const softApSsid = el("softApSsid");
+const softApPsk = el("softApPsk");
 const connectButton = el("connectButton");
 const flashButton = el("flashButton");
 const support = el("support");
@@ -89,16 +93,36 @@ function byteLength(value) {
   return new TextEncoder().encode(value).length;
 }
 
-function getWifiCredentials() {
-  const ssid = wifiSsid.value;
-  const psk = wifiPsk.value;
-  if (!ssid) return null;
-  const pskBytes = byteLength(psk);
-  if (byteLength(ssid) > 32) throw new Error("WiFi SSID must be 32 bytes or less");
-  if (pskBytes > 0 && pskBytes < 8) throw new Error("WiFi password must be empty for open networks or at least 8 bytes");
-  if (pskBytes > 64) throw new Error("WiFi password must be 64 bytes or less");
-  if (pskBytes === 64 && !/^[0-9a-fA-F]{64}$/.test(psk)) throw new Error("64-byte WiFi passwords must be hex PSKs");
-  return { ssid, psk };
+function validatePassword(label, value, maxBytes, allowHex64 = false) {
+  const bytes = byteLength(value);
+  if (bytes > 0 && bytes < 8) throw new Error(`${label} must be empty for open networks or at least 8 bytes`);
+  if (bytes > maxBytes) throw new Error(`${label} must be ${maxBytes} bytes or less`);
+  if (allowHex64 && bytes === 64 && !/^[0-9a-fA-F]{64}$/.test(value)) throw new Error(`64-byte ${label.toLowerCase()}s must be hex PSKs`);
+}
+
+function getProvisioningConfig() {
+  const staSsid = wifiSsid.value;
+  const staPsk = wifiPsk.value;
+  const apEnabled = softApEnabled.checked;
+  const apSsid = softApSsid.value;
+  const apPsk = softApPsk.value;
+
+  if (staSsid && byteLength(staSsid) > 32) throw new Error("WiFi SSID must be 32 bytes or less");
+  if (staSsid) validatePassword("WiFi password", staPsk, 64, true);
+  if (apEnabled && apSsid && byteLength(apSsid) > 32) throw new Error("SoftAP SSID must be 32 bytes or less");
+  if (apEnabled) validatePassword("SoftAP password", apPsk, 63);
+
+  return {
+    sta: staSsid ? { ssid: staSsid, psk: staPsk } : null,
+    softAp: { enabled: apEnabled, ssid: apEnabled ? apSsid : "", psk: apEnabled ? apPsk : "" },
+  };
+}
+
+function updateSoftApFields() {
+  const enabled = softApEnabled.checked;
+  softApFields.setAttribute("aria-disabled", enabled ? "false" : "true");
+  softApSsid.disabled = !enabled;
+  softApPsk.disabled = !enabled;
 }
 
 function base64Token(value) {
@@ -320,11 +344,17 @@ async function startSerialMonitor() {
   }
 }
 
-async function provisionWifiOverSerial(credentials) {
-  if (!credentials) return;
+async function provisionWifiOverSerial(config) {
+  if (!config) return;
 
-  const line = `NBP-PROV1 ${base64Token(credentials.ssid)} ${base64Token(credentials.psk)}\n`;
-  appendLog("Provisioning WiFi over serial…");
+  const lines = [];
+  if (config.softAp) {
+    lines.push(`NBP-NAT1 ${config.softAp.enabled ? "1" : "0"} ${base64Token(config.softAp.ssid)} ${base64Token(config.softAp.psk)}\n`);
+  }
+  if (config.sta) {
+    lines.push(`NBP-PROV1 ${base64Token(config.sta.ssid)} ${base64Token(config.sta.psk)}\n`);
+  }
+  appendLog("Provisioning settings over serial…");
 
   const deadline = Date.now() + 12000;
   while (Date.now() < deadline) {
@@ -363,14 +393,23 @@ async function provisionWifiOverSerial(credentials) {
 
   try {
     while (Date.now() < deadline) {
-      await writer.write(new TextEncoder().encode(line));
+      for (const line of lines) {
+        await writer.write(new TextEncoder().encode(line));
+      }
       await sleep(500);
-      if (received.includes("NBP-PROV-OK")) {
-        appendLog("WiFi credentials stored. Device rebooting…");
+      const provisionOk = received.includes("NBP-PROV-OK");
+      const natOk = !config.softAp || received.includes("NBP-NAT-OK") || (config.sta && provisionOk);
+      const staOk = !config.sta || provisionOk;
+      if (natOk && staOk) {
+        if (config.softAp && !received.includes("NBP-NAT-OK")) {
+          appendLog("WiFi credentials stored. Selected firmware did not acknowledge SoftAP settings.");
+        } else {
+          appendLog("Provisioning settings stored. Device booting…");
+        }
         return;
       }
     }
-    throw new Error("device did not acknowledge WiFi provisioning");
+    throw new Error("device did not acknowledge serial provisioning");
   } finally {
     closed = true;
     try { await reader.cancel(); } catch (_error) {}
@@ -384,21 +423,22 @@ async function flashDetectedChip() {
   const asset = findFlashAsset();
   if (!loader || !asset) return;
 
-  let credentials = null;
+  let config = null;
   try {
-    credentials = getWifiCredentials();
+    config = getProvisioningConfig();
   } catch (error) {
     appendLog(`Error: ${error.message || error}`);
     return;
   }
 
-  const provisioningNote = credentials ? "\n\nWiFi credentials will be provisioned after flashing." : "";
+  const provisioningNote = config ? "\n\nProvisioning settings will be written after flashing." : "";
   const confirmed = confirm(`Flash ${asset.name} to ${detectedChipName}?\n\nThis erases the app currently on the device.${provisioningNote}`);
   if (!confirmed) return;
 
   flashButton.disabled = true;
   connectButton.disabled = true;
   setProgress(0);
+  let monitoringAfterFlash = false;
   try {
     const data = await downloadAsset(asset);
     appendLog(`Writing ${formatBytes(data.byteLength)} at 0x0…`);
@@ -416,11 +456,12 @@ async function flashDetectedChip() {
     await transport.disconnect();
     transport = null;
     loader = null;
-    await provisionWifiOverSerial(credentials);
-    if (credentials) {
-      appendLog("Flash and WiFi provisioning complete.");
+    await provisionWifiOverSerial(config);
+    if (config) {
+      appendLog("Flash and provisioning complete.");
       detectedTarget = null;
       detectedChipName = null;
+      monitoringAfterFlash = true;
       void startSerialMonitor();
     } else {
       appendLog("Done.");
@@ -429,7 +470,7 @@ async function flashDetectedChip() {
   } catch (error) {
     appendLog(`Error: ${error.message || error}`);
   } finally {
-    flashButton.disabled = false;
+    flashButton.disabled = monitoringAfterFlash;
     connectButton.disabled = false;
   }
 }
@@ -457,7 +498,7 @@ async function disconnect() {
 }
 
 async function toggleConnection() {
-  if (transport) {
+  if (transport || serialMonitorActive || port) {
     await disconnect();
     return;
   }
@@ -468,7 +509,9 @@ connectButton.addEventListener("click", toggleConnection);
 flashButton.addEventListener("click", flashDetectedChip);
 releaseSelect.addEventListener("change", updateSelectedAsset);
 variantSelect.addEventListener("change", updateSelectedAsset);
+softApEnabled.addEventListener("change", updateSoftApFields);
 
+updateSoftApFields();
 checkSupport();
 loadReleases().catch((error) => {
   releasesEl.textContent = `Failed to load releases: ${error.message || error}`;
