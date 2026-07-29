@@ -5,6 +5,8 @@ plaintext protocol so unmodified Home Assistant treats it as a regular ESPHome
 Bluetooth proxy — but with **[NimBLE](https://github.com/h2zero/esp-nimble-cpp)**
 as the BLE backend instead of Bluedroid.
 
+Flash prebuilt releases from the browser: https://fl4p.github.io/nimble-ble-proxy-esphome/
+
 I started this little project because the regular esphome proxy didn't connect
 to my sketchy Bluetooth BMS, so I [vide-coded](docs/vibe.md) my own. This began as fun-project, and it
 has become a more stable, complete and energy saving Wifi/Ble/Repeater/Bridge than other esp32 NAT routers I have used.

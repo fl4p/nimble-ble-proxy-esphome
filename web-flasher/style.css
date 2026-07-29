@@ -78,7 +78,7 @@ label {
   font-size: .9rem;
 }
 
-select, button {
+select, input, button {
   min-height: 2.65rem;
   border-radius: 12px;
   border: 1px solid var(--line);
@@ -130,7 +130,8 @@ button.success {
   justify-self: start;
 }
 
-.picker-row {
+.picker-row,
+.wifi-row {
   display: grid;
   grid-template-columns: minmax(160px, .45fr) minmax(240px, 1fr);
   gap: 1rem;
@@ -231,6 +232,6 @@ a { color: var(--accent); }
 
 @media (max-width: 760px) {
   main { padding: 2rem 0; }
-  .actions, .picker-row, .status-grid { grid-template-columns: 1fr; }
+  .actions, .picker-row, .wifi-row, .status-grid { grid-template-columns: 1fr; }
   .flash-stack { align-items: stretch; }
 }

@@ -9,6 +9,8 @@ const el = (id) => document.getElementById(id);
 const releaseSelect = el("releaseSelect");
 const variantSelect = el("variantSelect");
 const baudSelect = el("baudSelect");
+const wifiSsid = el("wifiSsid");
+const wifiPsk = el("wifiPsk");
 const connectButton = el("connectButton");
 const flashButton = el("flashButton");
 const support = el("support");
@@ -69,6 +71,34 @@ function formatBytes(bytes) {
   if (!Number.isFinite(bytes)) return "";
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function byteLength(value) {
+  return new TextEncoder().encode(value).length;
+}
+
+function getWifiCredentials() {
+  const ssid = wifiSsid.value;
+  const psk = wifiPsk.value;
+  if (!ssid) return null;
+  const pskBytes = byteLength(psk);
+  if (byteLength(ssid) > 32) throw new Error("WiFi SSID must be 32 bytes or less");
+  if (pskBytes > 0 && pskBytes < 8) throw new Error("WiFi password must be empty for open networks or at least 8 bytes");
+  if (pskBytes > 64) throw new Error("WiFi password must be 64 bytes or less");
+  if (pskBytes === 64 && !/^[0-9a-fA-F]{64}$/.test(psk)) throw new Error("64-byte WiFi passwords must be hex PSKs");
+  return { ssid, psk };
+}
+
+function base64Token(value) {
+  if (!value) return "-";
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 function selectedRelease() {
@@ -174,7 +204,7 @@ function checkSupport() {
     return false;
   }
   support.className = "support ok";
-  support.textContent = "Web Serial is available. Hold BOOT while connecting if your board does not enter download mode automatically.";
+  support.textContent = "";
   return true;
 }
 
@@ -216,6 +246,10 @@ async function connectAndDetect() {
   } catch (error) {
     chipStatus.textContent = "not connected";
     appendLog(`Error: ${error.message || error}`);
+    if (!detectedChipName) {
+      support.className = "support bad";
+      support.textContent = "Could not detect chip. Hold BOOT while connecting if your board does not enter download mode automatically.";
+    }
     await disconnect();
   } finally {
     connectButton.disabled = false;
@@ -235,11 +269,81 @@ async function downloadAsset(asset) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
+async function provisionWifiOverSerial(credentials) {
+  if (!credentials) return;
+
+  const line = `NBP-PROV1 ${base64Token(credentials.ssid)} ${base64Token(credentials.psk)}\n`;
+  appendLog("Provisioning WiFi over serial…");
+
+  const deadline = Date.now() + 12000;
+  while (Date.now() < deadline) {
+    try {
+      if (!port.readable || !port.writable) {
+        await port.open({ baudRate: 115200 });
+      }
+      break;
+    } catch (error) {
+      await sleep(300);
+    }
+  }
+  if (!port.writable || !port.readable) throw new Error("serial port did not reopen for WiFi provisioning");
+
+  await port.setSignals({ dataTerminalReady: false, requestToSend: true });
+  await sleep(100);
+  await port.setSignals({ requestToSend: false });
+  await sleep(250);
+
+  const writer = port.writable.getWriter();
+  const reader = port.readable.getReader();
+  const decoder = new TextDecoder();
+  let closed = false;
+  let received = "";
+  const readLoop = (async () => {
+    try {
+      while (!closed) {
+        const result = await reader.read();
+        if (result.done) break;
+        received += decoder.decode(result.value, { stream: true });
+      }
+    } catch (_error) {
+      // Reset after successful provisioning can close the port while reading.
+    }
+  })();
+
+  try {
+    while (Date.now() < deadline) {
+      await writer.write(new TextEncoder().encode(line));
+      await sleep(500);
+      if (received.includes("NBP-PROV-OK")) {
+        appendLog("WiFi credentials stored. Device rebooting…");
+        return;
+      }
+    }
+    throw new Error("device did not acknowledge WiFi provisioning");
+  } finally {
+    closed = true;
+    try { await reader.cancel(); } catch (_error) {}
+    try { await readLoop; } catch (_error) {}
+    reader.releaseLock();
+    writer.releaseLock();
+    try { await port.close(); } catch (_error) {}
+  }
+}
+
 async function flashDetectedChip() {
   const asset = findFlashAsset();
   if (!loader || !asset) return;
 
-  const confirmed = confirm(`Flash ${asset.name} to ${detectedChipName}?\n\nThis erases the app currently on the device.`);
+  let credentials = null;
+  try {
+    credentials = getWifiCredentials();
+  } catch (error) {
+    appendLog(`Error: ${error.message || error}`);
+    return;
+  }
+
+  const provisioningNote = credentials ? "\n\nWiFi credentials will be provisioned after flashing." : "";
+  const confirmed = confirm(`Flash ${asset.name} to ${detectedChipName}?\n\nThis erases the app currently on the device.${provisioningNote}`);
   if (!confirmed) return;
 
   flashButton.disabled = true;
@@ -259,7 +363,12 @@ async function flashDetectedChip() {
     });
     appendLog("Flashing complete. Resetting…");
     await loader.after("hard_reset");
+    await transport.disconnect();
+    transport = null;
+    loader = null;
+    await provisionWifiOverSerial(credentials);
     appendLog("Done.");
+    await disconnect();
   } catch (error) {
     appendLog(`Error: ${error.message || error}`);
   } finally {
