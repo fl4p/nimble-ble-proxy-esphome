@@ -164,6 +164,7 @@ CONFIG_NBP_CLONE_VALUE_CACHE_BYTES=64
 # HTTPD_WS_SUPPORT. AP SSID/PSK/IP are runtime-overridable via POST /nat
 # (NVS), so the compile-time defaults here are just the cold-boot values.
 CONFIG_NBP_NAT_ROUTER=y
+CONFIG_NBP_AP_FALLBACK=y
 CONFIG_NBP_BLE_AUTO_OFF=y
 CONFIG_NBP_BLE_AUTO_OFF_IDLE_SECS=30
 CONFIG_NBP_WS_PROXY=y
