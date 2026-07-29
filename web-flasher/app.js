@@ -50,8 +50,8 @@ function appendLog(line = "") {
 
 function setSupportMessage(message, className = "support ok") {
   support.className = className;
-  support.classList.toggle("hidden", !message);
   support.textContent = message;
+  support.hidden = !message;
 }
 
 function setProgress(value) {
