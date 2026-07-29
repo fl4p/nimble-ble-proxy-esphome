@@ -1,12 +1,16 @@
 name: build
 
-# Guards the NBP_BLE master gate (main/Kconfig.projbuild) from bit-rotting:
-# builds both the default BLE firmware and the BLE-free variant on the
-# pinned ESP-IDF release, so an edit that breaks either config fails CI.
+# Guards the NBP_BLE master gate (main/Kconfig.projbuild) from bit-rotting
+# and publishes pre-built firmware images for the browser flasher.
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -14,12 +18,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        target: [esp32, esp32s3, esp32c3, esp32c6]
+        variant:
           - name: ble-on          # default: NimBLE scanner/proxy + dashboard
             defaults: sdkconfig.defaults
           - name: ble-off         # NBP_BLE=n: WiFi/NAT/dashboard only, no NimBLE
             defaults: sdkconfig.defaults;.github/build-no-ble.defaults
-    name: build (${{ matrix.name }})
+    name: build (${{ matrix.target }}, ${{ matrix.variant.name }})
     steps:
       - uses: actions/checkout@v4
 
@@ -35,11 +40,40 @@ jobs:
       - name: Vendor nanopb
         run: git clone --depth 1 https://github.com/nanopb/nanopb.git components/api_proto/nanopb
 
-      - name: Build (${{ matrix.name }})
+      - name: Build (${{ matrix.target }}, ${{ matrix.variant.name }})
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: release-v5.5
-          target: esp32s3
+          target: ${{ matrix.target }}
           # nanopb_generator.py (run by CMake) needs protobuf + a protoc;
           # install both inside the IDF container before building.
-          command: pip install protobuf grpcio-tools && idf.py -DSDKCONFIG_DEFAULTS="${{ matrix.defaults }}" build
+          command: |
+            pip install protobuf grpcio-tools
+            idf.py -DSDKCONFIG_DEFAULTS="${{ matrix.variant.defaults }}" build
+            name="${{ matrix.target }}-${{ matrix.variant.name }}"
+            mkdir -p "dist/$name"
+            cp build/nimble_ble_proxy.bin "dist/$name/nimble_ble_proxy-$name-ota.bin"
+            cp build/bootloader/bootloader.bin "dist/$name/bootloader-$name.bin"
+            cp build/partition_table/partition-table.bin "dist/$name/partition-table-$name.bin"
+            cp build/ota_data_initial.bin "dist/$name/ota_data_initial-$name.bin"
+            cp build/flash_args "dist/$name/flash_args-$name"
+            cd build
+            python -m esptool --chip "${{ matrix.target }}" merge_bin -o "../dist/$name/nimble_ble_proxy-$name-flash.bin" @flash_args
+
+      - name: Upload firmware binaries (${{ matrix.target }}, ${{ matrix.variant.name }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: nimble_ble_proxy-${{ matrix.target }}-${{ matrix.variant.name }}-${{ github.sha }}
+          path: dist/${{ matrix.target }}-${{ matrix.variant.name }}/
+
+      - name: Upload release assets (${{ matrix.target }}, ${{ matrix.variant.name }})
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/${{ matrix.target }}-${{ matrix.variant.name }}/nimble_ble_proxy-${{ matrix.target }}-${{ matrix.variant.name }}-ota.bin
+            dist/${{ matrix.target }}-${{ matrix.variant.name }}/nimble_ble_proxy-${{ matrix.target }}-${{ matrix.variant.name }}-flash.bin
+            dist/${{ matrix.target }}-${{ matrix.variant.name }}/bootloader-${{ matrix.target }}-${{ matrix.variant.name }}.bin
+            dist/${{ matrix.target }}-${{ matrix.variant.name }}/partition-table-${{ matrix.target }}-${{ matrix.variant.name }}.bin
+            dist/${{ matrix.target }}-${{ matrix.variant.name }}/ota_data_initial-${{ matrix.target }}-${{ matrix.variant.name }}.bin
+            dist/${{ matrix.target }}-${{ matrix.variant.name }}/flash_args-${{ matrix.target }}-${{ matrix.variant.name }}

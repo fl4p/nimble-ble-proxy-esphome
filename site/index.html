@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nimble BLE Proxy Web Flasher</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <p class="eyebrow">Nimble BLE Proxy</p>
+      <h1>Web flasher</h1>
+      <p>Connect an ESP32, ESP32-S3, ESP32-C3, or ESP32-C6 over USB. The browser detects the chip and flashes the matching pre-built release image.</p>
+    </section>
+
+    <section class="panel">
+      <div class="support" id="support"></div>
+      <div class="controls">
+        <label>
+          Release
+          <select id="releaseSelect"></select>
+        </label>
+        <label>
+          Image
+          <select id="variantSelect">
+            <option value="ble-on">BLE proxy + WiFi dashboard</option>
+            <option value="ble-off">WiFi dashboard only (BLE disabled)</option>
+          </select>
+        </label>
+        <label>
+          Baud rate
+          <select id="baudSelect">
+            <option value="921600" selected>921600</option>
+            <option value="460800">460800</option>
+            <option value="230400">230400</option>
+            <option value="115200">115200</option>
+          </select>
+        </label>
+      </div>
+      <div class="actions">
+        <button id="refreshButton" type="button">Refresh releases</button>
+        <button id="connectButton" type="button" class="primary">Connect + detect</button>
+        <button id="flashButton" type="button" class="danger" disabled>Flash detected chip</button>
+        <button id="disconnectButton" type="button" disabled>Disconnect</button>
+      </div>
+      <dl class="status-grid">
+        <div>
+          <dt>Detected chip</dt>
+          <dd id="chipStatus">not connected</dd>
+        </div>
+        <div>
+          <dt>Selected binary</dt>
+          <dd id="assetStatus">waiting for release metadata</dd>
+        </div>
+        <div>
+          <dt>Progress</dt>
+          <dd><progress id="progress" max="100" value="0"></progress> <span id="progressText">0%</span></dd>
+        </div>
+      </dl>
+      <pre id="log" aria-live="polite"></pre>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>GitHub releases</h2>
+        <a href="https://github.com/fl4p/nimble-ble-proxy-esphome/releases" target="_blank" rel="noreferrer">Open on GitHub</a>
+      </div>
+      <div id="releases" class="releases">Loading releases…</div>
+    </section>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
