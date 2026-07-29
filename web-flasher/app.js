@@ -27,6 +27,8 @@ let transport = null;
 let loader = null;
 let detectedTarget = null;
 let detectedChipName = null;
+let serialMonitorActive = false;
+let serialMonitorReader = null;
 
 const terminal = {
   clean() {
@@ -44,6 +46,12 @@ const terminal = {
 function appendLog(line = "") {
   logEl.textContent += `${line}\n`;
   logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setSupportMessage(message, className = "support ok") {
+  support.className = className;
+  support.textContent = message;
+  support.hidden = !message;
 }
 
 function setProgress(value) {
@@ -194,17 +202,14 @@ async function loadReleases() {
 
 function checkSupport() {
   if (!isSecureContext) {
-    support.className = "support bad";
-    support.textContent = "Web Serial requires HTTPS or localhost.";
+    setSupportMessage("Web Serial requires HTTPS or localhost.", "support bad");
     return false;
   }
   if (!("serial" in navigator)) {
-    support.className = "support bad";
-    support.textContent = "This browser does not support Web Serial. Use Chrome or Edge.";
+    setSupportMessage("This browser does not support Web Serial. Use Chrome or Edge.", "support bad");
     return false;
   }
-  support.className = "support ok";
-  support.textContent = "";
+  setSupportMessage("");
   return true;
 }
 
@@ -247,8 +252,7 @@ async function connectAndDetect() {
     chipStatus.textContent = "not connected";
     appendLog(`Error: ${error.message || error}`);
     if (!detectedChipName) {
-      support.className = "support bad";
-      support.textContent = "Could not detect chip. Hold BOOT while connecting if your board does not enter download mode automatically.";
+      setSupportMessage("Could not detect chip. Hold BOOT while connecting if your board does not enter download mode automatically.", "support bad");
     }
     await disconnect();
   } finally {
@@ -267,6 +271,53 @@ async function downloadAsset(asset) {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Download failed with HTTP ${response.status}: ${url}`);
   return new Uint8Array(await response.arrayBuffer());
+}
+
+async function stopSerialMonitor() {
+  serialMonitorActive = false;
+  if (serialMonitorReader) {
+    try { await serialMonitorReader.cancel(); } catch (_error) {}
+  }
+}
+
+async function startSerialMonitor() {
+  if (!port) return;
+  appendLog("Watching serial output for the device IP address. Click Disconnect to stop.");
+  chipStatus.textContent = "serial monitor";
+  assetStatus.textContent = "serial monitor active";
+  flashButton.disabled = true;
+  setConnectionButtonConnected(true);
+
+  const deadline = Date.now() + 15000;
+  while (!port.readable && Date.now() < deadline) {
+    try {
+      await port.open({ baudRate: 115200 });
+    } catch (_error) {
+      await sleep(300);
+    }
+  }
+  if (!port.readable) {
+    appendLog("Serial monitor could not reopen after reset.");
+    return;
+  }
+
+  serialMonitorActive = true;
+  const decoder = new TextDecoder();
+  const reader = port.readable.getReader();
+  serialMonitorReader = reader;
+  try {
+    while (serialMonitorActive) {
+      const result = await reader.read();
+      if (result.done) break;
+      terminal.write(decoder.decode(result.value, { stream: true }));
+    }
+  } catch (error) {
+    if (serialMonitorActive) appendLog(`Serial monitor stopped: ${error.message || error}`);
+  } finally {
+    serialMonitorActive = false;
+    if (serialMonitorReader === reader) serialMonitorReader = null;
+    reader.releaseLock();
+  }
 }
 
 async function provisionWifiOverSerial(credentials) {
@@ -326,7 +377,6 @@ async function provisionWifiOverSerial(credentials) {
     try { await readLoop; } catch (_error) {}
     reader.releaseLock();
     writer.releaseLock();
-    try { await port.close(); } catch (_error) {}
   }
 }
 
@@ -367,8 +417,15 @@ async function flashDetectedChip() {
     transport = null;
     loader = null;
     await provisionWifiOverSerial(credentials);
-    appendLog("Done.");
-    await disconnect();
+    if (credentials) {
+      appendLog("Flash and WiFi provisioning complete.");
+      detectedTarget = null;
+      detectedChipName = null;
+      void startSerialMonitor();
+    } else {
+      appendLog("Done.");
+      await disconnect();
+    }
   } catch (error) {
     appendLog(`Error: ${error.message || error}`);
   } finally {
@@ -378,10 +435,16 @@ async function flashDetectedChip() {
 }
 
 async function disconnect() {
+  await stopSerialMonitor();
   try {
     if (transport) await transport.disconnect();
   } catch (error) {
     appendLog(`Disconnect error: ${error.message || error}`);
+  }
+  try {
+    if (port && port.readable) await port.close();
+  } catch (error) {
+    appendLog(`Serial close error: ${error.message || error}`);
   }
   port = null;
   transport = null;
