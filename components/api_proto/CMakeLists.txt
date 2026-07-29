@@ -40,9 +40,15 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     # nanopb_generator wants the .proto path to be expressible relative
     # to its -I include dirs. Run it from the proto's directory and pass
     # the basename so protoc is happy.
+    # Use the interpreter ESP-IDF is already running with, rather than a
+    # bare `python3`: on Windows that name resolves to the Microsoft Store
+    # app-execution alias (or nothing at all), so the build fails with
+    # "Python was not found". This also guarantees the generator runs in
+    # IDF's virtualenv, where its dependencies are installed.
+    idf_build_get_property(python PYTHON)
     add_custom_command(
         OUTPUT  "${GEN_C}" "${GEN_H}"
-        COMMAND python3 "${NANOPB_DIR}/generator/nanopb_generator.py"
+        COMMAND ${python} "${NANOPB_DIR}/generator/nanopb_generator.py"
                 api_subset.proto
         DEPENDS "${PROTO_SRC}" "${PROTO_OPTS}"
         WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
