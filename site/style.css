@@ -114,6 +114,11 @@ button.danger {
   background: #642332;
 }
 
+button.success {
+  border-color: #228948;
+  background: #146334;
+}
+
 .actions {
   display: flex;
   flex-wrap: wrap;

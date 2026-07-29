@@ -50,6 +50,13 @@ function setProgress(value) {
   progressText.textContent = `${Math.round(value)}%`;
 }
 
+function formatSerialPortInfo(selectedPort) {
+  const info = selectedPort.getInfo();
+  const vendor = info.usbVendorId === undefined ? "unknown" : `0x${info.usbVendorId.toString(16).padStart(4, "0")}`;
+  const product = info.usbProductId === undefined ? "unknown" : `0x${info.usbProductId.toString(16).padStart(4, "0")}`;
+  return `USB vendor ${vendor}, product ${product}`;
+}
+
 function normalizeTarget(chipName) {
   const normalized = chipName.toLowerCase().replace(/[^a-z0-9]/g, "");
   if (normalized.includes("esp32c6")) return "esp32c6";
@@ -184,6 +191,7 @@ async function connectAndDetect() {
   setProgress(0);
   try {
     port = await getSerialPort();
+    appendLog(`Selected serial port: ${formatSerialPortInfo(port)}`);
     transport = new Transport(port, true);
     loader = new ESPLoader({
       transport,
