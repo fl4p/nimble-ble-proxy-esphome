@@ -56,10 +56,24 @@ inline constexpr uint16_t API_PORT = 6053;
 //                            GATT connection through the proxy — we always
 //                            do a fresh discovery so we ignore cache hints,
 //                            but HA needs to see this bit to proceed)
+//   bit 3 = PAIRING         (BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR/UNPAIR —
+//                            only meaningful when NimBLE's Security
+//                            Manager is compiled in, hence the NBP_SMP
+//                            gate. bleak-esphome checks this bit before
+//                            letting BleakClient.pair() through.)
+//   bit 4 = CACHE_CLEARING  (CLEAR_CACHE — we keep no GATT cache across
+//                            connects, so the request is a trivially
+//                            satisfied no-op. Advertised so HA's
+//                            "clear cache and retry" recovery path
+//                            resolves instead of erroring out.)
 //   bit 5 = RAW_ADVERTISEMENTS
-// See bluetooth_proxy.h:42-50 in esphome for the full enum.
+// See bluetooth_proxy.h:48-57 in esphome for the full enum.
 inline constexpr uint32_t BT_PROXY_FEATURE_FLAGS =
-    (1u << 0) | (1u << 1) | (1u << 2) | (1u << 5);
+    (1u << 0) | (1u << 1) | (1u << 2) |
+#ifdef CONFIG_NBP_SMP
+    (1u << 3) |
+#endif
+    (1u << 4) | (1u << 5);
 
 // BLE proxy tuning.
 // Trimmed 9->4 to relieve internal-DRAM pressure on this no-PSRAM S3 (see

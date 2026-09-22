@@ -266,6 +266,55 @@
   materialise the `default y`. Watch for this whenever adding a Kconfig symbol
   to a configured tree.
 
+## BLE bonding (NBP_SMP) — two paths, and why the second one exists
+
+- The proxy can bond as a **central**: `NimBLEDevice::setSecurityAuth(bond,
+  mitm, sc)` + `IO_CAP=KEYBOARD_ONLY`, with a static passkey injected from
+  `ClientCb::onPassKeyEntry` (`/bond?passkey=`, NVS `stats/ble_passkey`).
+  `CONFIG_BT_NIMBLE_NVS_PERSIST` keeps the resulting bond across reboots.
+- **Path 1 — HA asks.** `BT_PROXY_FEATURE_FLAGS` now sets bit 3 (`PAIRING`,
+  gated on `CONFIG_NBP_SMP`) and bit 4 (`CACHE_CLEARING`), so
+  `bleak-esphome` lets `BleakClient.pair()` through as
+  `BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR`. `bt_handlers` answers with
+  `BluetoothDevicePairingResponse` (85) / `…UnpairingResponse` (86) /
+  `…ClearCacheResponse` (88). CLEAR_CACHE is a truthful no-op — we
+  re-discover on every connect, so "cache cleared" is already the case.
+  **The ESPHome protocol carries no passkey**, which is the one real gap
+  vs a local BlueZ adapter: the PIN has to be on the device beforehand.
+- **Path 2 — the auto-bond list, and it is the one that matters.** HA only
+  sends PAIR *after* a successful connect **and** service discovery. Peers
+  that refuse discovery on an unauthenticated link (Felicity/SolarB packs,
+  batmon-ha#415) drop the connection before that, so path 1 can never
+  trigger for exactly the devices that need it. For an address on the
+  auto-bond list (`/bond?add=MAC`, NVS `stats/auto_bond`, cap
+  `AUTO_BOND_MAX` = `CONFIG_BT_NIMBLE_MAX_BONDS` = 4) `ClientCb::onConnect`
+  **withholds the ConnectionResponse**, runs SMP, and only then tells HA the
+  link is up — so discovery happens over an encrypted link. A failed bond
+  still reports `connected=true` (the link is real, just unauthenticated):
+  that keeps HA's retry behaviour identical to a build without the list.
+- **`secureConnection()` blocks with no timeout of its own** (it waits for
+  `BLE_GAP_EVENT_ENC_CHANGE` or a disconnect — bounded in practice by the
+  30 s SMP timeout). It must not run on the api_server client task (HA's
+  pings would stall) nor on the NimBLE host task (which delivers the very
+  event it waits for), so it runs on a lazily-created `ble_bond` worker
+  (3 KB stack, spawned on first use only). The async variant
+  (`secureConnection(true)`) is NOT used: NimBLE-cpp only calls
+  `onAuthenticationComplete` on **success**, so async gives no failure edge.
+- **Lock ordering: never call into NimBLE while holding `connection.cpp`'s
+  `g_mutex`.** `getConnInfo()`/`ble_gap_conn_find` take the `ble_hs` lock,
+  and the host task calls our callbacks; taking them in the other order
+  inverts. `onConnect` therefore reads `getMTU()` + `getConnInfo()` *before*
+  the mutex, and `pair()` snapshots the client pointer, releases, then asks.
+- **Slot recycling is handled with a generation counter.** A bonding job
+  carries `{slot, gen}`; `alloc_locked()` bumps `Slot::gen`. A job that
+  finishes after the peer dropped sees the mismatch (or `state != Connected`)
+  and stays silent, so HA never gets two connect results for one attempt —
+  `onDisconnect` already sent `connected=false` in that case.
+- `NimBLEDevice::isBonded()/deleteBond()` match on the **full NimBLEAddress
+  including type**, but HA only hands us 48 bits (and the adv address type
+  isn't necessarily the identity type in the store). `find_bond()` enumerates
+  `getNumBonds()`/`getBondedAddress(i)` and compares the 48 bits instead.
+
 ## WebSocket bridge (NBP_WS_PROXY)
 
 - Gated off by default. When on, `GET ws://<host>/api` tunnels the plaintext

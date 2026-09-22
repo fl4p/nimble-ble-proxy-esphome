@@ -401,9 +401,18 @@ config NBP_SMP
         peripherals that demand a paired+encrypted link with a static
         passkey (Victron SmartShunt, some BMS variants). On first
         connect the proxy auto-pairs using the passkey configured via
-        POST /clone?passkey=NNNNNN (default 123456, NVS-persisted,
+        POST /bond?passkey=NNNNNN (default 123456, NVS-persisted,
         runtime-mutable). The bond is stored in NVS so subsequent
         connects reuse it.
+
+        Also adds the BluetoothProxy PAIRING feature flag and the
+        PAIR / UNPAIR request handlers, so Home Assistant (via
+        bleak-esphome's BleakClient.pair()) can ask the proxy to bond
+        with a peer, plus the /bond endpoint and its dashboard panel:
+        passkey, stored-bond management, and the auto-bond list —
+        addresses paired with right after connecting, for peers that
+        refuse GATT discovery on an unauthenticated link and drop the
+        connection before HA ever gets to send a PAIR request.
 
         Disable for a smaller central-only build (~5 KB binary + a few
         hundred bytes of NVS). With this off, peers that require

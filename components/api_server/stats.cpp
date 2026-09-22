@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -284,6 +285,94 @@ esp_err_t nvs_write_passkey(uint32_t pin) {
   if (err == ESP_OK) err = nvs_commit(h);
   nvs_close(h);
   return err;
+}
+
+// ---- auto-bond list (NVS-persisted) ----
+//
+// The addresses the proxy pairs with right after connecting, stored as a
+// packed blob of MSB-first uint64 MACs. See the rationale in
+// ble_backend/connection.h: the ESPHome PAIR request can only arrive
+// after a successful connect+discover, which is exactly what peers that
+// demand an authenticated link refuse to give.
+
+constexpr const char *NVS_AUTOBOND_KEY = "auto_bond";
+
+// "AA:BB:CC:DD:EE:FF" → MSB-first packed uint64.
+bool parse_mac(const char *s, uint64_t *out) {
+  if (s == nullptr) return false;
+  uint64_t acc = 0;
+  int hex_seen = 0;
+  for (const char *p = s; *p; ++p) {
+    char c = *p;
+    if (c == ':' || c == '-') continue;
+    if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
+    int v = (c >= '0' && c <= '9') ? c - '0'
+            : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                                     : c - 'A' + 10;
+    acc = (acc << 4) | static_cast<uint64_t>(v);
+    ++hex_seen;
+  }
+  if (hex_seen != 12) return false;
+  *out = acc;
+  return true;
+}
+
+void fmt_mac(uint64_t addr, char *out, size_t cap) {
+  std::snprintf(out, cap, "%02x:%02x:%02x:%02x:%02x:%02x",
+                static_cast<unsigned>((addr >> 40) & 0xff),
+                static_cast<unsigned>((addr >> 32) & 0xff),
+                static_cast<unsigned>((addr >> 24) & 0xff),
+                static_cast<unsigned>((addr >> 16) & 0xff),
+                static_cast<unsigned>((addr >> 8) & 0xff),
+                static_cast<unsigned>(addr & 0xff));
+}
+
+esp_err_t nvs_write_auto_bond(const uint64_t *addrs, uint8_t n) {
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+  if (err != ESP_OK) return err;
+  if (n == 0) {
+    err = nvs_erase_key(h, NVS_AUTOBOND_KEY);
+    if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+  } else {
+    err = nvs_set_blob(h, NVS_AUTOBOND_KEY, addrs, n * sizeof(uint64_t));
+  }
+  if (err == ESP_OK) err = nvs_commit(h);
+  nvs_close(h);
+  return err;
+}
+
+// Append a MAC to a JSON array being built in `buf`, with the leading
+// comma when it isn't the first element. Returns the new length.
+size_t append_mac(char *buf, size_t cap, size_t len, uint64_t addr,
+                  bool first) {
+  char mac_s[20];
+  fmt_mac(addr, mac_s, sizeof(mac_s));
+  int n = std::snprintf(buf + len, cap - len, "%s\"%s\"", first ? "" : ",",
+                        mac_s);
+  if (n < 0) return len;
+  len += static_cast<size_t>(n);
+  return len < cap ? len : cap - 1;
+}
+
+esp_err_t bond_get(httpd_req_t *req) {
+  char buf[384];
+  size_t n = build_bond_json(buf, sizeof(buf));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, n);
+}
+
+esp_err_t bond_post(httpd_req_t *req) {
+  char query[128];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
+  }
+  const char *err = handle_bond_set(query);
+  if (err) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+  char buf[384];
+  size_t n = build_bond_json(buf, sizeof(buf));
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, n);
 }
 
 #endif  // CONFIG_NBP_SMP
@@ -1254,6 +1343,126 @@ const char *set_passkey(uint32_t pin) {
            static_cast<unsigned long>(pin));
   return nullptr;
 }
+
+size_t build_bond_json(char *buf, size_t cap) {
+  namespace conn = ble_backend::connection;
+  uint64_t autol[conn::AUTO_BOND_MAX];
+  uint8_t an = conn::get_auto_bond_list(autol, conn::AUTO_BOND_MAX);
+  uint64_t bonds[CONFIG_BT_NIMBLE_MAX_BONDS];
+  uint8_t bn = conn::bonded_addresses(bonds, CONFIG_BT_NIMBLE_MAX_BONDS);
+
+  // %lu, not %06lu: a zero-padded number ("000042") is not valid JSON.
+  // The dashboard pads for display instead.
+  int n = std::snprintf(buf, cap, "{\"passkey\":%lu,\"max\":%u,\"auto\":[",
+                        static_cast<unsigned long>(conn::get_passkey()),
+                        static_cast<unsigned>(conn::AUTO_BOND_MAX));
+  if (n < 0) return 0;
+  size_t len = static_cast<size_t>(n);
+  if (len >= cap) return cap - 1;
+  for (uint8_t i = 0; i < an; ++i) {
+    len = append_mac(buf, cap, len, autol[i], i == 0);
+  }
+  n = std::snprintf(buf + len, cap - len, "],\"bonded\":[");
+  if (n < 0) return len;
+  len += static_cast<size_t>(n);
+  if (len >= cap) return cap - 1;
+  for (uint8_t i = 0; i < bn; ++i) {
+    len = append_mac(buf, cap, len, bonds[i], i == 0);
+  }
+  n = std::snprintf(buf + len, cap - len, "]}");
+  if (n < 0) return len;
+  len += static_cast<size_t>(n);
+  return len < cap ? len : cap - 1;
+}
+
+const char *handle_bond_set(const char *query) {
+  namespace conn = ble_backend::connection;
+  if (query == nullptr) return "missing query";
+
+  char buf[32];
+  bool touched = false;
+
+  if (httpd_query_key_value(query, "passkey", buf, sizeof(buf)) == ESP_OK) {
+    long pin = std::strtol(buf, nullptr, 10);
+    if (pin < 0 || pin > 999999) return "passkey must be 0..999999";
+    const char *err = set_passkey(static_cast<uint32_t>(pin));
+    if (err != nullptr) return err;
+    touched = true;
+  }
+
+  // Forget a stored bond. `unbond=all` clears the whole store — the
+  // escape hatch when a peer's keys have gone stale on its side and it
+  // starts rejecting our encrypted reconnects.
+  if (httpd_query_key_value(query, "unbond", buf, sizeof(buf)) == ESP_OK) {
+    if (std::strcmp(buf, "all") == 0) {
+      uint64_t bonds[CONFIG_BT_NIMBLE_MAX_BONDS];
+      uint8_t bn = conn::bonded_addresses(bonds, CONFIG_BT_NIMBLE_MAX_BONDS);
+      for (uint8_t i = 0; i < bn; ++i) conn::unpair(bonds[i]);
+    } else {
+      uint64_t mac = 0;
+      if (!parse_mac(buf, &mac)) return "unbond must be AA:BB:CC:DD:EE:FF";
+      if (!conn::unpair(mac)) return "no bond stored for that address";
+    }
+    touched = true;
+  }
+
+  uint64_t list[conn::AUTO_BOND_MAX];
+  uint8_t n = conn::get_auto_bond_list(list, conn::AUTO_BOND_MAX);
+  bool list_changed = false;
+
+  if (httpd_query_key_value(query, "add", buf, sizeof(buf)) == ESP_OK) {
+    uint64_t mac = 0;
+    if (!parse_mac(buf, &mac)) return "add must be AA:BB:CC:DD:EE:FF";
+    bool present = false;
+    for (uint8_t i = 0; i < n; ++i) {
+      if (list[i] == mac) present = true;
+    }
+    if (!present) {
+      if (n >= conn::AUTO_BOND_MAX) return "auto-bond list is full";
+      list[n++] = mac;
+      list_changed = true;
+    }
+    touched = true;
+  }
+
+  if (httpd_query_key_value(query, "remove", buf, sizeof(buf)) == ESP_OK) {
+    uint64_t mac = 0;
+    if (!parse_mac(buf, &mac)) return "remove must be AA:BB:CC:DD:EE:FF";
+    uint8_t out = 0;
+    for (uint8_t i = 0; i < n; ++i) {
+      if (list[i] != mac) list[out++] = list[i];
+    }
+    if (out != n) {
+      n = out;
+      list_changed = true;
+    }
+    touched = true;
+  }
+
+  if (list_changed) {
+    if (nvs_write_auto_bond(list, n) != ESP_OK) return "nvs write failed";
+    conn::set_auto_bond_list(list, n);
+    ESP_LOGI(TAG, "auto-bond list now holds %u address(es)",
+             static_cast<unsigned>(n));
+  }
+
+  if (!touched) return "nothing to do";
+  return nullptr;
+}
+
+void apply_auto_bond_from_nvs() {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+  uint64_t list[ble_backend::connection::AUTO_BOND_MAX];
+  size_t len = sizeof(list);
+  esp_err_t err = nvs_get_blob(h, NVS_AUTOBOND_KEY, list, &len);
+  nvs_close(h);
+  if (err != ESP_OK) return;
+  uint8_t n = static_cast<uint8_t>(len / sizeof(uint64_t));
+  ble_backend::connection::set_auto_bond_list(list, n);
+  ESP_LOGI(TAG, "auto-bond list from NVS: %u address(es)",
+           static_cast<unsigned>(n));
+}
 #endif  // CONFIG_NBP_SMP
 
 #if CONFIG_NBP_DEVICES_PANEL
@@ -1747,6 +1956,18 @@ void register_endpoints(httpd_handle_t srv) {
                          .handler = &devices_get,
                          .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &devices);
+#endif
+#ifdef CONFIG_NBP_SMP
+  httpd_uri_t bond_g = {.uri = "/bond",
+                        .method = HTTP_GET,
+                        .handler = &bond_get,
+                        .user_ctx = nullptr};
+  httpd_uri_t bond_p = {.uri = "/bond",
+                        .method = HTTP_POST,
+                        .handler = &bond_post,
+                        .user_ctx = nullptr};
+  httpd_register_uri_handler(srv, &bond_g);
+  httpd_register_uri_handler(srv, &bond_p);
 #endif
   ESP_LOGI(TAG, "stats UI at /");
 }

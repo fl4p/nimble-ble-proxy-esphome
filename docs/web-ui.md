@@ -43,7 +43,7 @@ Six Kconfig flags shape what gets compiled in. Edit in
 | `CONFIG_NBP_AP_FALLBACK` | `n` | ~15 KB flash, extra netif + httpd | SoftAP fallback when STA can't associate within `CONFIG_NBP_AP_FALLBACK_SECS`. Hosts a single page at `192.168.4.1/` with a form that POSTs `/wifi?ssid=…&psk=…` into NVS namespace `wifi` and reboots. Credential lookup at boot: NVS first, then `wifi_creds.h` if present, then AP fallback. Makes `wifi_creds.h` optional. |
 | `CONFIG_NBP_BLE_HTTPD` | `n` | ~4 KB flash | GATT request/response service that lets Web Bluetooth talk to the same handlers |
 | `CONFIG_NBP_CLONE` | `n` | ~20 KB flash, ~10-15 KB RAM when active | clone supervisor + local GATT mirror + `/clone` endpoint + dashboard clone button + synthetic clone-target row |
-| `CONFIG_NBP_SMP` | `n` | ~2 KB flash | static-passkey pairing as central (paired upstream peripherals); `passkey` field on `/clone` |
+| `CONFIG_NBP_SMP` | `y` | ~2 KB flash + 3 KB stack while bonding | static-passkey pairing as central (paired upstream peripherals); the `PAIRING` BT-proxy feature flag and the PAIR/UNPAIR handlers; `/bond` endpoint + dashboard bonding panel + per-row bond button; `passkey` field on `/clone` |
 | `CONFIG_NBP_DEVICES_PANEL` | `y` | ~12 KB BSS | scanner device table, `/devices`, dashboard table |
 | `CONFIG_NBP_WEB_CONSOLE` | `y` | 64 KB BSS (NimBLE DEBUG) / 8 KB BSS | `esp_log_set_vprintf` hook, ring buffer, `/log`, on-page console |
 
@@ -508,24 +508,72 @@ Tiny inline SVG (Bluetooth glyph on a blue rounded square) embedded
 into the WiFi build via `EMBED_FILES`. `Cache-Control: public,
 max-age=86400` so browsers stop refetching it. ~300 B.
 
-### Passkey (folded into `/clone`)
+### `GET /bond` &nbsp;·&nbsp; `POST /bond?…` *(gated by `CONFIG_NBP_SMP`)*
 
-The static SMP passkey used when the proxy is the initiator and an
-upstream peer demands MITM pairing (Victron SmartShunt, some BMS
-variants) is now part of the `/clone` payload — there is no
-standalone `/passkey` HTTP endpoint anymore. Both the dashboard's clone
-prompt and any external scripting use:
+Everything about BLE bonding in one endpoint.
 
-```
-GET  /clone                   → {"passkey":NNNNNN,...} (when CONFIG_NBP_SMP)
-POST /clone?addr=…&passkey=N&enabled=1
+```json
+{"passkey":123456,"max":4,
+ "auto":["a4:05:fd:13:98:6e"],
+ "bonded":["a4:05:fd:13:98:6e","c0:3b:8f:11:22:33"]}
 ```
 
-The `api_server::stats::set_passkey()` C++ helper is the single source
-of truth for NVS persistence (`stats / ble_passkey`) and apply
-(`ble_backend::connection::set_passkey`). Boot-time replay still runs
-inside `apply_log_overrides_from_nvs()` so the passkey is loaded
-before any GATT pairing can be triggered. See `docs/clone.md` §6.
+| Field | Meaning |
+|---|---|
+| `passkey` | static SMP passkey injected when a peer asks for one (`onPassKeyEntry`). Applies to *every* outbound pairing — proxied peers and the clone upstream alike. |
+| `max` | capacity of the auto-bond list = `ble_backend::connection::AUTO_BOND_MAX`, itself capped at `CONFIG_BT_NIMBLE_MAX_BONDS` |
+| `auto` | addresses the proxy pairs with immediately after connecting |
+| `bonded` | peers whose keys are currently in NimBLE's NVS bond store |
+
+`POST` accepts any combination of:
+
+| Param | Effect |
+|---|---|
+| `passkey=NNNNNN` | 0..999999, persisted to `stats / ble_passkey` |
+| `add=MAC` | add to the auto-bond list (`"auto-bond list is full"` at `max`) |
+| `remove=MAC` | drop from the auto-bond list |
+| `unbond=MAC` \| `unbond=all` | delete stored bond keys |
+
+Both `GET` and `POST` return the full JSON above, so the dashboard
+re-renders from the POST response without a second round trip. A `POST`
+that matches none of the parameters is a `400 nothing to do`.
+
+**Why the auto-bond list exists.** Home Assistant can ask the proxy to
+pair (`BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR`, enabled by the `PAIRING`
+feature flag) — but only *after* a connect and a successful service
+discovery. Peers that refuse discovery on an unauthenticated link drop
+the connection before that point, so the request never happens. For a
+listed address the proxy instead runs SMP the moment the GAP connect
+completes, and withholds `BluetoothDeviceConnectionResponse` until
+pairing resolves; HA's discovery then runs over an encrypted link. A
+failed auto-bond still reports the link (unauthenticated) rather than
+inventing a connect failure — that leaves HA's retry behaviour exactly
+as it is today.
+
+Pairing blocks its caller (NimBLE's `secureConnection()` waits for
+`BLE_GAP_EVENT_ENC_CHANGE`, up to the 30 s SMP timeout), so it runs on a
+dedicated `ble_bond` worker task — created lazily on the first bonding
+request, never on a device that doesn't bond. Neither the api_server
+client task nor the NimBLE host task is ever blocked on SMP.
+
+Persistence: the auto-bond list is a packed `uint64` blob at
+`stats / auto_bond`, replayed by `apply_auto_bond_from_nvs()` — which
+must run *after* `ble_backend::start()` because the list is guarded by
+the connection mutex. The passkey (`stats / ble_passkey`) has no such
+constraint and is replayed earlier, from
+`apply_log_overrides_from_nvs()`, so it is in place before any GATT
+pairing can be triggered. `api_server::stats::set_passkey()` remains the
+single source of truth for persist+apply; `/clone` funnels its own
+`passkey=` into it. See `docs/clone.md` §6.
+
+#### Dashboard rendering
+
+`loadBond()` polls `GET /bond` every 5 s and unhides `#bondpanel` on the
+first success — a firmware without `CONFIG_NBP_SMP` 404s, so the panel
+and the per-row bond buttons simply never appear. The devices table
+grows a second button next to `clone` on every connectable row: `bond` /
+`no-bond` toggles auto-bond membership, and a 🔒 prefix marks a peer
+whose keys are already in the store (the two are independent).
 
 ## BLE transport (`CONFIG_NBP_BLE_HTTPD`)
 

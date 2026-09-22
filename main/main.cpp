@@ -327,6 +327,11 @@ extern "C" void app_main() {
   // window/interval override now (uses scanner::set_duty which is a
   // no-op until init() has been called by ble_backend::start).
   api_server::stats::apply_scan_from_nvs();
+#ifdef CONFIG_NBP_SMP
+  // Auto-bond list — same "after ble_backend::start" constraint as the
+  // scan duty above (connection::init() owns the mutex guarding it).
+  api_server::stats::apply_auto_bond_from_nvs();
+#endif
 #endif
 
 #if CONFIG_NBP_BLE_AUTO_OFF
