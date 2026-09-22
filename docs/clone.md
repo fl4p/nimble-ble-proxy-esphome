@@ -242,7 +242,11 @@ Mounted on the OTA httpd to avoid a second listener. When
 `CONFIG_NBP_SMP` is built, `/clone` also carries the static SMP
 passkey used for upstream pairing — the standalone `/passkey` endpoint
 was folded in so the dashboard collects target MAC + passkey in one
-gesture.
+gesture. The same value is also readable/writable on `/bond`
+(`docs/web-ui.md`), which is where it lives in a build without
+`CONFIG_NBP_CLONE`; both routes funnel into the one
+`api_server::stats::set_passkey()` helper, so there is still a single
+stored passkey shared by the clone upstream and every proxied peer.
 
 ```
 GET  /clone           → {"enabled":bool,"addr":"AA:BB:CC:DD:EE:FF",
@@ -575,9 +579,10 @@ If the upstream peer demands SMP (Victron SmartShunt and similar),
 times out because most characteristic reads need an encrypted link.
 The clone reads from `ble_backend::connection::get_passkey()`, the
 same runtime slot the ESPHome-proxy side uses. The slot is set via
-`POST /clone?passkey=NNNNNN` (under `CONFIG_NBP_SMP`) — the
-standalone `/passkey` HTTP endpoint was folded into `/clone` so the
-dashboard collects target MAC + passkey in one gesture. See §6.
+`POST /clone?passkey=NNNNNN` or `POST /bond?passkey=NNNNNN` (both under
+`CONFIG_NBP_SMP`) — the standalone `/passkey` HTTP endpoint was folded
+into `/clone` so the dashboard collects target MAC + passkey in one
+gesture, and `/bond` later became its home for non-clone builds. See §6.
 
 ### 13.15 `NimBLEServer::start()` must be called **exactly once** per session
 
