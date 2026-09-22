@@ -1053,6 +1053,10 @@ async function loadBond() {
     supported: true,
     passkey: b.passkey,
     max: b.max || 0,
+    // ble_off: the BLE-TX "off" choice deinits the NimBLE host, so the
+    // bond store can't be read and `bonded` comes back empty. Say that
+    // rather than letting the panel imply the keys were deleted.
+    bleOff: !!b.ble_off,
     auto: (b.auto || []).map(x => x.toUpperCase()),
     bonded: (b.bonded || []).map(x => x.toUpperCase()),
   };
@@ -1067,7 +1071,10 @@ async function loadBond() {
   renderBondList(document.getElementById('bondauto'), g_bond.auto,
                  'remove', 'remove', 'none — peers pair only on request');
   renderBondList(document.getElementById('bondstored'), g_bond.bonded,
-                 'unbond', 'forget', 'no keys stored');
+                 'unbond', 'forget',
+                 g_bond.bleOff ? 'BLE is powered off — reboot to read the '
+                               + 'bond store'
+                               : 'no keys stored');
 }
 
 // Refresh the NAT panel: AP status, client count, port-map table. On the

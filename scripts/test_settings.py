@@ -302,6 +302,11 @@ def test_bond_roundtrip():
           str(before))
     check("bond JSON has bonded list", isinstance(before.get("bonded"), list),
           str(before))
+    # ble_off=true means the NimBLE host was deinited by POST
+    # /txpower?ble=off, so `bonded` is unreadable rather than empty.
+    if before.get("ble_off"):
+        check("skipped the rest: BLE is powered off, reboot to re-test", True)
+        return
 
     post("/bond?passkey=424242")
     f = get_json("/bond")
@@ -336,6 +341,19 @@ def test_bond_roundtrip():
     st, body = post("/bond?unbond=02:00:00:de:ad:00")
     check("unbond of an unbonded address rejected (4xx)", 400 <= st < 500,
           f"got {st}: {body}")
+    st, body = post("/bond?passkey=abc")
+    check("non-numeric passkey rejected (4xx)", 400 <= st < 500,
+          f"got {st}: {body}")
+
+    # A request that ends in a 400 must not have applied any earlier
+    # parameter — notably it must not have changed the stored passkey that
+    # every outbound pairing uses.
+    st, _ = post(f"/bond?passkey=999999&add=nonsense")
+    f = get_json("/bond")
+    check("rejected request left the passkey untouched",
+          400 <= st < 500 and f.get("passkey") == original_pin, str(f))
+    check("rejected request left the auto-bond list untouched",
+          test_mac not in [a.lower() for a in f["auto"]], str(f))
 
 
 def test_ws_bridge():

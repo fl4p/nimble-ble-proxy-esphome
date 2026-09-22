@@ -89,6 +89,10 @@ using PairCallback = void (*)(uint64_t address, const PairResult &);
 // otherwise from the bonding worker task.
 bool pair(uint64_t address, PairCallback cb);
 
+// True when the bond store holds keys for this peer, connected or not.
+// False after a runtime BLE power-off — there is no host left to ask.
+bool has_bond(uint64_t address);
+
 // Delete the stored bond. Returns false when no bond was held.
 bool unpair(uint64_t address);
 

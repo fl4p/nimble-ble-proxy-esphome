@@ -513,7 +513,7 @@ max-age=86400` so browsers stop refetching it. ~300 B.
 Everything about BLE bonding in one endpoint.
 
 ```json
-{"passkey":123456,"max":4,
+{"passkey":123456,"max":4,"ble_off":false,
  "auto":["a4:05:fd:13:98:6e"],
  "bonded":["a4:05:fd:13:98:6e","c0:3b:8f:11:22:33"]}
 ```
@@ -522,8 +522,19 @@ Everything about BLE bonding in one endpoint.
 |---|---|
 | `passkey` | static SMP passkey injected when a peer asks for one (`onPassKeyEntry`). Applies to *every* outbound pairing — proxied peers and the clone upstream alike. |
 | `max` | capacity of the auto-bond list = `ble_backend::connection::AUTO_BOND_MAX`, itself capped at `CONFIG_BT_NIMBLE_MAX_BONDS` |
+| `ble_off` | `ble_backend::powered_off()` — see the note below |
 | `auto` | addresses the proxy pairs with immediately after connecting |
 | `bonded` | peers whose keys are currently in NimBLE's NVS bond store |
+
+**After `POST /txpower?ble=off` there is no host to ask.** That option
+does a full `NimBLEDevice::deinit(true)`, and the bond store is a host
+facility — reading it would walk a torn-down `ble_hs`. The bond-store
+accessors in `connection.cpp` (`find_bond`, `bonded_addresses`, `pair`)
+all check `ble_backend::powered_off()` first, so `bonded` comes back
+empty and `unbond` is refused with `ble off; reboot to re-enable`. The
+`ble_off` flag is what lets the panel say *why* the list is empty
+instead of implying the keys were deleted. The passkey and the
+auto-bond list are plain NVS/RAM state and stay editable.
 
 `POST` accepts any combination of:
 
@@ -537,6 +548,13 @@ Everything about BLE bonding in one endpoint.
 Both `GET` and `POST` return the full JSON above, so the dashboard
 re-renders from the POST response without a second round trip. A `POST`
 that matches none of the parameters is a `400 nothing to do`.
+
+`handle_bond_set()` runs in **two passes: validate everything, then
+apply**. A request is all-or-nothing, so `?passkey=1&add=garbage` leaves
+the stored passkey alone rather than changing the PIN used by every
+outbound pairing on its way to returning a 400. The same holds for a
+list edit rejected by the `max` cap, and for an `unbond` of an address
+that holds no keys (pre-checked with `connection::has_bond()`).
 
 **Why the auto-bond list exists.** Home Assistant can ask the proxy to
 pair (`BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR`, enabled by the `PAIRING`
