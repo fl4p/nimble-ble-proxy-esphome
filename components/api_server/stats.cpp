@@ -1351,11 +1351,18 @@ size_t build_bond_json(char *buf, size_t cap) {
   uint64_t bonds[CONFIG_BT_NIMBLE_MAX_BONDS];
   uint8_t bn = conn::bonded_addresses(bonds, CONFIG_BT_NIMBLE_MAX_BONDS);
 
+  // After POST /txpower?ble=off the host is deinited, so the bond store
+  // can't be read and `bonded` comes back empty. Say why rather than
+  // letting the panel imply the keys are gone.
+  bool ble_off = ble_backend::powered_off();
+
   // %lu, not %06lu: a zero-padded number ("000042") is not valid JSON.
   // The dashboard pads for display instead.
-  int n = std::snprintf(buf, cap, "{\"passkey\":%lu,\"max\":%u,\"auto\":[",
+  int n = std::snprintf(buf, cap,
+                        "{\"passkey\":%lu,\"max\":%u,\"ble_off\":%s,\"auto\":[",
                         static_cast<unsigned long>(conn::get_passkey()),
-                        static_cast<unsigned>(conn::AUTO_BOND_MAX));
+                        static_cast<unsigned>(conn::AUTO_BOND_MAX),
+                        ble_off ? "true" : "false");
   if (n < 0) return 0;
   size_t len = static_cast<size_t>(n);
   if (len >= cap) return cap - 1;
@@ -1379,64 +1386,111 @@ const char *handle_bond_set(const char *query) {
   namespace conn = ble_backend::connection;
   if (query == nullptr) return "missing query";
 
+  // Two passes on purpose. Every parameter is parsed and validated first,
+  // and nothing is applied until all of them are known good — otherwise a
+  // request that ends in a 400 could still have changed the stored passkey
+  // used by every outbound pairing, or half-applied a list edit.
   char buf[32];
   bool touched = false;
 
+  bool set_pin = false;
+  uint32_t pin = 0;
+  bool unbond_all = false;
+  bool unbond_one = false;
+  uint64_t unbond_mac = 0;
+  bool do_add = false;
+  uint64_t add_mac = 0;
+  bool do_remove = false;
+  uint64_t remove_mac = 0;
+
   if (httpd_query_key_value(query, "passkey", buf, sizeof(buf)) == ESP_OK) {
-    long pin = std::strtol(buf, nullptr, 10);
-    if (pin < 0 || pin > 999999) return "passkey must be 0..999999";
-    const char *err = set_passkey(static_cast<uint32_t>(pin));
-    if (err != nullptr) return err;
+    char *end = nullptr;
+    long v = std::strtol(buf, &end, 10);
+    // strtol alone would turn "abc" into a silent 0 — reject anything that
+    // isn't a complete decimal number.
+    if (end == buf || *end != '\0' || v < 0 || v > 999999) {
+      return "passkey must be 0..999999";
+    }
+    pin = static_cast<uint32_t>(v);
+    set_pin = true;
     touched = true;
   }
 
-  // Forget a stored bond. `unbond=all` clears the whole store — the
-  // escape hatch when a peer's keys have gone stale on its side and it
-  // starts rejecting our encrypted reconnects.
   if (httpd_query_key_value(query, "unbond", buf, sizeof(buf)) == ESP_OK) {
+    if (ble_backend::powered_off()) return "ble off; reboot to re-enable";
     if (std::strcmp(buf, "all") == 0) {
-      uint64_t bonds[CONFIG_BT_NIMBLE_MAX_BONDS];
-      uint8_t bn = conn::bonded_addresses(bonds, CONFIG_BT_NIMBLE_MAX_BONDS);
-      for (uint8_t i = 0; i < bn; ++i) conn::unpair(bonds[i]);
+      unbond_all = true;
     } else {
-      uint64_t mac = 0;
-      if (!parse_mac(buf, &mac)) return "unbond must be AA:BB:CC:DD:EE:FF";
-      if (!conn::unpair(mac)) return "no bond stored for that address";
+      if (!parse_mac(buf, &unbond_mac)) {
+        return "unbond must be AA:BB:CC:DD:EE:FF";
+      }
+      if (!conn::has_bond(unbond_mac)) {
+        return "no bond stored for that address";
+      }
+      unbond_one = true;
     }
     touched = true;
   }
-
-  uint64_t list[conn::AUTO_BOND_MAX];
-  uint8_t n = conn::get_auto_bond_list(list, conn::AUTO_BOND_MAX);
-  bool list_changed = false;
 
   if (httpd_query_key_value(query, "add", buf, sizeof(buf)) == ESP_OK) {
-    uint64_t mac = 0;
-    if (!parse_mac(buf, &mac)) return "add must be AA:BB:CC:DD:EE:FF";
-    bool present = false;
-    for (uint8_t i = 0; i < n; ++i) {
-      if (list[i] == mac) present = true;
-    }
-    if (!present) {
-      if (n >= conn::AUTO_BOND_MAX) return "auto-bond list is full";
-      list[n++] = mac;
-      list_changed = true;
-    }
+    if (!parse_mac(buf, &add_mac)) return "add must be AA:BB:CC:DD:EE:FF";
+    do_add = true;
     touched = true;
   }
 
   if (httpd_query_key_value(query, "remove", buf, sizeof(buf)) == ESP_OK) {
-    uint64_t mac = 0;
-    if (!parse_mac(buf, &mac)) return "remove must be AA:BB:CC:DD:EE:FF";
+    if (!parse_mac(buf, &remove_mac)) {
+      return "remove must be AA:BB:CC:DD:EE:FF";
+    }
+    do_remove = true;
+    touched = true;
+  }
+
+  if (!touched) return "nothing to do";
+
+  // Compute the new auto-bond list without publishing it, so a "full"
+  // rejection also happens before anything is applied.
+  uint64_t list[conn::AUTO_BOND_MAX];
+  uint8_t n = conn::get_auto_bond_list(list, conn::AUTO_BOND_MAX);
+  bool list_changed = false;
+
+  if (do_add) {
+    bool present = false;
+    for (uint8_t i = 0; i < n; ++i) {
+      if (list[i] == add_mac) present = true;
+    }
+    if (!present) {
+      if (n >= conn::AUTO_BOND_MAX) return "auto-bond list is full";
+      list[n++] = add_mac;
+      list_changed = true;
+    }
+  }
+
+  if (do_remove) {
     uint8_t out = 0;
     for (uint8_t i = 0; i < n; ++i) {
-      if (list[i] != mac) list[out++] = list[i];
+      if (list[i] != remove_mac) list[out++] = list[i];
     }
     if (out != n) {
       n = out;
       list_changed = true;
     }
-    touched = true;
+  }
+
+  // ---- everything validated; apply ----
+  if (set_pin) {
+    const char *err = set_passkey(pin);
+    if (err != nullptr) return err;
+  }
+
+  // `unbond=all` is the escape hatch when a peer has been factory-reset and
+  // starts rejecting our encrypted reconnects with stale keys.
+  if (unbond_all) {
+    uint64_t bonds[CONFIG_BT_NIMBLE_MAX_BONDS];
+    uint8_t bn = conn::bonded_addresses(bonds, CONFIG_BT_NIMBLE_MAX_BONDS);
+    for (uint8_t i = 0; i < bn; ++i) conn::unpair(bonds[i]);
+  } else if (unbond_one) {
+    conn::unpair(unbond_mac);
   }
 
   if (list_changed) {
@@ -1446,7 +1500,6 @@ const char *handle_bond_set(const char *query) {
              static_cast<unsigned>(n));
   }
 
-  if (!touched) return "nothing to do";
   return nullptr;
 }
 

@@ -314,6 +314,31 @@
   including type**, but HA only hands us 48 bits (and the adv address type
   isn't necessarily the identity type in the store). `find_bond()` enumerates
   `getNumBonds()`/`getBondedAddress(i)` and compares the 48 bits instead.
+- **The bond store is a host facility — guard every read on
+  `ble_backend::powered_off()`.** `POST /txpower?ble=off` does a full
+  `NimBLEDevice::deinit(true)`, so `getNumBonds()` afterwards walks a
+  torn-down `ble_hs`. The dashboard polls `/bond` every 5 s, which makes this
+  a *reliable* abort rather than a rare one. `find_bond`, `bonded_addresses`
+  and `pair()` all check first; `/bond` surfaces `"ble_off":true` so the panel
+  can say why the list is empty instead of implying the keys were deleted.
+  (This is the same guard `build_txpower_json` already used — the pattern is
+  called out in `ble_backend.h`'s comment on `powered_off()`.)
+- **A slot with a bonding job in flight is not allocatable.** The worker
+  holds the slot's `NimBLEClient*` across `secureConnection()`, and slots
+  *reuse* their client object — so re-tenanting the slot in that window would
+  run SMP against the wrong peer. `alloc_locked()`/`free_slots()` share
+  `slot_available_locked()` (`state == Free && !bond_busy`), and
+  `onDisconnect`/`onConnectFail` deliberately clear only `bond_holds_connect`,
+  leaving `bond_busy` to `bond_finish()`. The generation counter alone does
+  *not* cover this: it detects a recycled slot after the fact, but by then
+  SMP has already run on the wrong link.
+- **Sending the deferred connect result is not atomic with the state check.**
+  The peer can drop between `bond_finish()` observing `Connected` and the
+  worker's `connect_cb(connected=true)` — and `onDisconnect` would then have
+  pushed its `connected=false` *first*, leaving HA holding a link that no
+  longer exists. The worker re-checks with `job_link_live()` after the send
+  and emits a corrective `connected=false`. A duplicate disconnect is
+  harmless; a phantom connection is not.
 
 ## WebSocket bridge (NBP_WS_PROXY)
 

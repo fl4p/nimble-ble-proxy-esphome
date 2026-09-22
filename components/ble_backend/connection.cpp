@@ -1,6 +1,7 @@
 #include "connection.h"
 
 #include "address.h"
+#include "ble_backend.h"
 #include "proxy_config.h"
 #include "scanner.h"
 
@@ -99,9 +100,24 @@ Slot *find_by_client_locked(const NimBLEClient *c) {
   return nullptr;
 }
 
+#ifdef CONFIG_NBP_SMP
+// A slot whose bonding job is still in flight is NOT available, even once
+// the link is gone: the worker is holding this slot's NimBLEClient* and is
+// about to call (or is inside) secureConnection() on it. Handing the slot
+// — and therefore that same client object, which slots keep and reuse — to
+// a new peer would run SMP against the wrong device. bond_finish() clears
+// the flag once the worker is done with the pointer, which a disconnect
+// makes happen promptly (it releases secureConnection's wait).
+bool slot_available_locked(const Slot &s) {
+  return s.state == State::Free && !s.bond_busy;
+}
+#else
+bool slot_available_locked(const Slot &s) { return s.state == State::Free; }
+#endif
+
 Slot *alloc_locked() {
   for (auto &s : g_slots) {
-    if (s.state == State::Free) {
+    if (slot_available_locked(s)) {
 #ifdef CONFIG_NBP_SMP
       ++s.gen;
 #endif
@@ -171,6 +187,17 @@ bool bond_enqueue(const BondJob &job) {
   return xQueueSend(g_bond_q, &job, 0) == pdTRUE;
 }
 
+// Is the link this job was started for still up? Used after sending a
+// deferred connect result to detect the case where the peer dropped
+// between the decision and the send.
+bool job_link_live(const BondJob &job) {
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  const Slot &s = g_slots[job.slot];
+  bool live = (s.gen == job.gen && s.state == State::Connected);
+  xSemaphoreGive(g_mutex);
+  return live;
+}
+
 // Clear the slot's bonding flags if the job still matches, and hand back
 // the deferred ConnectCallback when this job owns it.
 ConnectCallback bond_finish(const BondJob &job, uint64_t *addr_out) {
@@ -228,6 +255,19 @@ void bond_task(void *) {
         }
         ConnectionResult r{true, job.mtu, 0};
         connect_cb(addr, r);
+        // bond_finish() checked the link was up, but the peer can drop in
+        // the gap between that check and the send above — and onDisconnect
+        // would then have pushed its connected=false FIRST, leaving HA
+        // holding a link that no longer exists. Re-check and correct.
+        // A duplicate connected=false is harmless; a phantom connection
+        // is not.
+        if (!job_link_live(job)) {
+          ESP_LOGW(TAG, "auto-bond %012llx: link dropped while reporting it; "
+                        "sending a corrective disconnect",
+                   static_cast<unsigned long long>(addr));
+          ConnectionResult down{false, 0, 0};
+          connect_cb(addr, down);
+        }
       }
       // connect_cb == nullptr: the peer dropped while we were pairing and
       // onDisconnect already reported the failure. Nothing to send.
@@ -349,9 +389,9 @@ class ClientCb : public NimBLEClientCallbacks {
       s->cb = nullptr;
 #ifdef CONFIG_NBP_SMP
       // A bonding job may still be blocked in secureConnection(); it
-      // detects the freed slot and drops its result. Reset the flags so
-      // the next tenant of this slot starts clean.
-      s->bond_busy = false;
+      // detects the freed slot and drops its result. bond_busy is
+      // deliberately NOT cleared here — it pins the slot until the worker
+      // is finished with this client pointer (see slot_available_locked).
       s->bond_holds_connect = false;
 #endif
     }
@@ -384,7 +424,8 @@ class ClientCb : public NimBLEClientCallbacks {
       // If the peer dropped us mid-SMP, cb_snapshot above IS the
       // deferred connect result — HA gets one connected=false and the
       // bonding job stays silent (bond_finish sees state != Connected).
-      s->bond_busy = false;
+      // bond_busy stays set; only bond_finish clears it (see
+      // slot_available_locked).
       s->bond_holds_connect = false;
 #endif
     }
@@ -427,6 +468,10 @@ uint32_t get_passkey() {
 bool pair(uint64_t address, PairCallback cb) {
   BondJob job{};
   NimBLEClient *client = nullptr;
+
+  // POST /txpower?ble=off deinits host + controller; the slots and their
+  // clients are gone with it. Bail before touching any of them.
+  if (ble_backend::powered_off()) return false;
 
   xSemaphoreTake(g_mutex, portMAX_DELAY);
   Slot *s = find_by_addr_locked(address);
@@ -479,6 +524,9 @@ namespace {
 // necessarily the peer's *identity* address type in the bond store).
 // Enumerate the store and compare the 48 bits instead.
 bool find_bond(uint64_t address, NimBLEAddress *out) {
+  // The bond store is a host facility; after power_off()'s
+  // NimBLEDevice::deinit(true) there is no host to ask.
+  if (ble_backend::powered_off()) return false;
   int n = NimBLEDevice::getNumBonds();
   for (int i = 0; i < n; ++i) {
     NimBLEAddress a = NimBLEDevice::getBondedAddress(i);
@@ -491,6 +539,10 @@ bool find_bond(uint64_t address, NimBLEAddress *out) {
 }
 }  // namespace
 
+bool has_bond(uint64_t address) {
+  return find_bond(address, nullptr);
+}
+
 bool unpair(uint64_t address) {
   NimBLEAddress a{};
   if (!find_bond(address, &a)) return false;
@@ -502,6 +554,7 @@ bool unpair(uint64_t address) {
 
 uint8_t bonded_addresses(uint64_t *out, uint8_t cap) {
   uint8_t n = 0;
+  if (ble_backend::powered_off()) return 0;
   int total = NimBLEDevice::getNumBonds();
   for (int i = 0; i < total && n < cap; ++i) {
     out[n++] = static_cast<uint64_t>(NimBLEDevice::getBondedAddress(i));
@@ -619,7 +672,10 @@ uint8_t free_slots() {
   uint8_t n = 0;
   xSemaphoreTake(g_mutex, portMAX_DELAY);
   for (auto &s : g_slots) {
-    if (s.state == State::Free) ++n;
+    // Same predicate alloc_locked() uses — a slot still pinned by a
+    // bonding job would otherwise be advertised to HA as free and then
+    // refused on the connect that follows.
+    if (slot_available_locked(s)) ++n;
   }
   xSemaphoreGive(g_mutex);
   return n;
