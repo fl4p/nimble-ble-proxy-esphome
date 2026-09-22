@@ -88,12 +88,31 @@ table#devices tr.synthetic td{color:#888;font-style:italic}
 table#devices tr.synthetic.cloned td{color:#a0a0a0}
 table#devices tr.cloned td{background:#0d1f3a;
   box-shadow:inset 2px 0 0 #3b82f6}
-table#devices button.clone-btn{background:#1a1a1a;border:1px solid #333;
+table#devices button.clone-btn,table#devices button.bond-btn{
+  background:#1a1a1a;border:1px solid #333;
   color:#ddd;font:inherit;padding:.1em .5em;border-radius:3px;cursor:pointer}
-table#devices button.clone-btn:hover{background:#2a2a2a}
-table#devices button.clone-btn:disabled{opacity:.5;cursor:default}
+table#devices button.clone-btn:hover,
+table#devices button.bond-btn:hover{background:#2a2a2a}
+table#devices button.clone-btn:disabled,
+table#devices button.bond-btn:disabled{opacity:.5;cursor:default}
 table#devices button.clone-btn.cloned{border-color:#7f1d1d;color:#fca5a5}
 table#devices button.clone-btn.cloned:hover{background:#3b0a0a}
+table#devices button.bond-btn{margin-left:.3em}
+table#devices button.bond-btn.on{border-color:#3f6212;color:#bef264}
+table#devices button.bond-btn.on:hover{background:#1a2e05}
+#bondpanel .bondedit{display:flex;flex-wrap:wrap;gap:.5em 1em;
+  align-items:center;margin:.6em 0}
+#bondpanel .bondedit label{color:#aaa;display:inline-flex;align-items:center;
+  gap:.3em}
+#bondpanel .bondlists{display:flex;flex-wrap:wrap;gap:1.5em;margin:.6em 0}
+#bondpanel .bondlist{min-width:16em}
+#bondpanel .bondlist h3{font-size:12px;color:#9ca3af;font-weight:normal;
+  margin:0 0 .3em}
+#bondpanel ul{list-style:none;margin:0;padding:0}
+#bondpanel li{display:flex;align-items:center;gap:.6em;padding:.1em 0}
+#bondpanel li code{color:#ddd}
+#bondpanel li.empty{color:#666;font-style:italic}
+#bondpanel .muted{color:#777;font-size:12px}
 #natstatus{display:flex;flex-wrap:wrap;gap:.4em 1.5em;color:#aaa;margin:.5em 0}
 #natstatus b{color:#eee}#natstatus code{color:#bbb}
 .natedit,.natadd{display:flex;flex-wrap:wrap;gap:.5em 1em;align-items:center;margin:.6em 0}
@@ -251,6 +270,36 @@ table#portmaps button.del:hover{background:#3b0a0a}
     <th class=r>adv/s</th><th class=r>total</th>
     <th class=r>age</th><th>tag</th><th>BTHome</th><th></th>
   </tr></thead><tbody></tbody></table></div>
+
+  <!-- BLE bonding panel. Hidden unless GET /bond succeeds (i.e. the
+       firmware was built with CONFIG_NBP_SMP); loadBond() unhides it.
+       "auto-bond" addresses are paired with immediately after the proxy
+       connects, BEFORE Home Assistant is told the link is up — needed
+       for peers that refuse GATT service discovery on an
+       unauthenticated link and just drop the connection (Felicity /
+       SolarB packs are the known case). -->
+  <div id=bondpanel class="hidden ble-only">
+    <h2>BLE bonding</h2>
+    <div class=bondedit>
+      <label>passkey <input type=text id=bondpin maxlength=6 inputmode=numeric
+                            spellcheck=false autocomplete=off
+                            placeholder=123456></label>
+      <button id=bondpinsave>save passkey</button>
+      <span id=bondhint class=muted>used for every outbound pairing that
+        asks for one</span>
+    </div>
+    <div class=bondlists>
+      <div class=bondlist>
+        <h3>auto-bond on connect (<span id=bondauton>0</span>/<span
+            id=bondautomax>0</span>)</h3>
+        <ul id=bondauto></ul>
+      </div>
+      <div class=bondlist>
+        <h3>stored bonds</h3>
+        <ul id=bondstored></ul>
+      </div>
+    </div>
+  </div>
 
   <!-- NAT router panel. Hidden unless GET /nat succeeds (i.e. the
        firmware was built with CONFIG_NBP_NAT_ROUTER); loadNat() unhides
@@ -772,6 +821,11 @@ let g_devPrev = {};
 // during an active connection, so a successfully-cloned peer would
 // otherwise look "not in range").
 let g_cloneTarget = { addr: null, enabled: false, state: 'Idle' };
+
+// Cached /bond snapshot. `supported` stays false on firmware built
+// without CONFIG_NBP_SMP (the endpoint 404s), which is also what keeps
+// the panel and the per-row bond buttons out of the way on those builds.
+let g_bond = { supported: false, passkey: null, max: 0, auto: [], bonded: [] };
 // Classify the BLE address type from NimBLE's `addr_type` enum (0/1/2/3)
 // plus the MAC's top two MSB bits (which encode the random-address
 // subtype per Core spec Vol 6 Pt B §1.3.2.1). Identity-resolved values
@@ -935,12 +989,85 @@ async function tickDevices() {
         btn.dataset.addr = x.addr;
         btn.dataset.type = x.type;
         tdBtn.appendChild(btn);
+        // Auto-bond toggle. Same connectable-only rule as clone: bonding
+        // needs a GATT link. Only shown once /bond has answered, so a
+        // build without CONFIG_NBP_SMP renders exactly as before.
+        if (g_bond.supported) {
+          const up = x.addr.toUpperCase();
+          const isAuto = g_bond.auto.includes(up);
+          const hasKeys = g_bond.bonded.includes(up);
+          const bb = document.createElement('button');
+          bb.className = isAuto ? 'bond-btn on' : 'bond-btn';
+          // The lock says "keys for this peer are in the bond store",
+          // which is independent of whether it's on the auto-bond list.
+          bb.textContent = (hasKeys ? '\u{1F512} ' : '') +
+                           (isAuto ? 'no-bond' : 'bond');
+          bb.title = (isAuto
+            ? 'Stop pairing with this peer on connect'
+            : 'Pair with this peer as soon as the proxy connects, before '
+              + 'Home Assistant is told the link is up') +
+            (hasKeys ? ' (bond keys stored)' : '');
+          bb.dataset.addr = x.addr;
+          tdBtn.appendChild(bb);
+        }
       }
       tr.appendChild(tdBtn);
       tb.appendChild(tr);
     }
     g_devPrev = next;
   } catch (e) { /* ignore */ }
+}
+
+function bondListItem(addr, action, label) {
+  const li = document.createElement('li');
+  const code = document.createElement('code');
+  code.textContent = addr;
+  li.appendChild(code);
+  const btn = document.createElement('button');
+  btn.textContent = label;
+  btn.dataset.action = action;
+  btn.dataset.addr = addr;
+  li.appendChild(btn);
+  return li;
+}
+
+function renderBondList(ul, addrs, action, label, emptyText) {
+  ul.textContent = '';
+  if (!addrs.length) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = emptyText;
+    ul.appendChild(li);
+    return;
+  }
+  for (const a of addrs) ul.appendChild(bondListItem(a, action, label));
+}
+
+// Refresh the bonding panel. Silent no-op (panel stays hidden) when the
+// firmware doesn't serve /bond.
+async function loadBond() {
+  let b;
+  try { b = await apiJson('GET /bond'); }
+  catch (e) { return; }
+  g_bond = {
+    supported: true,
+    passkey: b.passkey,
+    max: b.max || 0,
+    auto: (b.auto || []).map(x => x.toUpperCase()),
+    bonded: (b.bonded || []).map(x => x.toUpperCase()),
+  };
+  document.getElementById('bondpanel').classList.remove('hidden');
+  const pin = document.getElementById('bondpin');
+  // Don't clobber the field while the user is typing in it.
+  if (document.activeElement !== pin) {
+    pin.value = String(b.passkey).padStart(6, '0');
+  }
+  document.getElementById('bondauton').textContent = g_bond.auto.length;
+  document.getElementById('bondautomax').textContent = g_bond.max;
+  renderBondList(document.getElementById('bondauto'), g_bond.auto,
+                 'remove', 'remove', 'none — peers pair only on request');
+  renderBondList(document.getElementById('bondstored'), g_bond.bonded,
+                 'unbond', 'forget', 'no keys stored');
 }
 
 // Refresh the NAT panel: AP status, client count, port-map table. On the
@@ -1011,6 +1138,10 @@ function startPolling() {
   g_pollTimers.push(setInterval(tickDevices, 1000)); tickDevices();
   // NAT status changes slowly (client joins, manual edits) — 3 s is plenty.
   g_pollTimers.push(setInterval(loadNat,     3000)); loadNat();
+  // Bonding state only moves when someone edits it or a pairing lands.
+  // loadBond() is also called directly after every POST /bond, so this
+  // is just the "someone changed it from the other transport" refresh.
+  g_pollTimers.push(setInterval(loadBond,    5000)); loadBond();
   // WiFi history is a device-side ring sampled every ~30 s; 15 s poll is ample.
   g_pollTimers.push(setInterval(tickWifiHist, 15000)); tickWifiHist();
 }
@@ -1183,6 +1314,55 @@ function wireControls() {
     try { await connect(); } catch (e) {
       setStatus(e.message || String(e), 'err');
     }
+  };
+
+  // Auto-bond toggle on a device row, and the two list actions in the
+  // bonding panel. Both POST /bond and re-read it so the panel, the row
+  // buttons and the device all agree afterwards.
+  async function bondPost(query, busyBtn) {
+    if (busyBtn) { busyBtn.disabled = true; }
+    try {
+      await apiJson('POST /bond?' + query);
+    } catch (err) {
+      alert('bond: ' + (err.message || err));
+    } finally {
+      if (busyBtn) { busyBtn.disabled = false; }
+      await loadBond();
+    }
+  }
+
+  document.querySelector('#devices').addEventListener('click', async (e) => {
+    const b = e.target.closest('button.bond-btn');
+    if (!b) return;
+    const addr = b.dataset.addr;
+    const on = b.classList.contains('on');
+    if (!on && !confirm(
+        `Pair with ${addr} on every connect?\n\n` +
+        'The proxy will run SMP as soon as it connects and only then ' +
+        'report the link to Home Assistant. Set the passkey in the BLE ' +
+        'bonding panel first if the peer asks for one.')) {
+      return;
+    }
+    await bondPost((on ? 'remove=' : 'add=') + encodeURIComponent(addr), b);
+  });
+
+  document.getElementById('bondpanel').addEventListener('click', async (e) => {
+    const b = e.target.closest('button[data-action]');
+    if (!b) return;
+    const addr = b.dataset.addr;
+    if (b.dataset.action === 'remove') {
+      await bondPost('remove=' + encodeURIComponent(addr), b);
+    } else if (b.dataset.action === 'unbond') {
+      if (!confirm(`Forget the stored keys for ${addr}?\n\n` +
+                   'The next connection will have to pair again.')) return;
+      await bondPost('unbond=' + encodeURIComponent(addr), b);
+    }
+  });
+
+  document.getElementById('bondpinsave').onclick = async (e) => {
+    const v = document.getElementById('bondpin').value.trim();
+    if (!/^\d{1,6}$/.test(v)) { alert('Passkey must be 0..999999'); return; }
+    await bondPost('passkey=' + parseInt(v, 10), e.target);
   };
 
   // Delegated handler so we don't re-bind every poll. The button carries

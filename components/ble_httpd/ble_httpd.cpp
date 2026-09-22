@@ -243,6 +243,20 @@ size_t dispatch(const char *method, char *path, char *out, size_t cap) {
     return static_cast<size_t>(std::snprintf(out, cap, "{\"ok\":true}"));
   }
 
+#ifdef CONFIG_NBP_SMP
+  if (is_get && std::strcmp(path, "/bond") == 0) {
+    return api_server::stats::build_bond_json(out, cap);
+  }
+  if (is_post && std::strcmp(path, "/bond") == 0) {
+    const char *err = api_server::stats::handle_bond_set(query);
+    if (err) {
+      return static_cast<size_t>(
+          std::snprintf(out, cap, "{\"error\":\"%s\"}", err));
+    }
+    return api_server::stats::build_bond_json(out, cap);
+  }
+#endif
+
 #if CONFIG_NBP_CLONE
   if (is_get && std::strcmp(path, "/clone") == 0) {
     return ble_clone::build_clone_json(out, cap);

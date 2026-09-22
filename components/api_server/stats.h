@@ -134,10 +134,30 @@ const char *handle_hostname_set(const char *query);
 #ifdef CONFIG_NBP_SMP
 // Persist + apply the static SMP passkey used by the proxy when an
 // upstream peer (BMS, cloned device) demands pairing. Single entry
-// point shared with /clone — the standalone /passkey endpoint was
-// folded into /clone so the dashboard collects target MAC + passkey
+// point shared with /clone and /bond — the standalone /passkey endpoint
+// was folded into /clone so the dashboard collects target MAC + passkey
 // in one POST. Returns nullptr on success, or a short error literal.
 const char *set_passkey(uint32_t pin);
+
+// /bond — the bonding panel's backing endpoint.
+//
+// GET  → {"passkey":NNNNNN,"max":N,"auto":[MAC,…],"bonded":[MAC,…]}
+//          `auto`   addresses paired with immediately after connecting
+//          `bonded` peers whose keys are currently in the NVS bond store
+// POST takes any of:
+//          passkey=NNNNNN   set the static SMP passkey (0..999999)
+//          add=MAC          add MAC to the auto-bond list
+//          remove=MAC       drop MAC from the auto-bond list
+//          unbond=MAC|all   delete stored bond keys
+// handle_bond_set returns nullptr on success or a short error literal.
+size_t build_bond_json(char *buf, size_t cap);
+const char *handle_bond_set(const char *query);
+
+// Load the persisted auto-bond list into ble_backend. Must run AFTER
+// ble_backend::start() — connection::init() creates the mutex the list
+// is guarded by. (The passkey has no such constraint and is replayed
+// from apply_log_overrides_from_nvs instead.)
+void apply_auto_bond_from_nvs();
 #endif
 
 #if CONFIG_NBP_DEVICES_PANEL
@@ -208,7 +228,7 @@ void apply_hostname_from_nvs();
 
 // Registers all dashboard URIs on the OTA httpd: /, /favicon.svg,
 // /stats.json, /log, /level, /trace, /reboot, /txpower, /cpufreq,
-// /scan, /advitvl, /wifips, /hostname, /devices. SMP passkey is
+// /scan, /advitvl, /wifips, /hostname, /devices, /bond. SMP passkey is
 // reached via /clone (gated on CONFIG_NBP_SMP+CONFIG_NBP_CLONE, see
 // ble_clone/clone.cpp). Only defined when WiFi (and therefore the
 // HTTP server) is in the build.

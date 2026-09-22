@@ -129,6 +129,32 @@ message BluetoothDeviceConnectionResponse {
   int32 error = 4;
 }
 
+// id = 85 — answer to BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR. `paired` is
+// true once the link is encrypted with a bond stored; `error` carries the
+// NimBLE host return code (BLE_HS_* / BLE_HS_HCI_ERR / BLE_HS_SM_*) on
+// failure, or one of our negative sentinels (see bt_handlers.cpp).
+message BluetoothDevicePairingResponse {
+  uint64 address = 1;
+  bool paired = 2;
+  int32 error = 3;
+}
+
+// id = 86 — answer to BLUETOOTH_DEVICE_REQUEST_TYPE_UNPAIR.
+message BluetoothDeviceUnpairingResponse {
+  uint64 address = 1;
+  bool success = 2;
+  int32 error = 3;
+}
+
+// id = 88 — answer to BLUETOOTH_DEVICE_REQUEST_TYPE_CLEAR_CACHE. We never
+// persist a GATT cache (every connect re-discovers), so this is always a
+// trivially-satisfied success.
+message BluetoothDeviceClearCacheResponse {
+  uint64 address = 1;
+  bool success = 2;
+  int32 error = 3;
+}
+
 // id = 80
 message SubscribeBluetoothConnectionsFreeRequest {}
 

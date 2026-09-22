@@ -63,8 +63,14 @@ CONFIG_BT_CTRL_BLE_MAX_ACT=6
 CONFIG_BT_NIMBLE_ACL_BUF_COUNT=12
 # SMP + bonding: the SECURITY_ENABLE / SM_LEGACY / SM_SC / NVS_PERSIST
 # flags are selected (or not) by main/Kconfig.projbuild's
-# NBP_SMP option, default y. MAX_BONDS is set
-# unconditionally; it's ignored at compile time when SECURITY_ENABLE=n.
+# NBP_SMP option, default y — pinned here as well because it now also
+# drives the BluetoothProxy PAIRING feature flag and the /bond endpoint,
+# and this file is the only place a regenerated sdkconfig reads (see
+# CLAUDE.md, "Feature opt-ins must live in sdkconfig.defaults").
+# MAX_BONDS bounds both the NimBLE bond store and
+# ble_backend::connection::AUTO_BOND_MAX (static_assert in
+# connection.cpp); it's ignored at compile time when SECURITY_ENABLE=n.
+CONFIG_NBP_SMP=y
 CONFIG_BT_NIMBLE_MAX_BONDS=4
 CONFIG_BT_NIMBLE_EXT_ADV=n
 CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=5120
