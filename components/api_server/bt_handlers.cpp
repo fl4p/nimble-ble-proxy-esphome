@@ -190,9 +190,13 @@ void notify_cb(NimBLERemoteCharacteristic *chr, uint8_t *data, size_t len,
   if (copy > sizeof(msg.data.bytes)) copy = sizeof(msg.data.bytes);
   std::memcpy(msg.data.bytes, data, copy);
   msg.data.size = copy;
+  // Only the client that owns this link gets its notify data. No owner
+  // (its client left; teardown in progress) → drop.
+  auto owner = ble_backend::connection::owner_of_client(client);
+  if (owner == ble_backend::connection::kNoOwner) return;
   api_server::stats::record_notify();
-  api_server::send_async(proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE,
-                         &encode_notify_data, &msg);
+  api_server::send_to(owner, proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE,
+                      &encode_notify_data, &msg);
 }
 
 // ---- per-request handlers ----
@@ -379,8 +383,8 @@ bool handle_read(uint16_t msg_type, const uint8_t *payload, size_t payload_len,
   std::memcpy(rsp.data.bytes, value.data(), copy);
   rsp.data.size = copy;
   api_server::stats::record_read();
-  api_server::send_async(proxyapi::MSG_BLUETOOTH_GATT_READ_RESPONSE,
-                         &encode_read_response, &rsp);
+  api_server::send_to(ctx.client_id, proxyapi::MSG_BLUETOOTH_GATT_READ_RESPONSE,
+                      &encode_read_response, &rsp);
   return true;
 }
 
@@ -412,8 +416,9 @@ bool handle_write_char(const uint8_t *payload, size_t payload_len,
   rsp.address = req.address;
   rsp.handle = req.handle;
   api_server::stats::record_write();
-  api_server::send_async(proxyapi::MSG_BLUETOOTH_GATT_WRITE_RESPONSE,
-                         &encode_write_response, &rsp);
+  api_server::send_to(ctx.client_id,
+                      proxyapi::MSG_BLUETOOTH_GATT_WRITE_RESPONSE,
+                      &encode_write_response, &rsp);
   return true;
 }
 
@@ -448,8 +453,9 @@ bool handle_write_desc(const uint8_t *payload, size_t payload_len,
   rsp.address = req.address;
   rsp.handle = req.handle;
   api_server::stats::record_write();
-  api_server::send_async(proxyapi::MSG_BLUETOOTH_GATT_WRITE_RESPONSE,
-                         &encode_write_response, &rsp);
+  api_server::send_to(ctx.client_id,
+                      proxyapi::MSG_BLUETOOTH_GATT_WRITE_RESPONSE,
+                      &encode_write_response, &rsp);
   return true;
 }
 
@@ -488,8 +494,9 @@ bool handle_notify(const uint8_t *payload, size_t payload_len,
       proxyapi_BluetoothGATTNotifyResponse_init_zero;
   rsp.address = req.address;
   rsp.handle = req.handle;
-  api_server::send_async(proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_RESPONSE,
-                         &encode_notify_response, &rsp);
+  api_server::send_to(ctx.client_id,
+                      proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_RESPONSE,
+                      &encode_notify_response, &rsp);
   return true;
 }
 

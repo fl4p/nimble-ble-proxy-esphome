@@ -479,4 +479,17 @@ void *client_for(uint64_t address, OwnerId owner) {
   return p;
 }
 
+OwnerId owner_of_client(const void *client) {
+  OwnerId o = kNoOwner;
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  for (auto &s : g_slots) {
+    if (s.client == client && s.state == State::Connected) {
+      o = s.owner;
+      break;
+    }
+  }
+  xSemaphoreGive(g_mutex);
+  return o;
+}
+
 }  // namespace ble_backend::connection

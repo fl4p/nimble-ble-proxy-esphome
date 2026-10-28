@@ -63,13 +63,13 @@ void pack_uuid(const NimBLEUUID &uuid, uint32_t *short_out,
   *uuid_count = 2;
 }
 
-// Context owned for the duration of one discovery — passed to send_async
+// Context owned for the duration of one discovery — passed to send_to
 // for the services + done encodes.
 //
 // HEAP-allocated: proxyapi_BluetoothGATTGetServicesResponse is ~25 KiB
 // (worst-case static nanopb arrays for 8 services × 12 chars × 6 descs).
 // api_client tasks have only 8 KiB stack, so this MUST NOT live on the
-// stack of run(). send_async invokes the encode callback synchronously
+// stack of run(). send_to invokes the encode callback synchronously
 // before returning, so unique_ptr scoped to run() is sufficient.
 struct ServicesEncodeCtx {
   proxyapi_BluetoothGATTGetServicesResponse msg;
@@ -129,14 +129,14 @@ uint8_t pack_properties(const NimBLERemoteCharacteristic *chr) {
   return p;
 }
 
-void emit_error(uint64_t address, int32_t err) {
+void emit_error(uint32_t owner, uint64_t address, int32_t err) {
   ErrorEncodeCtx ctx;
   ctx.msg = proxyapi_BluetoothGATTErrorResponse_init_zero;
   ctx.msg.address = address;
   ctx.msg.handle = 0;
   ctx.msg.error = err;
-  publish::send_async(proxyapi::MSG_BLUETOOTH_GATT_ERROR_RESPONSE,
-                      &encode_error, &ctx);
+  publish::send_to(owner, proxyapi::MSG_BLUETOOTH_GATT_ERROR_RESPONSE,
+                   &encode_error, &ctx);
 }
 
 }  // namespace
@@ -148,7 +148,7 @@ Status run(uint64_t address, uint32_t owner) {
     ESP_LOGW(TAG, "%012llx not connected (or not owned by client %lu)",
              static_cast<unsigned long long>(address),
              static_cast<unsigned long>(owner));
-    emit_error(address, /*err=*/-1);
+    emit_error(owner, address, /*err=*/-1);
     return Status::NotConnected;
   }
 
@@ -160,14 +160,14 @@ Status run(uint64_t address, uint32_t owner) {
   if (!client->discoverAttributes()) {
     ESP_LOGW(TAG, "discoverAttributes failed for %012llx",
              static_cast<unsigned long long>(address));
-    emit_error(address, /*err=*/-2);
+    emit_error(owner, address, /*err=*/-2);
     return Status::EncodeFailed;
   }
 
   auto ctx = std::make_unique<ServicesEncodeCtx>();
   if (ctx == nullptr) {
     ESP_LOGW(TAG, "OOM allocating services encode ctx");
-    emit_error(address, /*err=*/-3);
+    emit_error(owner, address, /*err=*/-3);
     return Status::EncodeFailed;
   }
   ctx->msg = proxyapi_BluetoothGATTGetServicesResponse_init_zero;
@@ -233,8 +233,10 @@ Status run(uint64_t address, uint32_t owner) {
   }
   ctx->msg.services_count = svc_idx;
 
-  if (!publish::send_async(proxyapi::MSG_BLUETOOTH_GATT_GET_SERVICES_RESPONSE,
-                           &encode_services, ctx.get())) {
+  // Services, done and errors answer the owner's request only.
+  if (!publish::send_to(owner,
+                        proxyapi::MSG_BLUETOOTH_GATT_GET_SERVICES_RESPONSE,
+                        &encode_services, ctx.get())) {
     ESP_LOGW(TAG, "send services failed");
     return Status::SendFailed;
   }
@@ -242,8 +244,9 @@ Status run(uint64_t address, uint32_t owner) {
   DoneEncodeCtx d;
   d.msg = proxyapi_BluetoothGATTGetServicesDoneResponse_init_zero;
   d.msg.address = address;
-  publish::send_async(proxyapi::MSG_BLUETOOTH_GATT_GET_SERVICES_DONE_RESPONSE,
-                      &encode_done, &d);
+  publish::send_to(owner,
+                   proxyapi::MSG_BLUETOOTH_GATT_GET_SERVICES_DONE_RESPONSE,
+                   &encode_done, &d);
   return Status::Ok;
 }
 

@@ -209,6 +209,7 @@ extern "C" void app_main() {
   // accepting traffic. Order between start() calls doesn't matter as
   // long as install() happens before any adv callback fires.
   ble_backend::publish::install(&api_server::send_async,
+                                &api_server::send_to,
                                 &api_server::has_active_client);
 #endif
 #endif

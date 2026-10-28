@@ -269,7 +269,9 @@ connection slot records `owner`. When a client leaves,
 `connection::release_owner()` drops exactly its links (terminate, or
 cancel a pending connect). A late `onConnect` for an ownerless/aborted
 slot terminates instead of reporting success. Connection state and the
--100 go only to the owner/requester (`api_server::send_to`). GATT
+-100 go only to the owner/requester (`api_server::send_to`), and so do
+GATT read/write/notify responses, discovery output and notify data.
+Adverts and ConnectionsFree stay broadcast. GATT
 read/write/notify/get-services and DISCONNECT are honoured only for
 the owner. A CONNECT for an address another client holds is still
 refused with -100, not taken over. Test: `scripts/test_link_ownership.py`.

@@ -75,6 +75,10 @@ void disconnect_all();
 // else nullptr. Type-erased to keep the header NimBLE-free.
 void *client_for(uint64_t address, OwnerId owner);
 
+// Owner of the Connected slot backed by `client` (a NimBLEClient*), or
+// kNoOwner if none / its client has left. For routing notify data.
+OwnerId owner_of_client(const void *client);
+
 #ifdef CONFIG_NBP_SMP
 // SMP passkey used when a peer requests KEYBOARD_ONLY pairing.
 // Runtime-mutable via POST /clone?passkey=NNNNNN (merged from the

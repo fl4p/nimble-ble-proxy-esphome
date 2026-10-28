@@ -25,7 +25,7 @@ enum class Status : int32_t {
 // Run discovery on a connected slot owned by API client `owner` (see
 // connection::OwnerId). A link held by another client is treated as not
 // connected. Emits one services response + one done response (or one
-// error response) using api_server::send_async.
+// error response) to `owner` only (publish::send_to).
 // Returns the final status; callers usually log + ignore.
 //
 // Only the owner can reach a link, and each client's requests run
