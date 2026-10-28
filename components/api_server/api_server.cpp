@@ -140,8 +140,12 @@ void unregister_client(int fd) {
 // vTaskDelete). We do NOT close here — that would race with the
 // connection_task and risk operating on a recycled fd.
 //
-// Re-check membership under g_clients_mutex before shutdown so we don't
-// tear down an fd the connection_task already retired.
+// Caller MUST still hold g_tx_mutex (the one it did the failed send
+// under). connection_task unregisters only while holding g_tx_mutex and
+// closes after that, so while we hold it every fd still in g_clients is
+// the same socket the send failed on — it cannot have been closed and
+// reissued to a new client in between. The membership re-check then only
+// skips fds whose task already retired them before our send.
 void reap_dead(const int *dead, uint8_t n_dead) {
   if (n_dead == 0) return;
   xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
@@ -384,8 +388,8 @@ bool send_async(uint16_t msg_type, EncodeFn encode, void *ctx) {
       // but the payload area is unchanged so re-sending is safe.
     }
   }
+  reap_dead(dead, n_dead);  // under g_tx_mutex — see reap_dead
   xSemaphoreGive(g_tx_mutex);
-  reap_dead(dead, n_dead);
   return any_sent;
 }
 
@@ -418,8 +422,8 @@ bool send_to(uint32_t client_id, uint16_t msg_type, EncodeFn encode,
       if (!sent) dead = fd;
     }
   }
+  if (dead >= 0) reap_dead(&dead, 1);  // under g_tx_mutex — see reap_dead
   xSemaphoreGive(g_tx_mutex);
-  if (dead >= 0) reap_dead(&dead, 1);
   return sent;
 }
 
