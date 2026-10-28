@@ -249,6 +249,31 @@ after issuing the GAP command; `ClientCb::onConnect` /
 path and emit the `BluetoothDeviceConnectionResponse` via send_async.
 Slot bookkeeping moved into the callbacks.
 
+### 11. BLE links outlived the API client that opened them
+
+With two API clients (HA + batmon-ha), links were global. Only the LAST
+client leaving tore them down. When batmon restarted while HA stayed
+connected, its BMS link stayed up with no owner. The BMS stops
+advertising while linked, and every reconnect got
+`BluetoothDeviceConnectionResponse` error -100 ("already connected")
+until a power cycle. Two related leaks: connection responses were
+broadcast, so B's -100 (or B's DISCONNECT) reached A as
+"connected=false" for A's healthy link. Any client could also DISCONNECT
+or read/write another client's link. aioesphomeapi sends a DISCONNECT
+itself when a connect times out, so this happens without any bug in the
+client.
+
+**Fix (unverified on hardware):** api_server gives each connection a
+monotonic `client_id` (not the fd, because lwIP reissues fds). Each
+connection slot records `owner`. When a client leaves,
+`connection::release_owner()` drops exactly its links (terminate, or
+cancel a pending connect). A late `onConnect` for an ownerless/aborted
+slot terminates instead of reporting success. Connection state and the
+-100 go only to the owner/requester (`api_server::send_to`). GATT
+read/write/notify/get-services and DISCONNECT are honoured only for
+the owner. A CONNECT for an address another client holds is still
+refused with -100, not taken over. Test: `scripts/test_link_ownership.py`.
+
 ## ANT BMS specifics (observed on `20:A1:11:02:23:45`)
 
 Captured during the connect bring-up because it's the canonical test

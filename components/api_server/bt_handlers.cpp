@@ -92,14 +92,31 @@ size_t encode_error(void *vctx, uint8_t *buf, size_t cap) {
       vctx, buf, cap, proxyapi_BluetoothGATTErrorResponse_fields);
 }
 
-void send_gatt_error(uint64_t address, uint32_t handle, int32_t err) {
+// Errors answer one request, so they go to the requester only — a
+// broadcast would land on whichever other client owns `address` and look
+// like a failure of its own pending op.
+void send_gatt_error(uint32_t client_id, uint64_t address, uint32_t handle,
+                     int32_t err) {
   proxyapi_BluetoothGATTErrorResponse msg =
       proxyapi_BluetoothGATTErrorResponse_init_zero;
   msg.address = address;
   msg.handle = handle;
   msg.error = err;
-  api_server::send_async(proxyapi::MSG_BLUETOOTH_GATT_ERROR_RESPONSE,
-                         &encode_error, &msg);
+  api_server::send_to(client_id, proxyapi::MSG_BLUETOOTH_GATT_ERROR_RESPONSE,
+                      &encode_error, &msg);
+}
+
+void send_connection_state(uint32_t client_id, uint64_t address,
+                           bool connected, uint16_t mtu, int32_t error) {
+  proxyapi_BluetoothDeviceConnectionResponse msg =
+      proxyapi_BluetoothDeviceConnectionResponse_init_zero;
+  msg.address = address;
+  msg.connected = connected;
+  msg.mtu = mtu;
+  msg.error = error;
+  api_server::send_to(client_id,
+                      proxyapi::MSG_BLUETOOTH_DEVICE_CONNECTION_RESPONSE,
+                      &encode_connection_response, &msg);
 }
 
 void build_free_msg(proxyapi_BluetoothConnectionsFreeResponse *m) {
@@ -130,18 +147,20 @@ void on_free_change() {
 //
 // Fires from the api_server task on initial connect result AND later
 // from the NimBLE host task on peer-initiated disconnect. Both paths
-// route through here so HA sees one canonical ConnectionResponse on
-// every state transition.
-void on_connection_state(uint64_t address,
+// route through here so the owner sees one canonical ConnectionResponse
+// on every state transition.
+//
+// Sent to the owning client only. aioesphomeapi/bleak-esphome treat any
+// ConnectionResponse(connected=false) for an address they hold as "my
+// link dropped", so a broadcast would make one client tear down its view
+// of a healthy link because of another client's traffic. An ownerless
+// link (its client left) reports to nobody; send_to also drops the
+// message if the owner disconnected after the slot was snapshotted.
+void on_connection_state(ble_backend::connection::OwnerId owner,
+                         uint64_t address,
                          const ble_backend::connection::ConnectionResult &r) {
-  proxyapi_BluetoothDeviceConnectionResponse msg =
-      proxyapi_BluetoothDeviceConnectionResponse_init_zero;
-  msg.address = address;
-  msg.connected = r.connected;
-  msg.mtu = r.mtu;
-  msg.error = r.error;
-  api_server::send_async(proxyapi::MSG_BLUETOOTH_DEVICE_CONNECTION_RESPONSE,
-                         &encode_connection_response, &msg);
+  if (owner == ble_backend::connection::kNoOwner) return;
+  send_connection_state(owner, address, r.connected, r.mtu, r.error);
 }
 
 // ---- notify subscription tracking ----
@@ -240,43 +259,56 @@ bool handle_device_request(const uint8_t *payload, size_t payload_len,
     case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_CONNECT:
     case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_CONNECT_V3_WITH_CACHE:
     case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_CONNECT_V3_WITHOUT_CACHE: {
-      bool started = ble_backend::connection::connect(req.address, addr_type,
-                                                      &on_connection_state);
+      // See connection::connect for the ownership rule: an address held
+      // by any client (another one, or this one) is refused, never taken
+      // over.
+      bool started = ble_backend::connection::connect(
+          req.address, addr_type, ctx.client_id, &on_connection_state);
       if (!started) {
-        // Emit failure so HA isn't left waiting.
-        proxyapi_BluetoothDeviceConnectionResponse rsp =
-            proxyapi_BluetoothDeviceConnectionResponse_init_zero;
-        rsp.address = req.address;
-        rsp.connected = false;
-        rsp.error = -100;  // sentinel: "no slot / already connected"
-        api_server::send_async(
-            proxyapi::MSG_BLUETOOTH_DEVICE_CONNECTION_RESPONSE,
-            &encode_connection_response, &rsp);
+        // Emit failure so the requester isn't left waiting — to the
+        // requester ONLY: the holder of this address must not see a
+        // connected=false for its own, healthy link.
+        send_connection_state(ctx.client_id, req.address, false, 0,
+                              /*sentinel "no slot / already connected"=*/-100);
       }
       break;
     }
-    case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_DISCONNECT:
-      ble_backend::connection::disconnect(req.address);
+    case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_DISCONNECT: {
+      using ble_backend::connection::DisconnectStatus;
+      DisconnectStatus st =
+          ble_backend::connection::disconnect(req.address, ctx.client_id);
+      if (st != DisconnectStatus::Started) {
+        // Nothing of the requester's to tear down: no slot, or another
+        // client's link (left untouched). From the requester's point of
+        // view it is disconnected — say so, to it alone, so its
+        // disconnect() completes instead of timing out. Started → the
+        // owner gets connected=false from the teardown callback.
+        send_connection_state(ctx.client_id, req.address, false, 0, 0);
+      }
       break;
+    }
     case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR:
     case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_UNPAIR:
     case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_CLEAR_CACHE:
       // Pairing/cache flags aren't advertised in our feature bits, but
       // HA may still send them speculatively — return a graceful error.
-      send_gatt_error(req.address, 0, /*err=*/-99);
+      send_gatt_error(ctx.client_id, req.address, 0, /*err=*/-99);
       break;
   }
   return true;
 }
 
-bool handle_get_services(const uint8_t *payload, size_t payload_len) {
+bool handle_get_services(const uint8_t *payload, size_t payload_len,
+                         const Context &ctx) {
   proxyapi_BluetoothGATTGetServicesRequest req =
       proxyapi_BluetoothGATTGetServicesRequest_init_zero;
   pb_istream_t s = pb_istream_from_buffer(payload, payload_len);
   if (!pb_decode(&s, proxyapi_BluetoothGATTGetServicesRequest_fields, &req)) {
     return true;
   }
-  ble_backend::gatt_discovery::run(req.address);
+  // Owner-only (gatt_discovery::run checks), so two clients can never
+  // run discovery on one link concurrently.
+  ble_backend::gatt_discovery::run(req.address, ctx.client_id);
   return true;
 }
 
@@ -305,16 +337,17 @@ NimBLERemoteDescriptor *desc_at(NimBLEClient *client, uint16_t handle) {
   return nullptr;
 }
 
-bool handle_read(uint16_t msg_type, const uint8_t *payload, size_t payload_len) {
+bool handle_read(uint16_t msg_type, const uint8_t *payload, size_t payload_len,
+                 const Context &ctx) {
   proxyapi_BluetoothGATTReadRequest req =
       proxyapi_BluetoothGATTReadRequest_init_zero;
   pb_istream_t s = pb_istream_from_buffer(payload, payload_len);
   if (!pb_decode(&s, proxyapi_BluetoothGATTReadRequest_fields, &req)) return true;
 
   auto *client = static_cast<NimBLEClient *>(
-      ble_backend::connection::client_for(req.address));
+      ble_backend::connection::client_for(req.address, ctx.client_id));
   if (client == nullptr) {
-    send_gatt_error(req.address, req.handle, -1);
+    send_gatt_error(ctx.client_id, req.address, req.handle, -1);
     return true;
   }
   std::string value;
@@ -333,7 +366,7 @@ bool handle_read(uint16_t msg_type, const uint8_t *payload, size_t payload_len) 
     }
   }
   if (!ok) {
-    send_gatt_error(req.address, req.handle, -2);
+    send_gatt_error(ctx.client_id, req.address, req.handle, -2);
     return true;
   }
 
@@ -351,26 +384,27 @@ bool handle_read(uint16_t msg_type, const uint8_t *payload, size_t payload_len) 
   return true;
 }
 
-bool handle_write_char(const uint8_t *payload, size_t payload_len) {
+bool handle_write_char(const uint8_t *payload, size_t payload_len,
+                       const Context &ctx) {
   proxyapi_BluetoothGATTWriteRequest req =
       proxyapi_BluetoothGATTWriteRequest_init_zero;
   pb_istream_t s = pb_istream_from_buffer(payload, payload_len);
   if (!pb_decode(&s, proxyapi_BluetoothGATTWriteRequest_fields, &req)) return true;
 
   auto *client = static_cast<NimBLEClient *>(
-      ble_backend::connection::client_for(req.address));
+      ble_backend::connection::client_for(req.address, ctx.client_id));
   if (client == nullptr) {
-    send_gatt_error(req.address, req.handle, -1);
+    send_gatt_error(ctx.client_id, req.address, req.handle, -1);
     return true;
   }
   auto *chr = char_at(client, req.handle);
   if (chr == nullptr) {
-    send_gatt_error(req.address, req.handle, -2);
+    send_gatt_error(ctx.client_id, req.address, req.handle, -2);
     return true;
   }
   bool ok = chr->writeValue(req.data.bytes, req.data.size, req.response);
   if (!ok) {
-    send_gatt_error(req.address, req.handle, -3);
+    send_gatt_error(ctx.client_id, req.address, req.handle, -3);
     return true;
   }
   proxyapi_BluetoothGATTWriteResponse rsp =
@@ -383,7 +417,8 @@ bool handle_write_char(const uint8_t *payload, size_t payload_len) {
   return true;
 }
 
-bool handle_write_desc(const uint8_t *payload, size_t payload_len) {
+bool handle_write_desc(const uint8_t *payload, size_t payload_len,
+                       const Context &ctx) {
   proxyapi_BluetoothGATTWriteDescriptorRequest req =
       proxyapi_BluetoothGATTWriteDescriptorRequest_init_zero;
   pb_istream_t s = pb_istream_from_buffer(payload, payload_len);
@@ -392,20 +427,20 @@ bool handle_write_desc(const uint8_t *payload, size_t payload_len) {
     return true;
   }
   auto *client = static_cast<NimBLEClient *>(
-      ble_backend::connection::client_for(req.address));
+      ble_backend::connection::client_for(req.address, ctx.client_id));
   if (client == nullptr) {
-    send_gatt_error(req.address, req.handle, -1);
+    send_gatt_error(ctx.client_id, req.address, req.handle, -1);
     return true;
   }
   auto *dsc = desc_at(client, req.handle);
   if (dsc == nullptr) {
-    send_gatt_error(req.address, req.handle, -2);
+    send_gatt_error(ctx.client_id, req.address, req.handle, -2);
     return true;
   }
   bool ok = dsc->writeValue(req.data.bytes, req.data.size,
                             /*response=*/true);
   if (!ok) {
-    send_gatt_error(req.address, req.handle, -3);
+    send_gatt_error(ctx.client_id, req.address, req.handle, -3);
     return true;
   }
   proxyapi_BluetoothGATTWriteResponse rsp =
@@ -418,7 +453,8 @@ bool handle_write_desc(const uint8_t *payload, size_t payload_len) {
   return true;
 }
 
-bool handle_notify(const uint8_t *payload, size_t payload_len) {
+bool handle_notify(const uint8_t *payload, size_t payload_len,
+                   const Context &ctx) {
   proxyapi_BluetoothGATTNotifyRequest req =
       proxyapi_BluetoothGATTNotifyRequest_init_zero;
   pb_istream_t s = pb_istream_from_buffer(payload, payload_len);
@@ -426,14 +462,14 @@ bool handle_notify(const uint8_t *payload, size_t payload_len) {
     return true;
   }
   auto *client = static_cast<NimBLEClient *>(
-      ble_backend::connection::client_for(req.address));
+      ble_backend::connection::client_for(req.address, ctx.client_id));
   if (client == nullptr) {
-    send_gatt_error(req.address, req.handle, -1);
+    send_gatt_error(ctx.client_id, req.address, req.handle, -1);
     return true;
   }
   auto *chr = char_at(client, req.handle);
   if (chr == nullptr) {
-    send_gatt_error(req.address, req.handle, -2);
+    send_gatt_error(ctx.client_id, req.address, req.handle, -2);
     return true;
   }
   // Register the notify callback but DON'T write the CCCD here —
@@ -445,7 +481,7 @@ bool handle_notify(const uint8_t *payload, size_t payload_len) {
   chr->setNotifyCallback(req.enable ? &notify_cb : nullptr);
   bool ok = true;
   if (!ok) {
-    send_gatt_error(req.address, req.handle, -3);
+    send_gatt_error(ctx.client_id, req.address, req.handle, -3);
     return true;
   }
   proxyapi_BluetoothGATTNotifyResponse rsp =
@@ -479,16 +515,16 @@ bool handle(uint16_t request_type, const uint8_t *request_payload,
     case proxyapi::MSG_BLUETOOTH_DEVICE_REQUEST:
       return handle_device_request(request_payload, request_len, ctx);
     case proxyapi::MSG_BLUETOOTH_GATT_GET_SERVICES_REQUEST:
-      return handle_get_services(request_payload, request_len);
+      return handle_get_services(request_payload, request_len, ctx);
     case proxyapi::MSG_BLUETOOTH_GATT_READ_REQUEST:
     case proxyapi::MSG_BLUETOOTH_GATT_READ_DESCRIPTOR_REQUEST:
-      return handle_read(request_type, request_payload, request_len);
+      return handle_read(request_type, request_payload, request_len, ctx);
     case proxyapi::MSG_BLUETOOTH_GATT_WRITE_REQUEST:
-      return handle_write_char(request_payload, request_len);
+      return handle_write_char(request_payload, request_len, ctx);
     case proxyapi::MSG_BLUETOOTH_GATT_WRITE_DESCRIPTOR_REQUEST:
-      return handle_write_desc(request_payload, request_len);
+      return handle_write_desc(request_payload, request_len, ctx);
     case proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_REQUEST:
-      return handle_notify(request_payload, request_len);
+      return handle_notify(request_payload, request_len, ctx);
     default:
       return false;
   }
@@ -509,9 +545,14 @@ void on_client_disconnect(ClientSubs &subs) {
   }
 }
 
+void on_client_links_release(uint32_t client_id) {
+  ble_backend::connection::release_owner(client_id);
+}
+
 void on_last_client_disconnect() {
-  // GATT links are global, not per-client. When everyone's gone, drop
-  // them so we don't keep peers connected with nothing reading.
+  // Backstop: on_client_links_release already dropped each client's own
+  // links. With everyone gone, also drop anything left (ownerless slots
+  // still winding down) so no peer stays linked with nothing reading.
   ble_backend::on_api_client_disconnect();
 }
 
@@ -531,6 +572,7 @@ bool handle(uint16_t, const uint8_t *, size_t, const Context &) {
   return false;
 }
 void on_client_disconnect(ClientSubs &) {}
+void on_client_links_release(uint32_t) {}
 void on_last_client_disconnect() {}
 
 }  // namespace api_server::bt_handlers

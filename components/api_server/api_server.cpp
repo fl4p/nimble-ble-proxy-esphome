@@ -30,9 +30,21 @@ constexpr UBaseType_t CONN_PRIO = 5;
 
 bool g_started = false;
 
-// Active client fds. -1 in unused slots. Guarded by g_clients_mutex.
-// Read by send_async (broadcast) and has_active_client.
-std::array<int, proxy::MAX_API_CLIENTS> g_client_fds;
+// Active clients. fd -1 in unused slots. Guarded by g_clients_mutex.
+// Read by send_async (broadcast), send_to (targeted) and
+// has_active_client.
+//
+// `id` is a monotonic per-connection id (never 0, never reused while the
+// device is up). BLE links are owned by id, not fd: lwIP reissues the
+// lowest free fd, so a reconnecting client usually gets the fd the old
+// one had, and an fd-keyed owner would hand it the old client's links
+// and late callbacks.
+struct ClientEntry {
+  int fd = -1;
+  uint32_t id = 0;
+};
+std::array<ClientEntry, proxy::MAX_API_CLIENTS> g_clients;
+std::atomic<uint32_t> g_next_client_id{1};
 SemaphoreHandle_t g_clients_mutex = nullptr;
 std::atomic<uint8_t> g_active_count{0};
 
@@ -66,28 +78,34 @@ bool send_locked_to(int fd, uint16_t msg_type, size_t payload_len) {
   return true;
 }
 
-// Add/remove a client fd from the active set. Returns false if no slot
-// is free; in that case the caller should reject the connection.
-bool register_client(int fd) {
-  bool ok = false;
+// Add/remove a client fd from the active set. Returns the client's id,
+// or 0 if no slot is free; in that case the caller should reject the
+// connection.
+uint32_t register_client(int fd) {
+  uint32_t id = 0;
   xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
-  for (auto &s : g_client_fds) {
-    if (s < 0) {
-      s = fd;
-      ok = true;
+  for (auto &s : g_clients) {
+    if (s.fd < 0) {
+      id = g_next_client_id.fetch_add(1, std::memory_order_relaxed);
+      if (id == 0) id = g_next_client_id.fetch_add(1, std::memory_order_relaxed);
+      s.fd = fd;
+      s.id = id;
       break;
     }
   }
   xSemaphoreGive(g_clients_mutex);
-  if (ok) g_active_count.fetch_add(1, std::memory_order_release);
-  return ok;
+  if (id != 0) g_active_count.fetch_add(1, std::memory_order_release);
+  return id;
 }
 
+// Caller holds g_tx_mutex (see connection_task), so no send_async /
+// send_to is mid-write to this fd when it leaves the set and is closed.
 void unregister_client(int fd) {
   xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
-  for (auto &s : g_client_fds) {
-    if (s == fd) {
-      s = -1;
+  for (auto &s : g_clients) {
+    if (s.fd == fd) {
+      s.fd = -1;
+      s.id = 0;
       break;
     }
   }
@@ -95,8 +113,34 @@ void unregister_client(int fd) {
   g_active_count.fetch_sub(1, std::memory_order_release);
 }
 
-bool dispatch_one(int fd, uint8_t *rx_payload, size_t rx_cap,
-                  bt_handlers::ClientSubs *subs) {
+// Shut down fds whose send failed so their connection_task's recv()
+// wakes and runs the normal cleanup path (unregister + close +
+// vTaskDelete). We do NOT close here — that would race with the
+// connection_task and risk operating on a recycled fd.
+//
+// Re-check membership under g_clients_mutex before shutdown so we don't
+// tear down an fd the connection_task already retired.
+void reap_dead(const int *dead, uint8_t n_dead) {
+  if (n_dead == 0) return;
+  xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
+  for (uint8_t i = 0; i < n_dead; ++i) {
+    bool still_ours = false;
+    for (const auto &c : g_clients) {
+      if (c.fd == dead[i]) {
+        still_ours = true;
+        break;
+      }
+    }
+    if (still_ours) {
+      ::shutdown(dead[i], SHUT_RDWR);
+      ESP_LOGW(TAG, "send failed on fd=%d — shutdown to reap", dead[i]);
+    }
+  }
+  xSemaphoreGive(g_clients_mutex);
+}
+
+bool dispatch_one(int fd, uint32_t client_id, uint8_t *rx_payload,
+                  size_t rx_cap, bt_handlers::ClientSubs *subs) {
   uint16_t msg_type = 0;
   size_t payload_len = 0;
   frame_codec::Error e = frame_codec::read_frame(socket_read, &fd, rx_payload,
@@ -133,7 +177,7 @@ bool dispatch_one(int fd, uint8_t *rx_payload, size_t rx_cap,
   }
   if (is_handshake) return keep_open;
 
-  bt_handlers::Context bctx{fd, subs};
+  bt_handlers::Context bctx{fd, client_id, subs};
   if (!bt_handlers::handle(msg_type, rx_payload, payload_len, bctx)) {
     ESP_LOGD(TAG, "fd=%d unhandled msg_type=%u (len=%zu)", fd, msg_type,
              payload_len);
@@ -141,10 +185,27 @@ bool dispatch_one(int fd, uint8_t *rx_payload, size_t rx_cap,
   return true;
 }
 
+// Id registered for `fd` (registered before its task is created, so
+// always present while the task runs).
+uint32_t id_for_fd(int fd) {
+  uint32_t id = 0;
+  xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
+  for (const auto &c : g_clients) {
+    if (c.fd == fd) {
+      id = c.id;
+      break;
+    }
+  }
+  xSemaphoreGive(g_clients_mutex);
+  return id;
+}
+
 // Per-connection task. One per active client; exits on disconnect.
 void connection_task(void *arg) {
   int client_fd = static_cast<int>(reinterpret_cast<intptr_t>(arg));
-  ESP_LOGI(TAG, "client connected (fd=%d, total=%u)", client_fd,
+  const uint32_t client_id = id_for_fd(client_fd);
+  ESP_LOGI(TAG, "client connected (fd=%d, id=%lu, total=%u)", client_fd,
+           static_cast<unsigned long>(client_id),
            g_active_count.load(std::memory_order_acquire));
 
   // Per-connection state. The RX buffer and ClientSubs both live on
@@ -152,17 +213,31 @@ void connection_task(void *arg) {
   uint8_t rx_payload[proxy::MAX_MESSAGE_SIZE];
   bt_handlers::ClientSubs subs;
 
-  while (dispatch_one(client_fd, rx_payload, sizeof(rx_payload), &subs)) {
+  while (dispatch_one(client_fd, client_id, rx_payload, sizeof(rx_payload),
+                      &subs)) {
     // loop
   }
 
   // Release this client's subscription refs FIRST so any in-flight
   // async sends to other clients don't keep targeting our (now-closing)
-  // fd. on_last_client_disconnect handles the global GATT teardown.
+  // fd.
   bt_handlers::on_client_disconnect(subs);
+  // Leave the client set under g_tx_mutex: any broadcast/targeted send
+  // that snapshotted our fd finishes first, and none starts afterwards,
+  // so nothing writes to this fd once it is closed and possibly reissued
+  // to a new client. Lock order g_tx_mutex → g_clients_mutex matches
+  // send_async / send_to.
+  xSemaphoreTake(g_tx_mutex, portMAX_DELAY);
   unregister_client(client_fd);
-  ESP_LOGI(TAG, "client disconnected (fd=%d, remaining=%u)", client_fd,
+  xSemaphoreGive(g_tx_mutex);
+  ESP_LOGI(TAG, "client disconnected (fd=%d, id=%lu, remaining=%u)",
+           client_fd, static_cast<unsigned long>(client_id),
            g_active_count.load(std::memory_order_acquire));
+  // Drop exactly the BLE links this client opened, even though other
+  // clients stay connected. After unregister, so any state callback for
+  // them finds no recipient; the remaining clients get ConnectionsFree.
+  bt_handlers::on_client_links_release(client_id);
+  // Backstop: with nobody left, drop everything (incl. anything orphaned).
   if (g_active_count.load(std::memory_order_acquire) == 0) {
     bt_handlers::on_last_client_disconnect();
   }
@@ -217,7 +292,8 @@ void listener_task(void *) {
              inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
     ::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-    if (!register_client(client_fd)) {
+    uint32_t client_id = register_client(client_fd);
+    if (client_id == 0) {
       ESP_LOGW(TAG, "no client slot; closing fd=%d", client_fd);
       ::close(client_fd);
       continue;
@@ -258,8 +334,8 @@ bool send_async(uint16_t msg_type, EncodeFn encode, void *ctx) {
     int fds_snapshot[proxy::MAX_API_CLIENTS];
     uint8_t n_fds = 0;
     xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
-    for (int fd : g_client_fds) {
-      if (fd >= 0) fds_snapshot[n_fds++] = fd;
+    for (const auto &c : g_clients) {
+      if (c.fd >= 0) fds_snapshot[n_fds++] = c.fd;
     }
     xSemaphoreGive(g_clients_mutex);
     for (uint8_t i = 0; i < n_fds; ++i) {
@@ -267,7 +343,7 @@ bool send_async(uint16_t msg_type, EncodeFn encode, void *ctx) {
         any_sent = true;
       } else {
         // Peer is gone (EPIPE / ECONNRESET / EBADF). Without reaping,
-        // the fd lingers in g_client_fds and the connection_task's
+        // the fd lingers in g_clients and the connection_task's
         // recv() may stay blocked until lwIP-level RST timeout — long
         // enough to leak the lwIP socket and trip ENFILE on accept().
         dead[n_dead++] = fds_snapshot[i];
@@ -277,35 +353,42 @@ bool send_async(uint16_t msg_type, EncodeFn encode, void *ctx) {
     }
   }
   xSemaphoreGive(g_tx_mutex);
-
-  // Force the connection_task's recv() to wake by shutdown()-ing the
-  // socket. Its dispatch loop then returns false and runs the normal
-  // cleanup path (unregister_client + close + vTaskDelete). We do NOT
-  // close here — that would race with the connection_task and risk
-  // operating on a recycled fd if another connect lands first.
-  //
-  // Take g_clients_mutex and re-check membership before shutdown so we
-  // don't tear down an fd the connection_task already retired (rare,
-  // but the kernel could reissue the same numeric fd to a new client
-  // between our send-failure and now).
-  if (n_dead > 0) {
-    xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
-    for (uint8_t i = 0; i < n_dead; ++i) {
-      bool still_ours = false;
-      for (int fd : g_client_fds) {
-        if (fd == dead[i]) {
-          still_ours = true;
-          break;
-        }
-      }
-      if (still_ours) {
-        ::shutdown(dead[i], SHUT_RDWR);
-        ESP_LOGW(TAG, "send failed on fd=%d — shutdown to reap", dead[i]);
-      }
-    }
-    xSemaphoreGive(g_clients_mutex);
-  }
+  reap_dead(dead, n_dead);
   return any_sent;
+}
+
+bool send_to(uint32_t client_id, uint16_t msg_type, EncodeFn encode,
+             void *ctx) {
+  if (client_id == 0) return false;
+  if (g_tx_mutex == nullptr) return false;
+
+  xSemaphoreTake(g_tx_mutex, portMAX_DELAY);
+  // Resolve id → fd under g_tx_mutex: connection_task unregisters while
+  // holding it, so the fd cannot leave the set (and be closed/reissued)
+  // until this send is done.
+  int fd = -1;
+  xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
+  for (const auto &c : g_clients) {
+    if (c.fd >= 0 && c.id == client_id) {
+      fd = c.fd;
+      break;
+    }
+  }
+  xSemaphoreGive(g_clients_mutex);
+  bool sent = false;
+  int dead = -1;
+  if (fd >= 0) {
+    uint8_t *resp_payload = &g_tx_buf[frame_codec::MAX_HEADER_LEN];
+    size_t resp_cap = sizeof(g_tx_buf) - frame_codec::MAX_HEADER_LEN;
+    size_t n = encode ? encode(ctx, resp_payload, resp_cap) : 0;
+    if (n > 0) {
+      sent = send_locked_to(fd, msg_type, n);
+      if (!sent) dead = fd;
+    }
+  }
+  xSemaphoreGive(g_tx_mutex);
+  if (dead >= 0) reap_dead(&dead, 1);
+  return sent;
 }
 
 void start() {
@@ -313,7 +396,7 @@ void start() {
   g_started = true;
   g_tx_mutex = xSemaphoreCreateMutex();
   g_clients_mutex = xSemaphoreCreateMutex();
-  for (auto &s : g_client_fds) s = -1;
+  for (auto &s : g_clients) s = ClientEntry{};
   xTaskCreate(&listener_task, "api_listener", LISTENER_STACK, nullptr,
               LISTENER_PRIO, nullptr);
 }

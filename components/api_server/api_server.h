@@ -23,6 +23,13 @@ void start();
 using EncodeFn = size_t (*)(void *ctx, uint8_t *buf, size_t cap);
 bool send_async(uint16_t msg_type, EncodeFn encode, void *ctx);
 
+// Targeted variant: send only to the API client with this id (the
+// monotonic id api_server assigns each accepted connection and passes to
+// bt_handlers as Context::client_id). Returns false — without encoding —
+// if that client is no longer connected, so a late BLE callback for a
+// client that left is dropped instead of reaching whoever got its fd.
+bool send_to(uint32_t client_id, uint16_t msg_type, EncodeFn encode, void *ctx);
+
 // True while a client is connected. Cheap, lock-free check for
 // callbacks to bail out early before doing real work.
 bool has_active_client();

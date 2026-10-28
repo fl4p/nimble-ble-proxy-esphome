@@ -21,6 +21,10 @@ struct ClientSubs {
 
 struct Context {
   int client_fd;
+  // Monotonic per-connection id from api_server (never 0). BLE links are
+  // owned by this id: GATT ops and DISCONNECT are honoured only for the
+  // owner, and connection state is reported only to it.
+  uint32_t client_id;
   ClientSubs *subs;  // owned by the connection task; never nullptr
 };
 
@@ -30,6 +34,11 @@ bool handle(uint16_t request_type, const uint8_t *request_payload,
 
 // Per-client teardown — release any subscription refs this client held.
 void on_client_disconnect(ClientSubs &subs);
+
+// Per-client teardown — drop every BLE link (connected or still
+// connecting) opened by `client_id`, while other clients stay connected.
+// Must run after the client left api_server's client set.
+void on_client_links_release(uint32_t client_id);
 
 // Last-client teardown — disconnect any active GATT links so we don't
 // keep them open with no one listening.

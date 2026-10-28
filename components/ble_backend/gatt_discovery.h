@@ -22,9 +22,15 @@ enum class Status : int32_t {
   SendFailed = -4,
 };
 
-// Run discovery on a connected slot. Emits one services response + one
-// done response (or one error response) using api_server::send_async.
+// Run discovery on a connected slot owned by API client `owner` (see
+// connection::OwnerId). A link held by another client is treated as not
+// connected. Emits one services response + one done response (or one
+// error response) using api_server::send_async.
 // Returns the final status; callers usually log + ignore.
-Status run(uint64_t address);
+//
+// Only the owner can reach a link, and each client's requests run
+// serially on its own api_client task, so two discoveries never walk the
+// same NimBLEClient concurrently (their service lists cannot interleave).
+Status run(uint64_t address, uint32_t owner);
 
 }  // namespace ble_backend::gatt_discovery

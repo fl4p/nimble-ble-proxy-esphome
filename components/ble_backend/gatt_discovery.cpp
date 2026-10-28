@@ -141,11 +141,13 @@ void emit_error(uint64_t address, int32_t err) {
 
 }  // namespace
 
-Status run(uint64_t address) {
-  auto *client = static_cast<NimBLEClient *>(connection::client_for(address));
+Status run(uint64_t address, uint32_t owner) {
+  auto *client =
+      static_cast<NimBLEClient *>(connection::client_for(address, owner));
   if (client == nullptr) {
-    ESP_LOGW(TAG, "%012llx not connected",
-             static_cast<unsigned long long>(address));
+    ESP_LOGW(TAG, "%012llx not connected (or not owned by client %lu)",
+             static_cast<unsigned long long>(address),
+             static_cast<unsigned long>(owner));
     emit_error(address, /*err=*/-1);
     return Status::NotConnected;
   }
