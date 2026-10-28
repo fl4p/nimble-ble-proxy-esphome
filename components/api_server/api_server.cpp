@@ -28,6 +28,24 @@ constexpr size_t CONN_STACK = 8192;
 constexpr UBaseType_t LISTENER_PRIO = 5;
 constexpr UBaseType_t CONN_PRIO = 5;
 
+// Every send to a client runs under g_tx_mutex, and send_async is called
+// from the NimBLE host task. Without a bound, one client that stops
+// reading (stalled WiFi, suspended process) fills its lwIP send buffer
+// and blocks send() forever: the host task blocks on g_tx_mutex, and BLE
+// stops for every client. With SO_SNDTIMEO a send that makes no progress
+// for this long fails, and the failing fd is reaped (shutdown → its
+// connection_task exits → its BLE links are released). Long enough to
+// ride out TCP retransmission backoff on a lossy but live link.
+constexpr int CLIENT_SEND_TIMEOUT_S = 5;
+
+// TCP keepalive so a half-open client (host crashed or lost power, no
+// FIN/RST) is detected even when we send it nothing: ~30 s idle + 3 × 10 s
+// probes → recv() fails, the connection_task exits and releases the
+// client's BLE links instead of holding them indefinitely.
+constexpr int CLIENT_KEEPIDLE_S = 30;
+constexpr int CLIENT_KEEPINTVL_S = 10;
+constexpr int CLIENT_KEEPCNT = 3;
+
 bool g_started = false;
 
 // Active clients. fd -1 in unused slots. Guarded by g_clients_mutex.
@@ -70,7 +88,11 @@ bool send_locked_to(int fd, uint16_t msg_type, size_t payload_len) {
   while (sent < total) {
     ssize_t r = ::send(fd, p + sent, total - sent, MSG_NOSIGNAL);
     if (r < 0) {
-      ESP_LOGW(TAG, "send fd=%d failed: errno=%d", fd, errno);
+      // EAGAIN/EWOULDBLOCK here = SO_SNDTIMEO expired with no progress:
+      // the client stopped reading. Caller reaps the fd.
+      ESP_LOGW(TAG, "send fd=%d failed: errno=%d%s", fd, errno,
+               (errno == EAGAIN || errno == EWOULDBLOCK) ? " (send timeout)"
+                                                         : "");
       return false;
     }
     sent += static_cast<size_t>(r);
@@ -291,6 +313,16 @@ void listener_task(void *) {
     ESP_LOGI(TAG, "accepted fd=%d peer=%s:%u", client_fd,
              inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
     ::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    timeval snd_to{};
+    snd_to.tv_sec = CLIENT_SEND_TIMEOUT_S;
+    ::setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &snd_to, sizeof(snd_to));
+    int keepidle = CLIENT_KEEPIDLE_S;
+    int keepintvl = CLIENT_KEEPINTVL_S;
+    int keepcnt = CLIENT_KEEPCNT;
+    ::setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+    ::setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+    ::setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+    ::setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
 
     uint32_t client_id = register_client(client_fd);
     if (client_id == 0) {
