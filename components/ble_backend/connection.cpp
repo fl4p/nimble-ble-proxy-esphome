@@ -19,6 +19,11 @@ namespace {
 
 constexpr const char *TAG = "ble.conn";
 
+// Wait for a reused NimBLEClient to finish its previous teardown before
+// connecting again (see connect()). 100 × 10 ms = 1 s worst case.
+constexpr int CLIENT_SETTLE_POLLS = 100;
+constexpr int CLIENT_SETTLE_POLL_MS = 10;
+
 enum class State : uint8_t {
   Free = 0,
   Connecting,
@@ -357,6 +362,21 @@ ConnectStatus connect(uint64_t address, uint8_t address_type, OwnerId owner,
   NimBLEClient *client = s->client;
   xSemaphoreGive(g_mutex);
   notify_free_change();
+
+  // onDisconnect / onConnectFail free the slot (and announce it) from
+  // INSIDE NimBLE's GAP event handler; NimBLE only resets the client to
+  // DISCONNECTED (conn handle NONE) after our callback returns. A fast
+  // reconnect that reuses this slot's NimBLEClient in that window gets
+  // BLE_HS_EREJECT from connect(). The slot is ours (Connecting), so wait
+  // here — on the api_client task, never the host task — for NimBLE to
+  // finish. Normally that's microseconds; the bound covers the callback
+  // being held up by a slow send (SO_SNDTIMEO) and keeps the old
+  // fail-with--1 behaviour if it never settles.
+  for (int i = 0; i < CLIENT_SETTLE_POLLS &&
+                  client->getConnHandle() != BLE_HS_CONN_HANDLE_NONE;
+       ++i) {
+    vTaskDelay(pdMS_TO_TICKS(CLIENT_SETTLE_POLL_MS));
+  }
 
   // NimBLEAddress(uint64_t, type) takes MSB-first hex, so 0x20a111022345
   // becomes MAC 20:A1:11:02:23:45 — which matches what aioesphomeapi sends.
