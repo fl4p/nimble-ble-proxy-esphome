@@ -5,16 +5,6 @@ set(EXTRA_COMPONENT_DIRS components)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-# IDF 6 builds with -Werror=missing-field-initializers in C++. Every
-# `httpd_uri_t x = {.uri=…, .method=…, .handler=…, .user_ctx=…}` in the
-# tree omits the websocket members that CONFIG_HTTPD_WS_SUPPORT (selected
-# by NBP_WS_PROXY) adds to the struct. Aggregate initialization zero-fills
-# them, which is exactly the intended value (not a websocket route), so
-# the warning carries no information here. IDF 5.5 is unaffected.
-if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
-    idf_build_set_property(CXX_COMPILE_OPTIONS "-Wno-missing-field-initializers" APPEND)
-endif()
-
 project(nimble_ble_proxy
     LANGUAGES C CXX
     VERSION 0.1.0)
@@ -33,4 +23,25 @@ if(CONFIG_NBP_NAT_ROUTER)
         "${CMAKE_CURRENT_SOURCE_DIR}/components/dhcps_hostname/include")
     target_compile_definitions(${lwip_lib} PRIVATE
         ESP_IDF_LWIP_HOOK_FILENAME="nbp_lwip_hooks.h")
+endif()
+
+# IDF 6 builds with -Werror=missing-field-initializers in C++. These
+# components register httpd routes with
+# `httpd_uri_t x = {.uri=…, .method=…, .handler=…, .user_ctx=…}`, which
+# omits the websocket members that CONFIG_HTTPD_WS_SUPPORT (selected by
+# NBP_WS_PROXY) adds to the struct. Aggregate initialization zero-fills
+# them — exactly the intended value (not a websocket route) — so the
+# warning carries no information there. Scoped to those components only;
+# IDF 5.5 is unaffected.
+if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
+    foreach(comp api_server ble_clone nat_router ota wifi_sta)
+        idf_component_get_property(comp_lib ${comp} COMPONENT_LIB)
+        if(comp_lib)
+            get_target_property(comp_type ${comp_lib} TYPE)
+            if(NOT comp_type STREQUAL "INTERFACE_LIBRARY")
+                target_compile_options(${comp_lib} PRIVATE
+                    $<$<COMPILE_LANGUAGE:CXX>:-Wno-missing-field-initializers>)
+            endif()
+        endif()
+    endforeach()
 endif()
