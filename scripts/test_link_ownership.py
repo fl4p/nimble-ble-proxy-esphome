@@ -157,7 +157,10 @@ async def run(ip: str, mac: str, addr_type: int, timeout: float) -> int:
     n_a = len(a.events)
     await a.connect(addr, addr_type, timeout)
     ev = await a.wait_event(5)
-    check(ev is not None and ev[0] and len(a.events) == n_a + 1,
+    # aioesphomeapi keeps step 1's state callback registered and adds a second
+    # one, so the proxy's single reply shows up here twice (verified in /log:
+    # one "re-confirming" line). Only require that every new event is connected.
+    check(ev is not None and ev[0] and len(a.events) > n_a,
           "2. A's re-CONNECT of its own link -> connected=true")
     await asyncio.sleep(1)
     check(all(e[0] for e in a.events[n_a:]), "2. no connected=false to A afterwards")
