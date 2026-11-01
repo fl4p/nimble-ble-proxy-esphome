@@ -263,17 +263,28 @@ bool handle_device_request(const uint8_t *payload, size_t payload_len,
     case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_CONNECT:
     case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_CONNECT_V3_WITH_CACHE:
     case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_CONNECT_V3_WITHOUT_CACHE: {
-      // See connection::connect for the ownership rule: an address held
-      // by any client (another one, or this one) is refused, never taken
-      // over.
-      bool started = ble_backend::connection::connect(
-          req.address, addr_type, ctx.client_id, &on_connection_state);
-      if (!started) {
-        // Emit failure so the requester isn't left waiting — to the
-        // requester ONLY: the holder of this address must not see a
-        // connected=false for its own, healthy link.
-        send_connection_state(ctx.client_id, req.address, false, 0,
-                              /*sentinel "no slot / already connected"=*/-100);
+      // See connection::connect for the ownership rule: the owner's own
+      // re-CONNECT is answered with the link's state; an address held by
+      // another client is refused, never taken over.
+      using ble_backend::connection::ConnectStatus;
+      uint16_t mtu = 0;
+      ConnectStatus st = ble_backend::connection::connect(
+          req.address, addr_type, ctx.client_id, &on_connection_state, &mtu);
+      switch (st) {
+        case ConnectStatus::Started:
+        case ConnectStatus::OwnInProgress:  // result follows via the cb
+          break;
+        case ConnectStatus::OwnConnected:
+          send_connection_state(ctx.client_id, req.address, true, mtu, 0);
+          break;
+        case ConnectStatus::HeldByOther:
+        case ConnectStatus::NoSlot:
+          // Emit failure so the requester isn't left waiting — to the
+          // requester ONLY: the holder of this address must not see a
+          // connected=false for its own, healthy link.
+          send_connection_state(ctx.client_id, req.address, false, 0,
+                                /*sentinel "no slot / already connected"=*/-100);
+          break;
       }
       break;
     }

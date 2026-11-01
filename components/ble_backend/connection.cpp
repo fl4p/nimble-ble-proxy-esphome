@@ -36,6 +36,7 @@ struct Slot {
   // kNoOwner by release_owner() when that client leaves. Every cb
   // invocation carries it so the bridge reports only to the owner.
   OwnerId owner = kNoOwner;
+  uint16_t mtu = 0;  // negotiated MTU, set in onConnect
   // Teardown requested while the slot was still Connecting. NimBLE may
   // already have the link up (connect-established timer pending) when
   // we cancel, so onConnect checks this and terminates instead of
@@ -85,6 +86,7 @@ void clear_locked(Slot *s) {
   s->address_type = 0;
   s->cb = nullptr;
   s->owner = kNoOwner;
+  s->mtu = 0;
   s->abort = false;
 }
 
@@ -176,6 +178,7 @@ class ClientCb : public NimBLEClientCallbacks {
         orphan = true;
       } else {
         s->state = State::Connected;
+        s->mtu = mtu;
         cb_snapshot = s->cb;
         owner_snapshot = s->owner;
       }
@@ -278,32 +281,58 @@ void register_free_change_cb(FreeChangeCallback cb) {
 }
 
 // Ownership rule for CONNECT: a slot belongs to exactly one API client.
-// A CONNECT for an address that any client already holds — another live
-// client, or the requester itself — is refused (bt_handlers answers the
-// requester alone with error -100). We deliberately do NOT let client B
+//
+// Same client re-sends CONNECT for a link it already holds (bleak-esphome
+// retries, or a reconnect after its own state got out of step): answer
+// with the link's real state, as upstream ESPHome does — connected=true
+// + MTU if it is up, nothing while it is still connecting (the pending
+// result follows). Refusing with -100 would make the client treat its
+// healthy link as dropped and never DISCONNECT it, so every later retry
+// would get -100 too (the #391 symptom, with a single client).
+//
+// A CONNECT for an address ANOTHER client holds is refused (bt_handlers
+// answers the requester alone with error -100). We deliberately do NOT let client B
 // take over A's link: A may be mid-transaction (BMS command/response,
 // notify stream), a takeover would silently kill it, and the two clients
 // would then fight over the peer. The case that used to need a takeover —
 // links left behind by a client that restarted while another client kept
 // the proxy busy — no longer exists, because release_owner() drops a
 // client's links the moment its API connection closes.
-bool connect(uint64_t address, uint8_t address_type, OwnerId owner,
-             ConnectCallback cb) {
+ConnectStatus connect(uint64_t address, uint8_t address_type, OwnerId owner,
+                      ConnectCallback cb, uint16_t *mtu_out) {
   xSemaphoreTake(g_mutex, portMAX_DELAY);
   if (Slot *held = find_by_addr_locked(address); held != nullptr) {
     OwnerId holder = held->owner;
+    State st = held->state;
+    bool aborting = held->abort;
+    uint16_t mtu = held->mtu;
     xSemaphoreGive(g_mutex);
+    if (holder == owner && st == State::Connected) {
+      ESP_LOGI(TAG, "%012llx already connected for owner=%lu — re-confirming",
+               static_cast<unsigned long long>(address),
+               static_cast<unsigned long>(owner));
+      if (mtu_out) *mtu_out = mtu;
+      return ConnectStatus::OwnConnected;
+    }
+    if (holder == owner && st == State::Connecting && !aborting) {
+      ESP_LOGI(TAG, "%012llx connect already in progress for owner=%lu",
+               static_cast<unsigned long long>(address),
+               static_cast<unsigned long>(owner));
+      return ConnectStatus::OwnInProgress;
+    }
+    // Another client's link, or the owner's own link mid-teardown (its
+    // connected=false is on the way; the client may retry once it lands).
     ESP_LOGW(TAG, "%012llx already connected/connecting (owner=%lu, req=%lu)",
              static_cast<unsigned long long>(address),
              static_cast<unsigned long>(holder),
              static_cast<unsigned long>(owner));
-    return false;
+    return ConnectStatus::HeldByOther;
   }
   Slot *s = alloc_locked();
   if (s == nullptr) {
     xSemaphoreGive(g_mutex);
     ESP_LOGW(TAG, "no free slot");
-    return false;
+    return ConnectStatus::NoSlot;
   }
   s->state = State::Connecting;
   s->address = address;
@@ -367,7 +396,7 @@ bool connect(uint64_t address, uint8_t address_type, OwnerId owner,
       cb_snapshot(owner_snapshot, address, r);
     }
   }
-  return true;
+  return ConnectStatus::Started;
 }
 
 DisconnectStatus disconnect(uint64_t address, OwnerId owner) {

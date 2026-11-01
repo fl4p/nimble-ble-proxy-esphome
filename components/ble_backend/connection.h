@@ -36,13 +36,20 @@ using FreeChangeCallback = void (*)();
 void init();
 void register_free_change_cb(FreeChangeCallback cb);
 
+enum class ConnectStatus : uint8_t {
+  Started,           // connect issued; cb fires with the result
+  OwnConnected,      // `owner` already holds this link, up; *mtu_out set
+  OwnInProgress,     // `owner` already has this connect in flight
+  HeldByOther,       // another client holds the address (or owner's link
+                     // is being torn down) — refused
+  NoSlot,            // all slots in use — refused
+};
+
 // Asynchronous connect on behalf of API client `owner` (!= kNoOwner).
-// Returns false — and does not invoke `cb` — if no slot is free or ANY
-// client (including `owner`) already holds a slot for this address. On
-// true, `cb` is invoked once with the result, and again later if the
-// peer drops.
-bool connect(uint64_t address, uint8_t address_type, OwnerId owner,
-             ConnectCallback cb);
+// Only Started invokes `cb` (once with the result, again later if the
+// peer drops). OwnConnected fills *mtu_out (may be nullptr).
+ConnectStatus connect(uint64_t address, uint8_t address_type, OwnerId owner,
+                      ConnectCallback cb, uint16_t *mtu_out);
 
 enum class DisconnectStatus : uint8_t {
   Started,   // teardown issued; cb(owner, addr, {connected:false}) follows
