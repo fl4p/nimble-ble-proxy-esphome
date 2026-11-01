@@ -274,7 +274,34 @@ GATT read/write/notify responses, discovery output and notify data.
 Adverts and ConnectionsFree stay broadcast. GATT
 read/write/notify/get-services and DISCONNECT are honoured only for
 the owner. A CONNECT for an address another client holds is still
-refused with -100, not taken over. Test: `scripts/test_link_ownership.py`.
+refused with -100, not taken over. The owner's own re-CONNECT is
+answered with the link state, as upstream ESPHome does: connected=true
++ MTU if it is up, nothing while it is still connecting.
+
+Test: `scripts/test_link_ownership.py <ip> <mac>`, against a live proxy and
+peripheral (not run yet). It covers:
+- connect;
+- the owner's re-CONNECT;
+- -100 for a second client, with no event reaching the holder;
+- non-owner GATT read and get-services rejected (not write or notify);
+- non-owner DISCONNECT;
+- slot freed after the holder disconnects abruptly, twice;
+- a client dropping right after CONNECT.
+
+That last case is best effort: from outside, the script cannot prove the
+GAP connect was still in flight when the proxy released it. The device
+log has to confirm that (`release … state=1` / `owner gone,
+terminating`).
+
+Known, not fixed:
+- A GATT op that is already running holds a raw `NimBLEClient*`. If the
+  link drops and the slot is reused for another connect during that one
+  call, the call runs against the new connection (existed before).
+- The last-client backstop (`ble_backend::on_api_client_disconnect`) still
+  calls `scanner::stop_forwarding()` unconditionally. A client that
+  subscribes to adverts in the window between "count hit 0" and that
+  call keeps a subscription refcount but gets no adverts until it
+  re-subscribes (existed before).
 
 ## ANT BMS specifics (observed on `20:A1:11:02:23:45`)
 
