@@ -32,11 +32,19 @@ constexpr UBaseType_t CONN_PRIO = 5;
 // from the NimBLE host task. Without a bound, one client that stops
 // reading (stalled WiFi, suspended process) fills its lwIP send buffer
 // and blocks send() forever: the host task blocks on g_tx_mutex, and BLE
-// stops for every client. With SO_SNDTIMEO a send that makes no progress
-// for this long fails, and the failing fd is reaped (shutdown → its
-// connection_task exits → its BLE links are released). Long enough to
-// ride out TCP retransmission backoff on a lossy but live link.
-constexpr int CLIENT_SEND_TIMEOUT_S = 5;
+// stops for every client. So each frame gets a TOTAL deadline: if the
+// whole frame isn't out within CLIENT_SEND_DEADLINE_MS the send fails and
+// the fd is reaped (shutdown → its connection_task exits → its BLE links
+// are released). Long enough to ride out TCP retransmission backoff on a
+// lossy but live link.
+//
+// SO_SNDTIMEO alone is not a bound: it applies per send() call and a call
+// that moves even one byte returns, so a slow-but-steady reader restarts
+// it indefinitely. SO_SNDTIMEO is therefore only the poll granularity
+// (each blocked send() wakes after CLIENT_SEND_POLL_MS and the loop checks
+// the deadline); worst-case hold ≈ deadline + one poll.
+constexpr int CLIENT_SEND_DEADLINE_MS = 5000;
+constexpr int CLIENT_SEND_POLL_MS = 500;
 
 // TCP keepalive so a half-open client (host crashed or lost power, no
 // FIN/RST) is detected even when we send it nothing: ~30 s idle + 3 × 10 s
@@ -85,14 +93,23 @@ bool send_locked_to(int fd, uint16_t msg_type, size_t payload_len) {
   size_t total = (frame_codec::MAX_HEADER_LEN - start) + payload_len;
   const uint8_t *p = g_tx_buf + start;
   size_t sent = 0;
+  const TickType_t t0 = xTaskGetTickCount();
+  const TickType_t deadline = pdMS_TO_TICKS(CLIENT_SEND_DEADLINE_MS);
   while (sent < total) {
+    if (xTaskGetTickCount() - t0 >= deadline) {
+      // Slow reader: progress, but not the whole frame in time. The
+      // stream is now mid-frame, so the client must go anyway.
+      ESP_LOGW(TAG, "send fd=%d: frame not out within %d ms (%u/%u B)", fd,
+               CLIENT_SEND_DEADLINE_MS, static_cast<unsigned>(sent),
+               static_cast<unsigned>(total));
+      return false;
+    }
     ssize_t r = ::send(fd, p + sent, total - sent, MSG_NOSIGNAL);
     if (r < 0) {
-      // EAGAIN/EWOULDBLOCK here = SO_SNDTIMEO expired with no progress:
-      // the client stopped reading. Caller reaps the fd.
-      ESP_LOGW(TAG, "send fd=%d failed: errno=%d%s", fd, errno,
-               (errno == EAGAIN || errno == EWOULDBLOCK) ? " (send timeout)"
-                                                         : "");
+      // EAGAIN/EWOULDBLOCK = one SO_SNDTIMEO poll with no progress; retry
+      // until the frame deadline. Anything else: peer gone. Caller reaps.
+      if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+      ESP_LOGW(TAG, "send fd=%d failed: errno=%d", fd, errno);
       return false;
     }
     sent += static_cast<size_t>(r);
@@ -318,7 +335,8 @@ void listener_task(void *) {
              inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
     ::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     timeval snd_to{};
-    snd_to.tv_sec = CLIENT_SEND_TIMEOUT_S;
+    snd_to.tv_sec = CLIENT_SEND_POLL_MS / 1000;
+    snd_to.tv_usec = (CLIENT_SEND_POLL_MS % 1000) * 1000;
     ::setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &snd_to, sizeof(snd_to));
     int keepidle = CLIENT_KEEPIDLE_S;
     int keepintvl = CLIENT_KEEPINTVL_S;
