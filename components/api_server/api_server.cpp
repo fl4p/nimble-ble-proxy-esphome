@@ -341,7 +341,12 @@ void listener_task(void *) {
                     reinterpret_cast<void *>(static_cast<intptr_t>(client_fd)),
                     CONN_PRIO, nullptr) != pdPASS) {
       ESP_LOGE(TAG, "xTaskCreate for fd=%d failed", client_fd);
+      // Same invariant as connection_task: leave the set under
+      // g_tx_mutex so no send/reap is mid-flight on this fd when it is
+      // closed and possibly reissued.
+      xSemaphoreTake(g_tx_mutex, portMAX_DELAY);
       unregister_client(client_fd);
+      xSemaphoreGive(g_tx_mutex);
       ::close(client_fd);
     }
   }
