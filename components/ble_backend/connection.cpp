@@ -102,6 +102,14 @@ Teardown begin_teardown_locked(Slot *s) {
       s->state = State::Disconnecting;
       return Teardown::Terminate;
     case State::Connecting:
+      // Already being torn down (DISCONNECT then release_owner, or the
+      // reverse): do nothing. After a first Terminate NimBLE is
+      // DISCONNECTING, so isConnected() is false and we would pick Cancel —
+      // and ble_gap_conn_cancel() cancels whatever GAP connect is pending,
+      // which may be ANOTHER client's. A first Cancel needs no repeat
+      // either: its onConnectFail (or a late onConnect, which sees abort)
+      // finishes the job.
+      if (s->abort) return Teardown::None;
       // Stay Connecting: onConnectFail / onDisconnect frees the slot.
       // If NimBLE already holds the link (established timer pending,
       // onConnect not yet delivered) a GAP cancel is a no-op, so
