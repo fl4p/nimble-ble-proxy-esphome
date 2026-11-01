@@ -14,8 +14,9 @@ namespace ble_backend {
 // to keep logs sane). Idempotent.
 void start();
 
-// Called by api_server when the API client goes away. Stops adv
-// forwarding and disconnects all GATT links.
+// Called by api_server when the last API client goes away. Stops adv
+// forwarding and disconnects any GATT link left without an owner (each
+// client's own links are released when it disconnects).
 void on_api_client_disconnect();
 
 // Diagnostic accessors: NOTIFY_RX events seen at the NimBLE host level

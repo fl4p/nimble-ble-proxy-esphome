@@ -201,7 +201,7 @@ void start() {
 
 void on_api_client_disconnect() {
   scanner::stop_forwarding();
-  connection::disconnect_all();
+  connection::disconnect_unowned();
 }
 
 // Runtime full BLE shutdown — the "off" choice on the dashboard's BLE TX

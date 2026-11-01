@@ -485,14 +485,13 @@ uint8_t in_use_addresses(uint64_t *out, uint8_t cap) {
   return n;
 }
 
-void disconnect_all() {
+void disconnect_unowned() {
   NimBLEClient *clients[proxy::MAX_CONNECTIONS];
   Teardown actions[proxy::MAX_CONNECTIONS];
   uint8_t n = 0;
   xSemaphoreTake(g_mutex, portMAX_DELAY);
   for (auto &s : g_slots) {
-    if (s.state == State::Free) continue;
-    s.owner = kNoOwner;
+    if (s.state == State::Free || s.owner != kNoOwner) continue;
     Teardown t = begin_teardown_locked(&s);
     if (t != Teardown::None) {
       clients[n] = s.client;

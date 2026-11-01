@@ -73,9 +73,11 @@ uint8_t free_slots();
 // currently in use. Returns the number written.
 uint8_t in_use_addresses(uint64_t *out, uint8_t cap);
 
-// Tear down every active connection regardless of owner. Backstop for
-// the last API client leaving.
-void disconnect_all();
+// Tear down every slot that has NO owner (its client left) and is not
+// already winding down. Backstop for the last API client leaving; slots
+// owned by a live client are never touched — one may have registered and
+// issued a CONNECT between "count hit 0" and this call.
+void disconnect_unowned();
 
 // Internal accessor for gatt_discovery / read / write: returns the
 // NimBLEClient* for `address` if it is Connected AND owned by `owner`,
