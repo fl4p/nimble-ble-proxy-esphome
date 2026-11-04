@@ -203,6 +203,22 @@ config NBP_NAT_PORTMAP_MAX
         Capped at 32 by lwIP's IP_PORTMAP_MAX. Each slot costs a few
         bytes of BSS plus one NVS blob entry.
 
+config NBP_NAT_TABLE_SIZE
+    int "NAPT translation table size (entries)"
+    depends on NBP_NAT_ROUTER
+    range 32 512
+    default 128 if IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32C2
+    default 512
+    help
+        Overrides lwIP's IP_NAPT_MAX. lwIP allocates the whole table as ONE
+        contiguous calloc of (entries x 32 B) the first time NAPT is
+        enabled, and asserts (panic -> boot loop) if that allocation
+        fails. 512 entries = 16 KB, which an ESP32-C3 running WiFi + BLE +
+        httpd + api_server cannot spare in one block (GitHub issue #2).
+        One entry per active TCP/UDP/ICMP flow; when the table is full
+        lwIP evicts the oldest flow, so a smaller table degrades
+        gracefully for a handful of SoftAP clients.
+
 config NBP_NAT_THROUGHPUT
     bool "Report SoftAP throughput (dashboard repeater chart)"
     depends on NBP_NAT_ROUTER

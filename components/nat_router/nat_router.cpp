@@ -4,6 +4,7 @@
 
 #include "esp_coexist.h"  // esp_coex_preference_set — bias RF to WiFi for NAT
 #include "esp_event.h"
+#include "esp_heap_caps.h"  // pre-check the NAPT table allocation
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -269,11 +270,71 @@ void configure_ap() {
   esp_wifi_set_config(WIFI_IF_AP, &ap);
 }
 
+// Whether NAPT is currently enabled on the AP netif, and so whether lwIP's
+// NAPT tables exist. lwIP callocs them on enable and frees them
+// (ip_napt_deinit) when the last NAPT netif is disabled, i.e. on every
+// ap_down(). So every real enable, including OTA-failure resume and a
+// dashboard re-toggle, allocates again and needs the heap check.
+bool g_napt_on = false;
+
+// Sizes of lwIP's private struct ip_napt_entry / ip_portmap_entry
+// (ip4_napt.c). They are not exported, so they are mirrored here. 32 B
+// matches the struct in IDF 5.5 and 6.0; re-check on an IDF bump.
+constexpr size_t NAPT_ENTRY_BYTES = 32;
+constexpr size_t PORTMAP_ENTRY_BYTES = 16;
+// What must stay free after the tables are allocated. An api_server
+// connection task needs a contiguous 8 KB stack; losing that is how heap
+// pressure turns into the HA reconnect storm and SA-Query loop (CLAUDE.md).
+// So the largest block must hold the table AND such a stack, and total
+// free must leave general headroom on top.
+constexpr size_t NAPT_CONTIG_HEADROOM = 8 * 1024;
+constexpr size_t NAPT_HEAP_HEADROOM = 16 * 1024;
+
+// Can lwIP's NAPT table allocation succeed without starving the rest of
+// the firmware? mem_calloc is libc calloc here (MEM_LIBC_MALLOC), so
+// MALLOC_CAP_DEFAULT is the pool it draws from.
+bool napt_heap_ok() {
+  const size_t napt = CONFIG_NBP_NAT_TABLE_SIZE * NAPT_ENTRY_BYTES;
+  const size_t pmap = IP_PORTMAP_MAX * PORTMAP_ENTRY_BYTES;
+  const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+  const size_t free_total = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+  // The two callocs are separate; the NAPT table is by far the larger and
+  // is carved out of the largest block, so that block must also leave an
+  // 8 KB task stack behind.
+  const bool ok = largest >= napt + NAPT_CONTIG_HEADROOM &&
+                  free_total >= napt + pmap + NAPT_HEAP_HEADROOM;
+  if (!ok) {
+    ESP_LOGE(TAG,
+             "not enough heap for the NAPT table (%u entries = %u B, needs "
+             "+%u B contiguous / +%u B total headroom; largest free block "
+             "%u B, free %u B). SoftAP "
+             "left down; lower CONFIG_NBP_NAT_TABLE_SIZE or disable "
+             "CONFIG_NBP_NAT_ROUTER",
+             static_cast<unsigned>(CONFIG_NBP_NAT_TABLE_SIZE),
+             static_cast<unsigned>(napt),
+             static_cast<unsigned>(NAPT_CONTIG_HEADROOM),
+             static_cast<unsigned>(NAPT_HEAP_HEADROOM),
+             static_cast<unsigned>(largest), static_cast<unsigned>(free_total));
+  }
+  return ok;
+}
+
+// Undo the parts of ap_up() that ran before the NAPT heap check, leaving
+// the radio in the STA-only state that ap_down() produces. NAPT was never
+// enabled and no port mappings were applied, so neither is undone here.
+void abort_ap_up() {
+  esp_wifi_set_mode(WIFI_MODE_STA);
+  NBP_COEX_PREFER(ESP_COEX_PREFER_BALANCE);
+  g_enabled = false;
+}
+
 // Bring the SoftAP up: create the AP netif on first use, switch to APSTA
 // (STA association is preserved), configure the AP, hand out DNS, enable
 // NAPT, and apply persisted port mappings. Idempotent — safe to call when
 // already up. The AP netif is created once and reused across toggles.
-void ap_up() {
+// Returns false (radio left STA-only) if the heap can't hold the NAPT
+// tables; the persisted enable flag is not touched.
+bool ap_up() {
   if (g_ap == nullptr) {
     g_ap = esp_netif_create_default_wifi_ap();
     esp_netif_ip_info_t ap_ip = {};
@@ -315,6 +376,17 @@ void ap_up() {
   for (int i = 0; i < 40 && !esp_netif_is_netif_up(g_ap); ++i) {
     vTaskDelay(pdMS_TO_TICKS(25));
   }
+  // The first enable makes lwIP calloc its NAPT tables, and lwIP *asserts*
+  // on failure rather than returning an error. A failed allocation is a
+  // panic and then a boot loop, because the AP comes back up on every boot
+  // (issue #2, ESP32-C3). Refuse here instead, while the failure can still
+  // be handled. Checked after APSTA is up, so the AP's own buffers are
+  // already counted. Skipped only when NAPT is already on (ap_up() called
+  // while up), where the enable is a no-op that allocates nothing.
+  if (!g_napt_on && !napt_heap_ok()) {
+    abort_ap_up();
+    return false;
+  }
   esp_err_t err = esp_netif_napt_enable(g_ap);
   if (err != ESP_OK) {
     // The netif occasionally needs another beat; one bounded retry.
@@ -324,6 +396,8 @@ void ap_up() {
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_netif_napt_enable failed: %s (NAT non-functional)",
              esp_err_to_name(err));
+  } else {
+    g_napt_on = true;
   }
   apply_portmap();
   g_enabled = true;
@@ -336,6 +410,7 @@ void ap_up() {
   ESP_LOGI(TAG, "NAT SoftAP up: '%s' (%s) %s -> STA %s, %d port mapping(s)",
            g_ap_ssid, std::strlen(g_ap_psk) < 8 ? "open" : "wpa2", ap_s, sta_s,
            count_valid());
+  return true;
 }
 
 // Tear the SoftAP down: disable NAPT, drop the live port mappings, and put
@@ -344,6 +419,7 @@ void ap_up() {
 // runtime knob that brings the device back to the cooler STA-only duty.
 void ap_down() {
   if (g_ap != nullptr) esp_netif_napt_disable(g_ap);
+  g_napt_on = false;  // lwIP freed the tables; the next enable re-checks
   remove_all_live();
   esp_wifi_set_mode(WIFI_MODE_STA);
   // No SoftAP to protect anymore — hand RF arbitration back to BALANCE so the
@@ -519,10 +595,17 @@ esp_err_t nat_post(httpd_req_t *req) {
   if (have_en) {
     bool want = (en[0] == '1');
     if (want != g_enabled) {
-      if (want)
-        ap_up();
-      else
+      if (want) {
+        if (!ap_up()) {
+          // Not persisted: an enable that can't fit must not come back on
+          // every boot.
+          return httpd_resp_send_err(
+              req, HTTPD_500_INTERNAL_SERVER_ERROR,
+              "not enough heap for the NAT table; SoftAP left down");
+        }
+      } else {
         ap_down();
+      }
       save_enabled(want);
     }
   }

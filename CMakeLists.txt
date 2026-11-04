@@ -7,7 +7,7 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 project(nimble_ble_proxy
     LANGUAGES C CXX
-    VERSION 0.2.0)
+    VERSION 0.2.1)
 
 # DHCP client-hostname capture (NAT/SoftAP only). IDF 5.5's DHCP server
 # discards option 12, so we inject a custom lwIP hook header to read it —
@@ -23,6 +23,13 @@ if(CONFIG_NBP_NAT_ROUTER)
         "${CMAKE_CURRENT_SOURCE_DIR}/components/dhcps_hostname/include")
     target_compile_definitions(${lwip_lib} PRIVATE
         ESP_IDF_LWIP_HOOK_FILENAME="nbp_lwip_hooks.h")
+    # NAPT table size. lwip_napt.h only defaults IP_NAPT_MAX (512) under
+    # #ifndef, and the sole consumer is lwIP's own ip4_napt.c, so a define on
+    # the lwip target is enough. 512 x 32 B = 16 KB in one calloc, which the
+    # ESP32-C3 can't satisfy and lwIP asserts on (issue #2). nat_router's
+    # pre-enable heap check reads the same CONFIG value.
+    target_compile_definitions(${lwip_lib} PRIVATE
+        IP_NAPT_MAX=${CONFIG_NBP_NAT_TABLE_SIZE})
 endif()
 
 # IDF 6 builds with -Werror=missing-field-initializers in C++. These

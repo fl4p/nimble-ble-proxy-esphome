@@ -308,7 +308,23 @@ constexpr const char *NVS_CPU_FREQ_KEY = "cpu_freq";
 constexpr const char *NVS_WIFI_LI_KEY = "wifi_li";
 constexpr int8_t DEFAULT_WIFI_TX_DBM = 20;
 constexpr int8_t DEFAULT_BLE_TX_DBM = 9;
-constexpr int DEFAULT_CPU_FREQ_MHZ = 240;
+// Highest CPU clock esp_pm accepts on this target. ESP32/S2/S3/C5 run at
+// 240; C3 and C6 top out at 160, and a 240 request there fails
+// esp_pm_configure with ESP_ERR_INVALID_ARG (issue #2). C2 tops out at 120,
+// which is not one of the 80/160/240 steps the API offers, so it is held to 80.
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2 || \
+    CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C5
+constexpr int MAX_CPU_FREQ_MHZ = 240;
+#elif CONFIG_IDF_TARGET_ESP32C2
+constexpr int MAX_CPU_FREQ_MHZ = 80;
+#else
+constexpr int MAX_CPU_FREQ_MHZ = 160;
+#endif
+constexpr int DEFAULT_CPU_FREQ_MHZ = MAX_CPU_FREQ_MHZ;
+constexpr bool valid_cpu_freq_mhz(int mhz) {
+  return mhz == 80 || (mhz == 160 && MAX_CPU_FREQ_MHZ >= 160) ||
+         (mhz == 240 && MAX_CPU_FREQ_MHZ >= 240);
+}
 // 0 = WIFI_PS_NONE (power-save OFF) by default — WIFI_PS_MAX_MODEM made
 // the device unstable/unreachable and killed serial in steady state.
 // Keep in sync with DEFAULT_WIFI_LI in wifi_sta.cpp.
@@ -1110,8 +1126,10 @@ const char *handle_cpufreq_set(const char *query) {
   bool any = false;
   if (httpd_query_key_value(query, "mhz", val, sizeof(val)) == ESP_OK) {
     mhz = std::atoi(val);
-    if (mhz != 80 && mhz != 160 && mhz != 240) {
-      return "mhz must be 80, 160, or 240";
+    if (!valid_cpu_freq_mhz(mhz)) {
+      return MAX_CPU_FREQ_MHZ >= 240   ? "mhz must be 80, 160, or 240"
+             : MAX_CPU_FREQ_MHZ >= 160 ? "mhz must be 80 or 160"
+                                       : "mhz must be 80";
     }
     any = true;
   }
@@ -1570,7 +1588,7 @@ void apply_cpu_freq_from_nvs() {
   // Stored as MHz/10 so it fits in int8 (24 -> 240 MHz, 16 -> 160 MHz, etc.).
   if (nvs_read_i8(NVS_CPU_FREQ_KEY, &stored) == ESP_OK) {
     int mhz = static_cast<int>(stored) * 10;
-    if (mhz == 80 || mhz == 160 || mhz == 240) g_cpu_freq_mhz = mhz;
+    if (valid_cpu_freq_mhz(mhz)) g_cpu_freq_mhz = mhz;
   }
   int8_t ls = 0;
   if (nvs_read_i8("cpu_ls", &ls) == ESP_OK) g_light_sleep = (ls != 0);

@@ -13,7 +13,9 @@
 
 namespace proxy {
 
-inline constexpr const char *VERSION = "0.1.0";
+// The firmware version is not defined here: it comes from project(VERSION)
+// in the root CMakeLists.txt via esp_app_get_description()->version, so the
+// boot banner and HelloResponse can't drift from the release tag again.
 
 // Compile-time default hostname. Runtime value is exposed via
 // `hostname()` below — it may be overridden by an NVS entry loaded at

@@ -225,6 +225,28 @@
   this natively (`CONFIG_LWIP_DHCPS_REPORT_CLIENT_HOSTNAME`) — prefer that
   if/when the project moves to IDF 6 and drop the hook.
 
+## NAPT table size — lwIP asserts if it can't allocate it (ESP32-C3 boot loop)
+
+- On the first `esp_netif_napt_enable`, lwIP `mem_calloc`s the whole NAPT
+  table: `IP_NAPT_MAX` × 32 B. The default of 512 is 16 KB contiguous.
+  `ip_napt_init` **asserts** on failure instead of returning an error, so a
+  device that can't spare the block panics and then boot-loops, because the
+  SoftAP comes back up from NVS on every boot. Issue #2: v0.2.0 on an
+  ESP32-C3 (WiFi + BLE + httpd + api_server leave no 16 KB block).
+- Fixed in 0.2.1 in two ways. First, `CONFIG_NBP_NAT_TABLE_SIZE` (128 on
+  C3/C2, 512 elsewhere) is passed to the lwip target as `-DIP_NAPT_MAX` in
+  the root `CMakeLists.txt`. When the table is full, lwIP evicts the oldest
+  flow. Second, `nat_router::ap_up()` checks the heap before every enable
+  (`napt_heap_ok`) and leaves the radio STA-only if the check fails. Verify
+  the define with `compile_commands.json` (look for `-DIP_NAPT_MAX=` on
+  `ip4_napt.c`). The mirrored entry size (32 B) must be re-checked on an IDF
+  bump.
+- **lwIP frees the tables on every disable.** `ip_napt_enable_netif(…, 0)`
+  calls `ip_napt_deinit()` when no other netif has NAPT on, so every
+  `ap_down()` frees them. Every later enable (OTA-failure resume, a
+  dashboard re-toggle) allocates again. Don't cache "tables exist" past an
+  `ap_down()`.
+
 ## SoftAP throughput (NBP_NAT_THROUGHPUT) — a second lwIP hook
 
 - `/nat`'s sibling feature: the dashboard's **repeater throughput chart**

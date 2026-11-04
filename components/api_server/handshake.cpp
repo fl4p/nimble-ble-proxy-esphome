@@ -3,6 +3,7 @@
 #include "api_proto.h"
 #include "proxy_config.h"
 
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "pb_decode.h"
@@ -43,8 +44,10 @@ Result hello_response(uint8_t *buf, size_t cap) {
   proxyapi_HelloResponse resp = proxyapi_HelloResponse_init_zero;
   resp.api_version_major = proxy::API_VERSION_MAJOR;
   resp.api_version_minor = proxy::API_VERSION_MINOR;
-  std::snprintf(resp.server_info, sizeof(resp.server_info), "nimble-ble-proxy %s",
-                proxy::VERSION);
+  // server_info is 32 B (api_subset.options); the prefix takes 17, so cap
+  // the app version (a char[32] in esp_app_desc_t) at the 14 that fit.
+  std::snprintf(resp.server_info, sizeof(resp.server_info),
+                "nimble-ble-proxy %.14s", esp_app_get_description()->version);
   std::snprintf(resp.name, sizeof(resp.name), "%s", proxy::hostname());
   size_t n = encode_into(buf, cap, proxyapi_HelloResponse_fields, &resp);
   return {true, proxyapi::MSG_HELLO_RESPONSE, n, false};

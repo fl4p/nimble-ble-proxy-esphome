@@ -13,4 +13,5 @@ idf_component_register(
         nat_router
         liveness_wdt
         serial_provision
+        esp_app_format
 )

@@ -17,6 +17,7 @@ idf_component_register(
         esp_netif
         esp_event
         esp_http_server
+        heap
         lwip
         nvs_flash
         log

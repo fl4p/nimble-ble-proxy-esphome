@@ -36,6 +36,7 @@
 #include "nat_router.h"
 #endif
 
+#include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -135,7 +136,8 @@ extern "C" void app_main() {
 
   ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-  ESP_LOGI(TAG, "nimble-ble-proxy %s booting", proxy::VERSION);
+  ESP_LOGI(TAG, "nimble-ble-proxy %s booting",
+           esp_app_get_description()->version);
 
 #if CONFIG_NBP_WIFI
   serial_provision::poll_boot_window();
