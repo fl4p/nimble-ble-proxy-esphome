@@ -17,6 +17,7 @@
     "or enable NBP_AP_FALLBACK for runtime provisioning."
 #endif
 
+#include "esp_attr.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -139,7 +140,7 @@ void on_ip_event(void * /*arg*/, esp_event_base_t base, int32_t id,
 // pick them up.
 //
 // No other subsystem starts while we're in this mode; main.cpp blocks
-// inside ap_fallback_loop() until reboot. Captive-portal style is not
+// inside enter_ap_provisioning() until reboot. Captive-portal style is not
 // implemented (no DNS redirection) — the user has to know the IP, but
 // most phones will offer to open the AP's "config" page automatically.
 
@@ -152,6 +153,18 @@ constexpr uint8_t AP_MAX_CONN = 2;
 // the setup AP. Each attempt scans all channels, which briefly takes the
 // SoftAP off-channel, so it is skipped while a client is on the setup AP.
 constexpr uint32_t AP_STA_RETRY_SECS = 60;
+// The client gate is bounded: a phone that auto-joined the open setup AP
+// during the outage and just sits there must not block recovery forever.
+// After this many skipped ticks an attempt runs anyway.
+constexpr uint32_t AP_STA_MAX_SKIPS = 10;
+// After provisioning reboots on a recovered network, the next boot waits
+// this long instead of NBP_AP_FALLBACK_SECS, so a slow/marginal link that
+// needs >FALLBACK_SECS to get an IP doesn't cycle boot→AP→reboot forever.
+constexpr uint32_t RECOVERED_BOOT_WAIT_SECS = 300;
+constexpr uint32_t RECOVERED_MAGIC = 0x4E425052;  // "NBPR"
+// Survives esp_restart() (SW reset), garbage after power-on; the magic
+// check makes power-on values harmless.
+RTC_NOINIT_ATTR uint32_t g_recovered_magic;
 
 // Single page with a form + plain instructions. Kept small enough to
 // fit in one TCP segment so old phones render it before timing out.
@@ -295,13 +308,16 @@ void compose_ap_ssid(char *out, size_t cap) {
                 mac[4], mac[5]);
 }
 
-// Switches the radio from STA to AP, spins up the captive httpd, and
+// Switches the radio to AP (APSTA with retry_sta), spins up the captive httpd, and
 // blocks until reboot. With `retry_sta` (credentials exist) the radio
 // runs APSTA and periodically retries the saved network; getting an IP
 // reboots into normal mode. Exits: esp_restart() here or in ap_wifi_post.
 [[noreturn]] void enter_ap_provisioning(bool retry_sta) {
   ESP_LOGW(AP_TAG, "entering SoftAP provisioning mode");
   g_provisioning.store(true, std::memory_order_relaxed);
+  // Clear before the radio restarts, so nothing the new session produces
+  // can be erased; a stale pre-fallback GOT_IP at worst costs one reboot.
+  xEventGroupClearBits(g_events, BIT_GOT_IP);
 
   // Tear down the half-running STA before re-binding netif as AP.
   // create_default_wifi_ap registers the AP netif (192.168.4.1/24 +
@@ -351,20 +367,23 @@ void compose_ap_ssid(char *out, size_t cap) {
     while (true) vTaskDelay(portMAX_DELAY);
   }
 
-  xEventGroupClearBits(g_events, BIT_GOT_IP);
+  uint32_t skips = 0;
   while (true) {
     EventBits_t bits = xEventGroupWaitBits(
         g_events, BIT_GOT_IP, pdFALSE, pdTRUE,
         pdMS_TO_TICKS(AP_STA_RETRY_SECS * 1000));
     if (bits & BIT_GOT_IP) {
       ESP_LOGW(AP_TAG, "saved network is back; rebooting into STA mode");
+      g_recovered_magic = RECOVERED_MAGIC;
       vTaskDelay(pdMS_TO_TICKS(200));
       esp_restart();
     }
     wifi_sta_list_t stas = {};
-    if (esp_wifi_ap_get_sta_list(&stas) == ESP_OK && stas.num > 0) {
-      continue;  // someone is on the setup page; don't hop channels
+    if (esp_wifi_ap_get_sta_list(&stas) == ESP_OK && stas.num > 0 &&
+        ++skips < AP_STA_MAX_SKIPS) {
+      continue;  // someone is on the setup AP; don't hop channels
     }
+    skips = 0;
     ESP_LOGI(AP_TAG, "retrying saved network");
     esp_wifi_connect();
   }
@@ -439,7 +458,15 @@ void start_and_wait_for_ip() {
 #if CONFIG_NBP_AP_FALLBACK
   // Bounded wait: if the AP is wrong/down, fall into provisioning
   // instead of blocking the rest of boot forever.
-  TickType_t to = pdMS_TO_TICKS(CONFIG_NBP_AP_FALLBACK_SECS * 1000);
+  uint32_t wait_s = CONFIG_NBP_AP_FALLBACK_SECS;
+  if (g_recovered_magic == RECOVERED_MAGIC) {
+    // Provisioning just saw this network come back; give it longer.
+    wait_s = RECOVERED_BOOT_WAIT_SECS;
+    ESP_LOGI(TAG, "network recovered from provisioning; waiting up to %u s",
+             static_cast<unsigned>(wait_s));
+  }
+  g_recovered_magic = 0;
+  TickType_t to = pdMS_TO_TICKS(wait_s * 1000);
   EventBits_t bits = xEventGroupWaitBits(g_events, BIT_GOT_IP,
                                          pdFALSE, pdTRUE, to);
   if ((bits & BIT_GOT_IP) == 0) {

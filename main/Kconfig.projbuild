@@ -97,7 +97,8 @@ config NBP_AP_FALLBACK
         submits creds and it reboots, or, when credentials exist,
         until the saved network comes back: the radio runs APSTA and
         retries it every 60 s (skipped while a client is on the
-        setup AP), rebooting into normal mode on success.
+        setup AP, for at most 10 minutes), rebooting into normal
+        mode on success; that boot then waits up to 300 s for an IP.
 
 config NBP_AP_FALLBACK_SECS
     int "SoftAP fallback: STA association timeout (seconds)"
