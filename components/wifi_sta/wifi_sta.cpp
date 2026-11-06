@@ -49,6 +49,12 @@ constexpr int BIT_GOT_IP = BIT0;
 // never cleared on disconnect). Read via is_connected().
 std::atomic<bool> g_sta_connected{false};
 
+// True while the SoftAP provisioning page is up. The STA event handler
+// then stops reconnecting on its own; the provisioning loop retries the
+// saved network on a slow, gated cadence instead (see
+// enter_ap_provisioning).
+std::atomic<bool> g_provisioning{false};
+
 // Mirrored from api_server/stats.cpp — both ends read/write the same
 // key. Kept duplicated here to avoid pulling the whole api_server
 // dependency tree into wifi_sta just for one int8.
@@ -101,10 +107,12 @@ bool read_creds_from_nvs(char *ssid_out, size_t ssid_cap,
 
 void on_wifi_event(void * /*arg*/, esp_event_base_t base, int32_t id,
                    void * /*data*/) {
+  const bool prov = g_provisioning.load(std::memory_order_relaxed);
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-    esp_wifi_connect();
+    if (!prov) esp_wifi_connect();
   } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
     g_sta_connected.store(false, std::memory_order_relaxed);
+    if (prov) return;  // provisioning loop owns the retry cadence
     ESP_LOGW(TAG, "disconnected; retrying");
     esp_wifi_connect();
   }
@@ -138,6 +146,12 @@ void on_ip_event(void * /*arg*/, esp_event_base_t base, int32_t id,
 constexpr const char *AP_TAG = "wifi-ap";
 constexpr uint8_t AP_CHANNEL = 1;
 constexpr uint8_t AP_MAX_CONN = 2;
+// With saved credentials, provisioning mode keeps retrying the saved
+// network this often, so a router that was down at boot (power cut,
+// liveness-WDT reboot during an outage) no longer strands the device on
+// the setup AP. Each attempt scans all channels, which briefly takes the
+// SoftAP off-channel, so it is skipped while a client is on the setup AP.
+constexpr uint32_t AP_STA_RETRY_SECS = 60;
 
 // Single page with a form + plain instructions. Kept small enough to
 // fit in one TCP segment so old phones render it before timing out.
@@ -282,10 +296,12 @@ void compose_ap_ssid(char *out, size_t cap) {
 }
 
 // Switches the radio from STA to AP, spins up the captive httpd, and
-// blocks forever. Callers don't return — esp_restart() in ap_wifi_post
-// is the only exit.
-[[noreturn]] void enter_ap_provisioning() {
+// blocks until reboot. With `retry_sta` (credentials exist) the radio
+// runs APSTA and periodically retries the saved network; getting an IP
+// reboots into normal mode. Exits: esp_restart() here or in ap_wifi_post.
+[[noreturn]] void enter_ap_provisioning(bool retry_sta) {
   ESP_LOGW(AP_TAG, "entering SoftAP provisioning mode");
+  g_provisioning.store(true, std::memory_order_relaxed);
 
   // Tear down the half-running STA before re-binding netif as AP.
   // create_default_wifi_ap registers the AP netif (192.168.4.1/24 +
@@ -293,7 +309,7 @@ void compose_ap_ssid(char *out, size_t cap) {
   // set_mode so the wifi driver sees both netifs at mode-switch time.
   esp_wifi_stop();
   esp_netif_create_default_wifi_ap();
-  esp_wifi_set_mode(WIFI_MODE_AP);
+  esp_wifi_set_mode(retry_sta ? WIFI_MODE_APSTA : WIFI_MODE_AP);
 
   wifi_config_t ap = {};
   char ssid[33];
@@ -330,8 +346,28 @@ void compose_ap_ssid(char *out, size_t cap) {
   ESP_LOGW(AP_TAG, "SoftAP up: SSID='%s' (open) — http://192.168.4.1/",
            ssid);
 
-  // Block forever; ap_wifi_post reboots the device on success.
-  while (true) vTaskDelay(portMAX_DELAY);
+  if (!retry_sta) {
+    // Block forever; ap_wifi_post reboots the device on success.
+    while (true) vTaskDelay(portMAX_DELAY);
+  }
+
+  xEventGroupClearBits(g_events, BIT_GOT_IP);
+  while (true) {
+    EventBits_t bits = xEventGroupWaitBits(
+        g_events, BIT_GOT_IP, pdFALSE, pdTRUE,
+        pdMS_TO_TICKS(AP_STA_RETRY_SECS * 1000));
+    if (bits & BIT_GOT_IP) {
+      ESP_LOGW(AP_TAG, "saved network is back; rebooting into STA mode");
+      vTaskDelay(pdMS_TO_TICKS(200));
+      esp_restart();
+    }
+    wifi_sta_list_t stas = {};
+    if (esp_wifi_ap_get_sta_list(&stas) == ESP_OK && stas.num > 0) {
+      continue;  // someone is on the setup page; don't hop channels
+    }
+    ESP_LOGI(AP_TAG, "retrying saved network");
+    esp_wifi_connect();
+  }
 }
 #endif  // CONFIG_NBP_AP_FALLBACK
 
@@ -373,7 +409,7 @@ void start_and_wait_for_ip() {
 #if CONFIG_NBP_AP_FALLBACK
   if (ssid[0] == '\0') {
     ESP_LOGW(TAG, "no WiFi credentials configured; entering AP provisioning");
-    enter_ap_provisioning();  // [[noreturn]]
+    enter_ap_provisioning(false);  // [[noreturn]]
   }
 #endif
 
@@ -409,7 +445,7 @@ void start_and_wait_for_ip() {
   if ((bits & BIT_GOT_IP) == 0) {
     ESP_LOGW(TAG, "STA timeout after %d s; falling back to SoftAP",
              CONFIG_NBP_AP_FALLBACK_SECS);
-    enter_ap_provisioning();  // [[noreturn]]
+    enter_ap_provisioning(true);  // [[noreturn]]
   }
 #else
   xEventGroupWaitBits(g_events, BIT_GOT_IP, pdFALSE, pdTRUE, portMAX_DELAY);

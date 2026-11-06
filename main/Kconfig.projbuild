@@ -94,7 +94,10 @@ config NBP_AP_FALLBACK
         only links when this gate is on. While the AP is up no other
         subsystem starts (mDNS, api_server, clone) — the device
         deliberately stays in provisioning mode until the user
-        submits creds and it reboots.
+        submits creds and it reboots, or, when credentials exist,
+        until the saved network comes back: the radio runs APSTA and
+        retries it every 60 s (skipped while a client is on the
+        setup AP), rebooting into normal mode on success.
 
 config NBP_AP_FALLBACK_SECS
     int "SoftAP fallback: STA association timeout (seconds)"
