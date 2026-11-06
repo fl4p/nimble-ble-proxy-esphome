@@ -41,7 +41,7 @@ inline constexpr const char *MANUFACTURER = "Custom";
 
 // Reported as DeviceInfoResponse.esphome_version. HA only sanity-checks this,
 // but it should look like a current release so the integration doesn't warn.
-inline constexpr const char *FAKE_ESPHOME_VERSION = "2026.5.0";
+inline constexpr const char *FAKE_ESPHOME_VERSION = "2026.5.1";
 
 // aioesphomeapi protocol version we claim to speak. 1.14 is current as of
 // ESPHome 2026.x; bumping just adds optional fields, never breaks framing.
