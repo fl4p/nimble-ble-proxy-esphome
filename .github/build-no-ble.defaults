@@ -5,3 +5,9 @@
 # whole NimBLE stack drops out, and the esp-nimble-cpp dependency is skipped.
 # (Named outside the `sdkconfig.*` gitignore pattern on purpose.)
 CONFIG_NBP_BLE=n
+# Keep the NAT repeater and the WS bridge in every BLE-free image.
+# sdkconfig.defaults.esp32c3 turns both off to make room for BLE (issue #2),
+# and IDF loads that overlay before this file. Without BLE the C3 has room
+# for them, and the nat_router heap check still guards the table allocation.
+CONFIG_NBP_NAT_ROUTER=y
+CONFIG_NBP_WS_PROXY=y

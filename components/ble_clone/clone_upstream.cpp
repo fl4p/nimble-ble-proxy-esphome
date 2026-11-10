@@ -440,11 +440,18 @@ void init() {
   }
 }
 
-void start() {
-  if (g_supervisor_task != nullptr) return;
+bool start() {
+  if (g_supervisor_task != nullptr) return true;
   if (g_write_queue == nullptr) init();
-  xTaskCreate(&supervisor_task, "clone_sup", SUPERVISOR_STACK, nullptr,
-              SUPERVISOR_PRIO, &g_supervisor_task);
+  if (xTaskCreate(&supervisor_task, "clone_sup", SUPERVISOR_STACK, nullptr,
+                  SUPERVISOR_PRIO, &g_supervisor_task) != pdPASS) {
+    // Out of heap for the 12 KB stack. Clone then stays Idle; writes to
+    // the queue fail fast (xQueueSend timeout 0), so nothing blocks.
+    ESP_LOGE(TAG, "xTaskCreate(clone_sup, %u B) failed; clone not running",
+             static_cast<unsigned>(SUPERVISOR_STACK));
+    return false;
+  }
+  return true;
 }
 
 Status status() {

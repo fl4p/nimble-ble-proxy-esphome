@@ -421,7 +421,8 @@ config NBP_SMP
         peripherals that demand a paired+encrypted link with a static
         passkey (Victron SmartShunt, some BMS variants). On first
         connect the proxy auto-pairs using the passkey configured via
-        POST /clone?passkey=NNNNNN (default 123456, NVS-persisted,
+        POST /clone?passkey=NNNNNN, or POST /passkey?val=NNNNNN in
+        builds without NBP_CLONE (default 123456, NVS-persisted,
         runtime-mutable). The bond is stored in NVS so subsequent
         connects reuse it.
 

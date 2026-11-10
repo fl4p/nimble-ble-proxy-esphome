@@ -218,8 +218,11 @@ esp_err_t clone_post(httpd_req_t *req) {
 
 void init() {
   upstream::init();
-  upstream::start();
-  ESP_LOGI(TAG, "init done; supervisor running");
+  if (upstream::start()) {
+    ESP_LOGI(TAG, "init done; supervisor running");
+  } else {
+    ESP_LOGE(TAG, "init done, but the supervisor is NOT running (no heap)");
+  }
 }
 
 void register_endpoints(void *httpd_handle) {

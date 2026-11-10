@@ -46,7 +46,7 @@ void init();
 
 // Spawn the supervisor task. Must follow ble_backend::start() so
 // NimBLEDevice::init() has run.
-void start();
+bool start();  // false if the supervisor task could not be created
 
 // Lock-free snapshot.
 Status status();

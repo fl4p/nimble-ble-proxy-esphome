@@ -241,6 +241,21 @@
   the define with `compile_commands.json` (look for `-DIP_NAPT_MAX=` on
   `ip4_napt.c`). The mirrored entry size (32 B) must be re-checked on an IDF
   bump.
+- **The C3 needs its own feature profile, `sdkconfig.defaults.esp32c3`.**
+  IDF loads `<defaults>.<target>` automatically. With the full default set,
+  v0.2.1 on a C3 booted with 16 KB free and a 7.5 KB largest block, so every
+  api_server connection (8 KB stack) failed with `xTaskCreate … failed`.
+  On the C3, IRAM and DRAM share one SRAM, so IRAM code is lost heap. The
+  overlay moves WiFi hot paths to flash (+19.4 KB) and turns off clone, NAT
+  and the WS bridge (+6.2 KB static). The 12 KB clone-supervisor stack is
+  not a real saving on that board: its `xTaskCreate` had silently failed
+  there (now logged). Clone-free builds take the SMP passkey via
+  `POST /passkey?val=N`. The no-BLE overlay turns NAT back on for the C3
+  BLE-off image.
+  The next lever is `BT_CTRL_RUN_IN_FLASH_ONLY` (+22.3 KB). It is held back
+  because BLE may misbehave during flash erase. `/stats.json` reports
+  `heap_largest` and `heap_min`, and the boot-complete log line prints both.
+  Watch `largest`: it must stay above 8 KB.
 - **lwIP frees the tables on every disable.** `ip_napt_enable_netif(…, 0)`
   calls `ip_napt_deinit()` when no other netif has NAPT on, so every
   `ap_down()` frees them. Every later enable (OTA-failure resume, a

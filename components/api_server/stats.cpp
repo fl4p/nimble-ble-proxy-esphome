@@ -3,6 +3,7 @@
 #include "ble_backend.h"
 #include "bthome.h"
 #include "connection.h"
+#include "esp_heap_caps.h"
 #include "soc/soc_caps.h"
 #if SOC_TEMP_SENSOR_SUPPORTED
 #include "driver/temperature_sensor.h"
@@ -262,8 +263,8 @@ esp_err_t level_post(httpd_req_t *req) {
 
 #ifdef CONFIG_NBP_SMP
 // SMP passkey (NVS-persisted). Default 123456 — covers most Victron
-// SmartShunts. Runtime-settable via POST /clone?passkey=NNNNNN
-// (merged from the previous /passkey endpoint); the boot-time
+// SmartShunts. Runtime-settable via POST /clone?passkey=NNNNNN, or
+// POST /passkey?val=NNNNNN in builds without clone; the boot-time
 // replay in apply_log_overrides_from_nvs() loads it before any
 // upstream GATT pairing can be triggered.
 
@@ -626,6 +627,31 @@ esp_err_t hostname_post(httpd_req_t *req) {
   return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
 
+#if defined(CONFIG_NBP_SMP) && !defined(CONFIG_NBP_CLONE)
+// POST /passkey?val=N: set the static SMP passkey for paired peers that
+// HA proxies through us (e.g. a SmartShunt with a non-default PIN). Clone
+// builds take this via /clone?passkey= instead. This route exists so a
+// build without clone (the ESP32-C3 profile, issue #2) can still change it.
+esp_err_t passkey_post(httpd_req_t *req) {
+  char query[24];
+  char val[12];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+      httpd_query_key_value(query, "val", val, sizeof(val)) != ESP_OK) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "need val=");
+  }
+  char *end = nullptr;
+  long pin = std::strtol(val, &end, 10);
+  if (end == val || *end != '\0' || pin < 0 || pin > 999999) {
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                               "passkey must be 0..999999");
+  }
+  const char *err = set_passkey(static_cast<uint32_t>(pin));
+  if (err) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, err);
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+#endif
+
 esp_err_t txpower_post(httpd_req_t *req) {
   char query[64];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
@@ -746,9 +772,10 @@ void sample_cpu_pct(int *cpu0, int *cpu1) {
 }
 
 esp_err_t stats_get(httpd_req_t *req) {
-  // 256 covered the base object; the optional ap_rx/ap_tx 64-bit byte
-  // counters (NAT builds) add ~50 chars, so size with headroom.
-  char buf[320];
+  // The base object is ~280 chars worst case (with heap_largest/heap_min
+  // and the capability flags); the optional ap_rx/ap_tx 64-bit byte
+  // counters (NAT builds) add ~60 more.
+  char buf[448];
   size_t n = build_stats_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
@@ -857,12 +884,31 @@ size_t build_stats_json(char *buf, size_t cap) {
 #else
   const char *ble_cap = "false";
 #endif
+  // Compile-time feature flags, so the dashboard can skip polling routes
+  // that aren't registered (each 404 logs a httpd warning into /log).
+#if CONFIG_NBP_CLONE
+  const char *clone_cap = "true";
+#else
+  const char *clone_cap = "false";
+#endif
+#if CONFIG_NBP_NAT_ROUTER
+  const char *nat_cap = "true";
+#else
+  const char *nat_cap = "false";
+#endif
+#if CONFIG_NBP_SMP
+  const char *smp_cap = "true";
+#else
+  const char *smp_cap = "false";
+#endif
   int n = std::snprintf(
       buf, cap,
       "{\"reads\":%lu,\"writes\":%lu,\"notifies\":%lu,\"adverts\":%lu,"
-      "\"connections\":%u,\"heap\":%lu,"
+      "\"connections\":%u,\"heap\":%lu,\"heap_largest\":%lu,"
+      "\"heap_min\":%lu,"
       "\"notify_rx\":%lu,\"last_notify_handle\":%u,"
-      "\"cpu0\":%d,\"cpu1\":%d,\"temp_c\":%.1f,\"ble\":%s",
+      "\"cpu0\":%d,\"cpu1\":%d,\"temp_c\":%.1f,\"ble\":%s,"
+      "\"clone\":%s,\"nat\":%s,\"smp\":%s",
       static_cast<unsigned long>(
           g_reads.load(std::memory_order_relaxed) + cc.reads),
       static_cast<unsigned long>(
@@ -872,9 +918,16 @@ size_t build_stats_json(char *buf, size_t cap) {
       adverts,
       in_use,
       static_cast<unsigned long>(esp_get_free_heap_size()),
+      // Largest single block: what an 8 KB api_server connection stack or
+      // the NAPT table actually needs (issue #2: 16 KB free, 7.5 KB largest).
+      static_cast<unsigned long>(
+          heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)),
+      // Low-water mark since boot.
+      static_cast<unsigned long>(esp_get_minimum_free_heap_size()),
       notify_rx,
       notify_handle,
-      cpu0, cpu1, static_cast<double>(temp_c), ble_cap);
+      cpu0, cpu1, static_cast<double>(temp_c), ble_cap, clone_cap, nat_cap,
+      smp_cap);
   if (n < 0) return 0;
   // NAT-router SoftAP throughput, only when a provider is installed (i.e.
   // NBP_NAT_ROUTER builds). Cumulative byte counters; the dashboard turns
@@ -1725,6 +1778,13 @@ void register_endpoints(httpd_handle_t srv) {
                             .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &hostname_g);
   httpd_register_uri_handler(srv, &hostname_p);
+#if defined(CONFIG_NBP_SMP) && !defined(CONFIG_NBP_CLONE)
+  httpd_uri_t passkey_p = {.uri = "/passkey",
+                           .method = HTTP_POST,
+                           .handler = &passkey_post,
+                           .user_ctx = nullptr};
+  httpd_register_uri_handler(srv, &passkey_p);
+#endif
   httpd_uri_t appinfo_g = {.uri = "/appinfo",
                            .method = HTTP_GET,
                            .handler = &appinfo_get,

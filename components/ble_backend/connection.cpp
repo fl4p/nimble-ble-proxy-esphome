@@ -57,8 +57,8 @@ FreeChangeCallback g_free_cb = nullptr;
 // Static passkey used when a peer requests pairing with KEYBOARD_ONLY
 // I/O (we type, they display). Atomically updatable at runtime via
 // connection::set_passkey() — funnelled through
-// api_server::stats::set_passkey() which is now the only public
-// surface (POST /clone?passkey=NNNNNN). Default 123456 matches most
+// api_server::stats::set_passkey(), reached via POST /clone?passkey=
+// in clone builds or POST /passkey?val= without clone. Default 123456 matches most
 // Victron SmartShunts and many ESP32-based peripherals; fallback
 // "000000" is the other common Victron PIN.
 std::atomic<uint32_t> g_passkey{123456};

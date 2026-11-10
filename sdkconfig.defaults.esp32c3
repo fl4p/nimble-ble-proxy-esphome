@@ -1,0 +1,28 @@
+# esp32c3 target overrides. Applied on top of sdkconfig.defaults only when
+# IDF_TARGET=esp32c3 (IDF loads sdkconfig.defaults.<target> automatically).
+#
+# The full feature set does not fit the C3 (issue #2). Its IRAM and DRAM share
+# one ~320 KB SRAM, and with everything on, v0.2.1 booted with 16 KB free and a
+# largest block of 7.5 KB. That is too small for the 8 KB api_server
+# connection stack, so every Home Assistant connection failed with
+# "xTaskCreate … failed". Measured on the IDF 6.0.3 C3 build (`idf.py size`,
+# DRAM remain 137.9 KB baseline):
+#
+# WiFi hot paths out of IRAM: +19.4 KB static SRAM. The cost is a little
+# WiFi throughput, which doesn't matter for a BLE proxy. The classic ESP32
+# overlay does the same.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+#
+# Features a plain C3 Bluetooth proxy doesn't need: +6.2 KB static, plus the
+# clone supervisor's 12 KB stack, which exists even with cloning disabled at
+# runtime. The NAT SoftAP never fit on the C3 anyway (its heap check refused
+# it), and the dashboard doesn't use the WS bridge. (The BLE dashboard,
+# NBP_BLE_HTTPD, is already off by default on every target.)
+CONFIG_NBP_CLONE=n
+CONFIG_NBP_NAT_ROUTER=n
+CONFIG_NBP_WS_PROXY=n
+#
+# Next lever if this isn't enough: CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY=y frees
+# another 22.3 KB. It is left off because IDF warns BLE "may not work properly
+# during erasing flash" (NVS writes, OTA), and it is untested on C3 hardware.

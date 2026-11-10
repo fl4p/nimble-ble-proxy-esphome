@@ -231,6 +231,10 @@ table#portmaps button.del:hover{background:#3b0a0a}
            DeviceInfo. Save persists to NVS; takes effect on next reboot. -->
       <label>name: <input type=text id=hn maxlength=30 spellcheck=false
                           autocomplete=off></label>
+      <!-- Shown only on builds with SMP but without clone (e.g. ESP32-C3),
+           where POST /passkey is the PIN route; clone builds set the PIN in
+           the clone prompt. -->
+      <button id=pinbtn class=hidden title="SMP passkey used when a proxied device asks to pair">BLE PIN</button>
       <button id=reboot class=danger>reboot device</button>
     </div>
   </div>
@@ -625,7 +629,18 @@ let g_ble = null;
 // chart (.nat-only) stays hidden. Sizing is deferred to here because the
 // container has zero width while hidden (chartW would go negative).
 let g_nat = null;
+// Clone / NAT router compiled in? From the explicit "clone"/"nat" flags in
+// /stats.json (firmware >= 0.2.2). null = unknown (older firmware), which
+// keeps the old behaviour: poll and quietly ignore a 404.
+let g_cloneCap = null;
+let g_natCap = null;
 function applyCaps(s) {
+  if (typeof s.clone !== 'undefined') g_cloneCap = !!s.clone;
+  if (typeof s.nat !== 'undefined') g_natCap = !!s.nat;
+  // POST /passkey exists exactly when SMP is built in and clone is not.
+  if (s.smp === true && s.clone === false) {
+    document.getElementById('pinbtn').classList.remove('hidden');
+  }
   if (g_ble === null && typeof s.ble !== 'undefined') {
     g_ble = !!s.ble;
     if (!g_ble) {
@@ -835,7 +850,7 @@ async function tickDevices() {
     // feature compiled out) shouldn't block the device table.
     const [data, clone] = await Promise.all([
       apiJson('GET /devices'),
-      apiJson('GET /clone').catch(() => null),
+      g_cloneCap === false ? null : apiJson('GET /clone').catch(() => null),
     ]);
     if (clone) {
       // build_clone_json renders 00:00:00:00:00:00 when no target has
@@ -928,7 +943,7 @@ async function tickDevices() {
       // BTHome sensors, Apple Continuity, etc) — connecting to them
       // would just hang. Synthetic clone-target rows always show it so
       // the user can unclone even when the peer is out of range.
-      if (isCloned || x.synthetic || x.conn) {
+      if (g_cloneCap !== false && (isCloned || x.synthetic || x.conn)) {
         const btn = document.createElement('button');
         btn.className = isCloned ? 'clone-btn cloned' : 'clone-btn';
         btn.textContent = isCloned ? 'unclone' : 'clone';
@@ -948,6 +963,7 @@ async function tickDevices() {
 // without CONFIG_NBP_NAT_ROUTER) we silently leave it hidden so the same
 // page works for plain BLE-proxy builds.
 async function loadNat() {
+  if (g_natCap === false) return;  // NAT router not in this build
   let nat;
   try { nat = await apiJson('GET /nat'); }
   catch (e) { return; }
@@ -1004,9 +1020,19 @@ async function loadNat() {
   }
 }
 
-function startPolling() {
+// Bumped by every start/stop, so a startPolling() still awaiting its first
+// stats tick can tell it was superseded and must not install timers.
+let g_pollGen = 0;
+async function startPolling() {
   stopPolling();
-  g_pollTimers.push(setInterval(tickStats,   1000)); tickStats();
+  const gen = g_pollGen;
+  // First stats tick before the device/NAT polls, so the capability flags
+  // are known and a build without clone/NAT never hits their routes.
+  // tickStats swallows its own errors, so a failure here still proceeds
+  // (flags stay null = old poll-and-ignore-404 behaviour).
+  await tickStats();
+  if (gen !== g_pollGen) return;  // stopped or restarted meanwhile
+  g_pollTimers.push(setInterval(tickStats,   1000));
   g_pollTimers.push(setInterval(tickLog,      500)); tickLog();
   g_pollTimers.push(setInterval(tickDevices, 1000)); tickDevices();
   // NAT status changes slowly (client joins, manual edits) — 3 s is plenty.
@@ -1015,6 +1041,7 @@ function startPolling() {
   g_pollTimers.push(setInterval(tickWifiHist, 15000)); tickWifiHist();
 }
 function stopPolling() {
+  g_pollGen++;
   for (const id of g_pollTimers) clearInterval(id);
   g_pollTimers = [];
 }
@@ -1135,6 +1162,17 @@ function wireControls() {
   // Hostname: show dirty marker on edit; save on Enter or blur. POST
   // only persists — apply happens on next boot, so we update the saved
   // baseline and hint via the rebooot button styling.
+  document.getElementById('pinbtn').addEventListener('click', async () => {
+    const v = prompt('BLE PIN (6 digits) for proxied devices that ask to pair:');
+    if (v === null || v.trim() === '') return;  // cancelled
+    if (!/^\d{1,6}$/.test(v.trim())) { alert('PIN must be 0..999999'); return; }
+    try {
+      await apiText('POST /passkey?val=' + v.trim());
+      alert('BLE PIN saved');
+    } catch (err) {
+      alert('Setting the PIN failed: ' + err);
+    }
+  });
   const hn = document.getElementById('hn');
   const hnSave = async () => {
     const v = hn.value.trim();

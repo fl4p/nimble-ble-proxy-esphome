@@ -38,6 +38,7 @@
 
 #include "esp_app_desc.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -275,8 +276,7 @@ extern "C" void app_main() {
   // then calls ble_httpd::activate() to register all services in one
   // shot. register_endpoints() exposes /clone for runtime config
   // changes (target MAC, enable/disable, and SMP passkey under
-  // CONFIG_NBP_SMP — the previous standalone /passkey endpoint was
-  // folded in here).
+  // CONFIG_NBP_SMP; builds without clone get POST /passkey instead).
   ble_clone::config::load();
 #if CONFIG_NBP_CLONE_BOOT_GUARD
   if (clone_force_disable) {
@@ -364,5 +364,11 @@ extern "C" void app_main() {
   schedule_boot_stable_mark();
 #endif
 
-  ESP_LOGI(TAG, "boot complete; main task exiting");
+  // Heap headroom after everything is up. An api_server connection needs
+  // an 8 KB block, so "largest" is the number to watch (issue #2).
+  ESP_LOGI(TAG, "boot complete; heap free=%u largest=%u min=%u; main task exiting",
+           static_cast<unsigned>(esp_get_free_heap_size()),
+           static_cast<unsigned>(
+               heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)),
+           static_cast<unsigned>(esp_get_minimum_free_heap_size()));
 }

@@ -134,9 +134,10 @@ const char *handle_hostname_set(const char *query);
 #ifdef CONFIG_NBP_SMP
 // Persist + apply the static SMP passkey used by the proxy when an
 // upstream peer (BMS, cloned device) demands pairing. Single entry
-// point shared with /clone — the standalone /passkey endpoint was
-// folded into /clone so the dashboard collects target MAC + passkey
-// in one POST. Returns nullptr on success, or a short error literal.
+// point for both HTTP routes: /clone?passkey= in clone builds (the
+// dashboard collects target MAC + passkey in one POST) and
+// /passkey?val= when clone is compiled out. Returns nullptr on
+// success, or a short error literal.
 const char *set_passkey(uint32_t pin);
 #endif
 
@@ -208,9 +209,9 @@ void apply_hostname_from_nvs();
 
 // Registers all dashboard URIs on the OTA httpd: /, /favicon.svg,
 // /stats.json, /log, /level, /trace, /reboot, /txpower, /cpufreq,
-// /scan, /advitvl, /wifips, /hostname, /devices. SMP passkey is
-// reached via /clone (gated on CONFIG_NBP_SMP+CONFIG_NBP_CLONE, see
-// ble_clone/clone.cpp). Only defined when WiFi (and therefore the
+// /scan, /advitvl, /wifips, /hostname, /devices. SMP passkey: via
+// /clone?passkey= in clone builds (see ble_clone/clone.cpp), via
+// POST /passkey?val= when NBP_SMP is on and NBP_CLONE is off. Only defined when WiFi (and therefore the
 // HTTP server) is in the build.
 #if CONFIG_NBP_WIFI
 void register_endpoints(httpd_handle_t srv);

@@ -90,8 +90,8 @@ OwnerId owner_of_client(const void *client);
 
 #ifdef CONFIG_NBP_SMP
 // SMP passkey used when a peer requests KEYBOARD_ONLY pairing.
-// Runtime-mutable via POST /clone?passkey=NNNNNN (merged from the
-// previous /passkey endpoint). Default 123456 covers most Victron
+// Runtime-mutable via POST /clone?passkey=NNNNNN, or POST
+// /passkey?val=NNNNNN in builds without clone. Default 123456 covers most Victron
 // SmartShunts and many ESP32-based peripherals.
 void set_passkey(uint32_t pin);
 uint32_t get_passkey();
