@@ -170,7 +170,8 @@ Cumulative counters and instantaneous state. Always available.
   but the value is free bytes.
 - `notify_rx`, `last_notify_handle` — diagnostic counters from
   `ble_backend`.
-- `cpu0`, `cpu1` — per-core busy% over the inter-poll window. Computed
+- `cpu0`, `cpu1` — per-core busy% over the inter-poll window (`cpu1` is
+  `null` on single-core chips such as the C3; the chart shows a gap). Computed
   from `uxTaskGetSystemState`'s `ulRunTimeCounter` for tasks named
   `IDLE` / `IDLE1`, against `esp_timer_get_time()` as the wall-clock
   denominator. Requires `CONFIG_FREERTOS_USE_TRACE_FACILITY=y` +

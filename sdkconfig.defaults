@@ -103,6 +103,10 @@ CONFIG_NIMBLE_CPP_LOG_LEVEL_INFO=y
 # both live; 16 leaves ~6 slots of slack with no measurable RAM cost.
 CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_LWIP_SO_REUSE=y
+# api_server sets SO_LINGER {1,0} so a dead or reaped HA connection is
+# aborted (RST) instead of lingering in FIN-WAIT with its unsent data
+# (issue #2). Without this option lwIP ignores SO_LINGER.
+CONFIG_LWIP_SO_LINGER=y
 
 # Task watchdog generous enough for BLE scan callbacks + GATT discovery bursts.
 # 30s gives the clone supervisor headroom for long peripheral discoveries

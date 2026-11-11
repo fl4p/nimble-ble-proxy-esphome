@@ -11,6 +11,7 @@
 #if CONFIG_NBP_BLE
 #include "esp_bt.h"  // esp_ble_tx_power_set / esp_power_level_t (BT stack)
 #endif
+#include "esp_attr.h"      // __NOINIT_ATTR for the retained log ring
 #include "esp_app_desc.h"  // esp_app_get_description (project/version/build)
 #include "esp_log.h"
 #include "esp_pm.h"
@@ -77,8 +78,17 @@ constexpr size_t LOG_RING_SIZE = 65536;
 #else
 constexpr size_t LOG_RING_SIZE = 8192;
 #endif
-char g_log_ring[LOG_RING_SIZE];
-uint32_t g_log_seq = 0;
+// The ring lives in .noinit DRAM: not zeroed at boot, so it survives a
+// panic, a watchdog reset or esp_restart() (e.g. the liveness WDT). The next
+// boot re-logs its tail (replay_previous_boot) to show what happened
+// right before an unexplained reboot (issue #2). g_log_magic marks the
+// contents as ours; after power-on the RAM is garbage and is ignored.
+__NOINIT_ATTR char g_log_ring[LOG_RING_SIZE];
+__NOINIT_ATTR uint32_t g_log_seq;
+__NOINIT_ATTR uint32_t g_log_magic;
+constexpr uint32_t LOG_MAGIC = 0x4E42504Cu;  // "NBPL"
+// How much of the previous boot's log to replay (most recent bytes).
+constexpr size_t PREV_TAIL_BYTES = 1536;
 SemaphoreHandle_t g_log_mutex = nullptr;
 vprintf_like_t g_old_vprintf = nullptr;
 
@@ -875,6 +885,15 @@ size_t build_stats_json(char *buf, size_t cap) {
   in_use += cc.connected_centrals;
   int cpu0 = 0, cpu1 = 0;
   sample_cpu_pct(&cpu0, &cpu1);
+  // Single-core chips (C3, C6, ...) have no second idle task, so cpu1
+  // would read a fake 100 %. Report null; the dashboard draws a gap.
+  char cpu1_s[8];
+#if configNUMBER_OF_CORES == 1
+  (void)cpu1;
+  std::snprintf(cpu1_s, sizeof(cpu1_s), "null");
+#else
+  std::snprintf(cpu1_s, sizeof(cpu1_s), "%d", cpu1);
+#endif
   float temp_c = read_temp_c();
   // Compile-time capability flag: the dashboard hides the BLE-only
   // sections (device table, scan duty, adv interval, BLE TX) when false,
@@ -907,7 +926,7 @@ size_t build_stats_json(char *buf, size_t cap) {
       "\"connections\":%u,\"heap\":%lu,\"heap_largest\":%lu,"
       "\"heap_min\":%lu,"
       "\"notify_rx\":%lu,\"last_notify_handle\":%u,"
-      "\"cpu0\":%d,\"cpu1\":%d,\"temp_c\":%.1f,\"ble\":%s,"
+      "\"cpu0\":%d,\"cpu1\":%s,\"temp_c\":%.1f,\"ble\":%s,"
       "\"clone\":%s,\"nat\":%s,\"smp\":%s",
       static_cast<unsigned long>(
           g_reads.load(std::memory_order_relaxed) + cc.reads),
@@ -926,7 +945,7 @@ size_t build_stats_json(char *buf, size_t cap) {
       static_cast<unsigned long>(esp_get_minimum_free_heap_size()),
       notify_rx,
       notify_handle,
-      cpu0, cpu1, static_cast<double>(temp_c), ble_cap, clone_cap, nat_cap,
+      cpu0, cpu1_s, static_cast<double>(temp_c), ble_cap, clone_cap, nat_cap,
       smp_cap);
   if (n < 0) return 0;
   // NAT-router SoftAP throughput, only when a provider is installed (i.e.
@@ -1666,13 +1685,100 @@ void apply_wifi_ps_from_nvs() {
 }
 
 #if CONFIG_NBP_WEB_CONSOLE
+namespace {
+const char *reset_reason_name(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_EXT: return "external pin";
+    case ESP_RST_SW: return "software (esp_restart)";
+    case ESP_RST_PANIC: return "panic";
+    case ESP_RST_INT_WDT: return "interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "task watchdog";
+    case ESP_RST_WDT: return "other watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep sleep";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_SDIO: return "SDIO";
+    case ESP_RST_USB: return "USB";
+    case ESP_RST_PWR_GLITCH: return "power glitch";
+    case ESP_RST_CPU_LOCKUP: return "CPU lockup";
+    default: return "unknown";
+  }
+}
+
+// Copy the most recent PREV_TAIL_BYTES of the previous boot's ring into a
+// malloc'd, NUL-terminated buffer (caller frees), then reset the ring for
+// this boot. Returns nullptr if there is nothing trustworthy to replay.
+// Must run before the vprintf hook is installed (nothing appends yet).
+char *take_previous_boot_tail(esp_reset_reason_t reason) {
+  // Any reset but power-on may have kept DRAM (incl. UNKNOWN, CPU_LOCKUP
+  // on RISC-V, PWR_GLITCH, USB, EXT). The magic word, not this list, is
+  // what rejects garbage, so be inclusive.
+  const bool retained = reason != ESP_RST_POWERON;
+  char *tail = nullptr;
+  if (retained && g_log_magic == LOG_MAGIC && g_log_seq != 0) {
+    const size_t avail = std::min<size_t>(g_log_seq, LOG_RING_SIZE);
+    const size_t take = std::min(avail, PREV_TAIL_BYTES);
+    tail = static_cast<char *>(std::malloc(take + 1));
+    if (tail != nullptr) {
+      const uint32_t from = g_log_seq - static_cast<uint32_t>(take);
+      for (size_t i = 0; i < take; ++i) {
+        tail[i] = g_log_ring[(from + i) % LOG_RING_SIZE];
+      }
+      tail[take] = '\0';
+    }
+  }
+  g_log_seq = 0;
+  g_log_magic = LOG_MAGIC;
+  return tail;
+}
+
+// Re-log the previous boot's tail line by line, ANSI colour codes stripped,
+// so it lands in serial AND this boot's /log ring. The first (probably
+// partial) line is skipped. Panic/WDT backtraces are printed with
+// esp_rom_printf, not through the vprintf hook, so they are NOT in the
+// ring: this shows the app log leading up to the reset.
+void replay_previous_boot(char *tail, esp_reset_reason_t reason) {
+  ESP_LOGW(TAG, "---- last %u bytes of the previous boot (reset: %s) ----",
+           static_cast<unsigned>(std::strlen(tail)), reset_reason_name(reason));
+  char *line = std::strchr(tail, '\n');
+  line = (line != nullptr) ? line + 1 : tail;
+  while (line != nullptr && *line != '\0') {
+    char *nl = std::strchr(line, '\n');
+    if (nl != nullptr) *nl = '\0';
+    // Strip ESC[...m sequences in place.
+    char *w = line;
+    for (const char *r = line; *r != '\0'; ++r) {
+      if (*r == '\x1b' && r[1] == '[') {
+        r += 2;
+        while (*r != '\0' && *r != 'm') ++r;
+        if (*r == '\0') break;
+        continue;
+      }
+      if (*r != '\r') *w++ = *r;
+    }
+    *w = '\0';
+    if (*line != '\0') ESP_LOGW("prevboot", "%s", line);
+    line = (nl != nullptr) ? nl + 1 : nullptr;
+  }
+  ESP_LOGW(TAG, "---- end of previous boot ----");
+}
+}  // namespace
+
 void install_log_hook() {
   if (g_log_mutex != nullptr) return;  // already installed
+  const esp_reset_reason_t reason = esp_reset_reason();
+  char *prev_tail = take_previous_boot_tail(reason);
   g_log_mutex = xSemaphoreCreateMutex();
   g_old_vprintf = esp_log_set_vprintf(&log_vprintf);
   if (g_old_vprintf == nullptr) g_old_vprintf = &std::vprintf;
   ESP_LOGI(TAG, "log hook installed, %u-byte ring",
            static_cast<unsigned>(LOG_RING_SIZE));
+  ESP_LOGI(TAG, "reset reason: %s (%d)", reset_reason_name(reason),
+           static_cast<int>(reason));
+  if (prev_tail != nullptr) {
+    replay_previous_boot(prev_tail, reason);
+    std::free(prev_tail);
+  }
 }
 #endif
 

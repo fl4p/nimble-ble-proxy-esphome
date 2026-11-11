@@ -354,3 +354,45 @@
   boot window anyway (see power-save note above).
 - Skip the ESP-IDF serial-monitor MCP server — it only wraps the blocking
   `monitor` case, which the options above already cover.
+
+## api_server socket teardown + retained log (v0.2.3, issue #2)
+
+- **Close dead API sockets abortively.** A reaped (send-stalled) HA socket
+  closed gracefully stays in FIN-WAIT while lwIP retransmits its unsent data
+  for minutes, holding up to `TCP_SND_BUF` (~5.7 KB) of pbufs each. On a C3
+  a few stall/reconnect rounds drained the heap to `heap_min` 744 B. Now
+  `set_abortive_close()` (SO_LINGER {1,0}) runs before every reap
+  `shutdown(SHUT_RDWR)` and before the connection_task's close, except
+  after a protocol close (DisconnectResponse / Hello reject), whose last
+  frame is still unacked and would be RST away. lwIP only aborts when data
+  is still queued, so quiet disconnects still close normally. **Requires `CONFIG_LWIP_SO_LINGER=y`** (pinned in
+  `sdkconfig.defaults`; default n, and lwIP silently ignores SO_LINGER
+  without it).
+- **`CLIENT_SEND_DEADLINE_MS` is 20 s, not 5 s.** Each reap drops HA *and*
+  releases that client's BLE links (`connection::release_owner`), so a 5 s
+  WiFi stall became a BMS disconnect/reconnect loop (batmon-ha #391). The
+  cost: a stalled client can hold `g_tx_mutex`, and so the NimBLE host task,
+  for up to 20 s. A broadcast shares one 20 s budget across clients (each
+  later client gets at least `CLIENT_SEND_MIN_SHARE_MS`), because a WiFi
+  stall stalls every client at once and N × 20 s would exceed peers' 30 s
+  ATT timeout. The real fix would be no blocking socket I/O on the host
+  task (per-client queue).
+- **The disconnect log line says why** (`reason=peer closed | read error |
+  send failed | send failed or stalled (reaped) | closed by protocol`, plus peer IP).
+  Compare it with the `connection: release …` lines to see which side
+  dropped first.
+- **The `/log` ring is `__NOINIT_ATTR`** (with a magic word). After any
+  reset but power-on, `install_log_hook` re-logs the last 1.5 KB of the
+  previous boot under tag `prevboot`, plus `reset reason: …`. To diagnose
+  an unexplained reboot, read `/log` after it comes back. Panic/WDT
+  backtraces go through `esp_rom_printf`, not the hook, so they are not in
+  it (serial only).
+- **`NimBLEClient: unknown handle: N` is a dropped notification, not noise —
+  don't mute it.** The proxy forwards notifications via
+  `chr->setNotifyCallback` on NimBLEClient's own attribute cache
+  (`bt_handlers.cpp`); the GAP listener in `ble_backend.cpp` only counts.
+  NimBLE-cpp returns before any callback when the handle isn't in that
+  cache, so the notification never reaches HA (issue #2, JK BMS handle 18
+  during discovery). Open question: why is the handle missing (notifies
+  arriving before discovery finishes, or HA skipping discovery with cached
+  services)?

@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "lwip/sockets.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -38,12 +39,20 @@ constexpr UBaseType_t CONN_PRIO = 5;
 // are released). Long enough to ride out TCP retransmission backoff on a
 // lossy but live link.
 //
+// 20 s, up from 5 s (issue #2): on a C3 with a flaky WiFi link, 5 s stalls
+// were common, and each reap dropped HA, released its BLE links (e.g. a BMS)
+// and started a reconnect loop. lwIP's RTO starts at ~1.5 s and doubles, so
+// 20 s covers about three retransmissions. The cost: while a client is
+// stalled, a send from the NimBLE host task can hold g_tx_mutex for up to
+// this long, pausing BLE event delivery for everyone. The controller keeps
+// the BLE links up meanwhile, and ATT's own timeout is 30 s.
+//
 // SO_SNDTIMEO alone is not a bound: it applies per send() call and a call
 // that moves even one byte returns, so a slow-but-steady reader restarts
 // it indefinitely. SO_SNDTIMEO is therefore only the poll granularity
 // (each blocked send() wakes after CLIENT_SEND_POLL_MS and the loop checks
 // the deadline); worst-case hold ≈ deadline + one poll.
-constexpr int CLIENT_SEND_DEADLINE_MS = 5000;
+constexpr int CLIENT_SEND_DEADLINE_MS = 20000;
 constexpr int CLIENT_SEND_POLL_MS = 500;
 
 // TCP keepalive so a half-open client (host crashed or lost power, no
@@ -68,6 +77,9 @@ bool g_started = false;
 struct ClientEntry {
   int fd = -1;
   uint32_t id = 0;
+  // Set by reap_dead when a send to this client failed, so the
+  // disconnect log can say who dropped the connection.
+  bool reaped = false;
 };
 std::array<ClientEntry, proxy::MAX_API_CLIENTS> g_clients;
 std::atomic<uint32_t> g_next_client_id{1};
@@ -82,25 +94,46 @@ SemaphoreHandle_t g_tx_mutex = nullptr;
 // here and shipping the bytes onto whichever socket(s).
 uint8_t g_tx_buf[frame_codec::MAX_HEADER_LEN + proxy::MAX_MESSAGE_SIZE];
 
+// Make the next close/shutdown of `fd` abortive (RST) when data is still
+// queued. A graceful close of a stalled socket leaves lwIP retransmitting
+// that data in FIN-WAIT for minutes, holding up to TCP_SND_BUF of pbufs per
+// dead connection. On a C3, a few stall/reconnect cycles of that drained
+// the heap (issue #2: heap_min 744 B). Needs CONFIG_LWIP_SO_LINGER.
+void set_abortive_close(int fd) {
+  linger lg{};
+  lg.l_onoff = 1;
+  lg.l_linger = 0;
+  if (::setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg)) != 0) {
+    ESP_LOGW(TAG, "fd=%d: SO_LINGER failed (errno=%d)", fd, errno);
+  }
+}
+
 ssize_t socket_read(void *ctx, uint8_t *buf, size_t n) {
   int fd = *static_cast<int *>(ctx);
   return ::recv(fd, buf, n, 0);
 }
 
+// In one broadcast every client after the first gets only what is left of
+// the CLIENT_SEND_DEADLINE_MS budget, but at least this. When the WiFi link
+// itself stalls, all clients stall at once; per-client 20 s deadlines would
+// hold g_tx_mutex (and the NimBLE host task) for up to N × 20 s.
+constexpr int CLIENT_SEND_MIN_SHARE_MS = 1000;
+
 // Write the payload in g_tx_buf to a specific fd. Caller holds g_tx_mutex.
-bool send_locked_to(int fd, uint16_t msg_type, size_t payload_len) {
+bool send_locked_to(int fd, uint16_t msg_type, size_t payload_len,
+                    int deadline_ms = CLIENT_SEND_DEADLINE_MS) {
   size_t start = frame_codec::prepend_header(g_tx_buf, msg_type, payload_len);
   size_t total = (frame_codec::MAX_HEADER_LEN - start) + payload_len;
   const uint8_t *p = g_tx_buf + start;
   size_t sent = 0;
   const TickType_t t0 = xTaskGetTickCount();
-  const TickType_t deadline = pdMS_TO_TICKS(CLIENT_SEND_DEADLINE_MS);
+  const TickType_t deadline = pdMS_TO_TICKS(deadline_ms);
   while (sent < total) {
     if (xTaskGetTickCount() - t0 >= deadline) {
       // Slow reader: progress, but not the whole frame in time. The
       // stream is now mid-frame, so the client must go anyway.
       ESP_LOGW(TAG, "send fd=%d: frame not out within %d ms (%u/%u B)", fd,
-               CLIENT_SEND_DEADLINE_MS, static_cast<unsigned>(sent),
+               deadline_ms, static_cast<unsigned>(sent),
                static_cast<unsigned>(total));
       return false;
     }
@@ -129,6 +162,7 @@ uint32_t register_client(int fd) {
       if (id == 0) id = g_next_client_id.fetch_add(1, std::memory_order_relaxed);
       s.fd = fd;
       s.id = id;
+      s.reaped = false;
       break;
     }
   }
@@ -168,22 +202,29 @@ void reap_dead(const int *dead, uint8_t n_dead) {
   xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
   for (uint8_t i = 0; i < n_dead; ++i) {
     bool still_ours = false;
-    for (const auto &c : g_clients) {
+    for (auto &c : g_clients) {
       if (c.fd == dead[i]) {
         still_ours = true;
+        c.reaped = true;
         break;
       }
     }
     if (still_ours) {
+      // SHUT_RDWR runs lwIP's full close path, so with linger 0 the
+      // queued data is dropped and the PCB freed now (RST), not retried.
+      set_abortive_close(dead[i]);
       ::shutdown(dead[i], SHUT_RDWR);
-      ESP_LOGW(TAG, "send failed on fd=%d — shutdown to reap", dead[i]);
+      ESP_LOGW(TAG, "send failed on fd=%d — abort to reap", dead[i]);
     }
   }
   xSemaphoreGive(g_clients_mutex);
 }
 
+// `*why` is set when this returns false: "peer closed", "read error",
+// or "send failed".
 bool dispatch_one(int fd, uint32_t client_id, uint8_t *rx_payload,
-                  size_t rx_cap, bt_handlers::ClientSubs *subs) {
+                  size_t rx_cap, bt_handlers::ClientSubs *subs,
+                  const char **why) {
   uint16_t msg_type = 0;
   size_t payload_len = 0;
   frame_codec::Error e = frame_codec::read_frame(socket_read, &fd, rx_payload,
@@ -191,6 +232,9 @@ bool dispatch_one(int fd, uint32_t client_id, uint8_t *rx_payload,
   if (e != frame_codec::Error::Ok) {
     if (e != frame_codec::Error::Eof) {
       ESP_LOGW(TAG, "fd=%d read_frame error: %d", fd, static_cast<int>(e));
+      *why = "read error";
+    } else {
+      *why = "peer closed";
     }
     return false;
   }
@@ -212,9 +256,15 @@ bool dispatch_one(int fd, uint32_t client_id, uint8_t *rx_payload,
     if (hr.handled) {
       is_handshake = true;
       if (hr.response_type != 0) {
-        if (!send_locked_to(fd, hr.response_type, hr.payload_len)) keep_open = false;
+        if (!send_locked_to(fd, hr.response_type, hr.payload_len)) {
+          keep_open = false;
+          *why = "send failed";
+        }
       }
-      if (hr.close_after) keep_open = false;
+      if (hr.close_after) {
+        keep_open = false;
+        *why = "closed by protocol";
+      }
     }
     xSemaphoreGive(g_tx_mutex);
   }
@@ -247,6 +297,17 @@ uint32_t id_for_fd(int fd) {
 void connection_task(void *arg) {
   int client_fd = static_cast<int>(reinterpret_cast<intptr_t>(arg));
   const uint32_t client_id = id_for_fd(client_fd);
+  // Captured now: after an abort/RST the PCB is gone and getpeername fails,
+  // which is exactly the case the disconnect log needs it for.
+  char peer_s[16] = "?";
+  {
+    sockaddr_in peer{};
+    socklen_t peer_len = sizeof(peer);
+    if (::getpeername(client_fd, reinterpret_cast<sockaddr *>(&peer),
+                      &peer_len) == 0) {
+      inet_ntoa_r(peer.sin_addr, peer_s, sizeof(peer_s));
+    }
+  }
   ESP_LOGI(TAG, "client connected (fd=%d, id=%lu, total=%u)", client_fd,
            static_cast<unsigned long>(client_id),
            g_active_count.load(std::memory_order_acquire));
@@ -256,10 +317,26 @@ void connection_task(void *arg) {
   uint8_t rx_payload[proxy::MAX_MESSAGE_SIZE];
   bt_handlers::ClientSubs subs;
 
+  const char *why = "unknown";
   while (dispatch_one(client_fd, client_id, rx_payload, sizeof(rx_payload),
-                      &subs)) {
+                      &subs, &why)) {
     // loop
   }
+  // A reaped socket's recv() fails as a side effect of our shutdown(), so
+  // the reap is the real cause. Read it before unregister clears the slot.
+  bool reaped = false;
+  xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
+  for (const auto &c : g_clients) {
+    if (c.fd == client_fd) {
+      reaped = c.reaped;
+      break;
+    }
+  }
+  xSemaphoreGive(g_clients_mutex);
+  if (reaped) why = "send failed or stalled (reaped)";
+  // A protocol close (DisconnectResponse, Hello reject) has just queued its
+  // last frame; aborting would RST it away before HA reads it.
+  const bool abortive = std::strcmp(why, "closed by protocol") != 0;
 
   // Release this client's subscription refs FIRST so any in-flight
   // async sends to other clients don't keep targeting our (now-closing)
@@ -273,8 +350,11 @@ void connection_task(void *arg) {
   xSemaphoreTake(g_tx_mutex, portMAX_DELAY);
   unregister_client(client_fd);
   xSemaphoreGive(g_tx_mutex);
-  ESP_LOGI(TAG, "client disconnected (fd=%d, id=%lu, remaining=%u)",
-           client_fd, static_cast<unsigned long>(client_id),
+  // INFO on purpose: with the per-address "release …" lines that follow,
+  // this shows which side dropped first (batmon reconnect-loop debugging).
+  ESP_LOGI(TAG, "client disconnected (fd=%d, id=%lu, peer=%s, reason=%s, "
+           "remaining=%u); releasing its BLE links",
+           client_fd, static_cast<unsigned long>(client_id), peer_s, why,
            g_active_count.load(std::memory_order_acquire));
   // Drop exactly the BLE links this client opened, even though other
   // clients stay connected. After unregister, so any state callback for
@@ -285,6 +365,10 @@ void connection_task(void *arg) {
     bt_handlers::on_last_client_disconnect();
   }
 
+  // Abortive: a dead peer must not keep this PCB and its queued data alive
+  // in FIN-WAIT for minutes. lwIP only aborts if data is still queued; a
+  // quiet socket closes normally either way. Not for a protocol close.
+  if (abortive) set_abortive_close(client_fd);
   ::shutdown(client_fd, SHUT_RDWR);
   ::close(client_fd);
   vTaskDelete(nullptr);
@@ -397,8 +481,13 @@ bool send_async(uint16_t msg_type, EncodeFn encode, void *ctx) {
       if (c.fd >= 0) fds_snapshot[n_fds++] = c.fd;
     }
     xSemaphoreGive(g_clients_mutex);
+    const TickType_t t0 = xTaskGetTickCount();
     for (uint8_t i = 0; i < n_fds; ++i) {
-      if (send_locked_to(fds_snapshot[i], msg_type, n)) {
+      const int used_ms =
+          static_cast<int>(pdTICKS_TO_MS(xTaskGetTickCount() - t0));
+      const int budget_ms =
+          std::max(CLIENT_SEND_DEADLINE_MS - used_ms, CLIENT_SEND_MIN_SHARE_MS);
+      if (send_locked_to(fds_snapshot[i], msg_type, n, budget_ms)) {
         any_sent = true;
       } else {
         // Peer is gone (EPIPE / ECONNRESET / EBADF). Without reaping,

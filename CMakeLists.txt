@@ -7,7 +7,7 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 project(nimble_ble_proxy
     LANGUAGES C CXX
-    VERSION 0.2.2)
+    VERSION 0.2.3)
 
 # DHCP client-hostname capture (NAT/SoftAP only). IDF 5.5's DHCP server
 # discards option 12, so we inject a custom lwIP hook header to read it —
