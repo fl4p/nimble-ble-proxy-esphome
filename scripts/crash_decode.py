@@ -90,12 +90,28 @@ def decode_core(core, elf_override):
     if elf_override:
         return subprocess.run(['esp-coredump', 'info_corefile', '--core-format', 'raw',
                                '-c', core, elf_override]).returncode
+    # The ELF-format core stores app_elf_sha256 as 64 hex characters;
+    # elf_archive's own auto-match looks for the 32 raw bytes and misses it
+    # (falls back to "latest flashed"), so match here and pass --sha.
+    data = open(core, 'rb').read()
+    args = []
+    blobs = os.path.join(os.environ['ELF_ARCHIVE_DIR'], 'blobs')
+    for name in sorted(os.listdir(blobs)) if os.path.isdir(blobs) else []:
+        if name.endswith('.json'):
+            sha = json.load(open(os.path.join(blobs, name)))['sha']
+            if sha.encode() in data or bytes.fromhex(sha) in data:
+                args = ['--sha', sha]
+                print(f'core matches archived build {sha[:16]}', file=sys.stderr)
+                break
+    if not args:
+        sys.exit('no archived ELF matches this core (pass --elf)')
     return subprocess.run([sys.executable, os.path.join(ROOT, 'etc', 'idf-devtools',
                                                         'elf_archive.py'),
-                           'decode', core]).returncode
+                           'decode', *args, core]).returncode
 
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)  # keep order with subprocesses
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('json', nargs='?', help='saved GET /crash output')

@@ -433,6 +433,10 @@
   via `idf_ext.py`; after an OTA run `python3 etc/idf-devtools/elf_archive.py
   archive <device> --method ota --build-dir <dir>`. `esp-coredump` only
   decodes against the exact ELF (`CONFIG_APP_RETRIEVE_LEN_ELF_SHA=64`).
+  The ELF core stores that SHA as 64 hex chars; `elf_archive.py decode`'s
+  own auto-match searches for the 32 raw bytes, misses, and silently falls
+  back to "latest build flashed", so `crash_decode.py` matches the hex itself
+  and passes `--sha`.
   After a fresh clone: `git submodule update --init etc/idf-devtools`.
 - **RAM cost** (IDF 5.5, measured with `idf.py size`): S3 −4.3 KB DIRAM,
   C3 −3.2 KB DRAM vs. both off. Most of it is the core dump (1.8 KB own stack,
