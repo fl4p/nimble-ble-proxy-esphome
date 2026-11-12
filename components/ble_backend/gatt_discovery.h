@@ -20,6 +20,7 @@ enum class Status : int32_t {
   TooManyServices = -2,
   EncodeFailed = -3,
   SendFailed = -4,
+  NoMemory = -5,
 };
 
 // Run discovery on a connected slot owned by API client `owner` (see
@@ -32,5 +33,11 @@ enum class Status : int32_t {
 // serially on its own api_client task, so two discoveries never walk the
 // same NimBLEClient concurrently (their service lists cannot interleave).
 Status run(uint64_t address, uint32_t owner);
+
+#if NBP_OOM_SELFTEST
+// QEMU-only: run() for this address skips the BLE link and discovery and
+// goes straight to the encode-ctx allocation and the reply.
+inline constexpr uint64_t kOomSelftestAddress = 0x0000DEADBEEF0001ULL;
+#endif
 
 }  // namespace ble_backend::gatt_discovery

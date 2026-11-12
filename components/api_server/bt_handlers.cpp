@@ -27,7 +27,6 @@
 
 #include <atomic>
 #include <cstring>
-#include <vector>
 
 namespace api_server::bt_handlers {
 
@@ -365,18 +364,31 @@ bool handle_read(uint16_t msg_type, const uint8_t *payload, size_t payload_len,
     send_gatt_error(ctx.client_id, req.address, req.handle, -1);
     return true;
   }
-  std::string value;
+  proxyapi_BluetoothGATTReadResponse rsp =
+      proxyapi_BluetoothGATTReadResponse_init_zero;
+  rsp.address = req.address;
+  rsp.handle = req.handle;
+  // Copy straight out of the NimBLEAttValue (calloc/realloc-backed, null
+  // on OOM). Converting it to std::string allocated values > 15 B through
+  // the throwing operator new, which aborts on OOM (no exceptions).
+  auto take = [&rsp](const NimBLEAttValue &v) {
+    size_t copy = v.size();
+    if (copy > sizeof(rsp.data.bytes)) copy = sizeof(rsp.data.bytes);
+    if (v.data() == nullptr) copy = 0;
+    if (copy > 0) std::memcpy(rsp.data.bytes, v.data(), copy);
+    rsp.data.size = copy;
+  };
   bool ok = false;
   if (msg_type == proxyapi::MSG_BLUETOOTH_GATT_READ_REQUEST) {
     auto *chr = char_at(client, req.handle);
     if (chr != nullptr) {
-      value = chr->readValue();
+      take(chr->readValue());
       ok = true;
     }
   } else {
     auto *dsc = desc_at(client, req.handle);
     if (dsc != nullptr) {
-      value = dsc->readValue();
+      take(dsc->readValue());
       ok = true;
     }
   }
@@ -385,14 +397,6 @@ bool handle_read(uint16_t msg_type, const uint8_t *payload, size_t payload_len,
     return true;
   }
 
-  proxyapi_BluetoothGATTReadResponse rsp =
-      proxyapi_BluetoothGATTReadResponse_init_zero;
-  rsp.address = req.address;
-  rsp.handle = req.handle;
-  size_t copy = value.size();
-  if (copy > sizeof(rsp.data.bytes)) copy = sizeof(rsp.data.bytes);
-  std::memcpy(rsp.data.bytes, value.data(), copy);
-  rsp.data.size = copy;
   api_server::stats::record_read();
   api_server::send_to(ctx.client_id, proxyapi::MSG_BLUETOOTH_GATT_READ_RESPONSE,
                       &encode_read_response, &rsp);

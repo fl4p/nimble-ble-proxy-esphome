@@ -28,6 +28,7 @@ idf_component_register(
         esp_event
         esp_timer
         freertos
+        oom_guard
 )
 
 # Pull in NimBLE-CPP headers/lib. The esp-nimble-cpp dependency in

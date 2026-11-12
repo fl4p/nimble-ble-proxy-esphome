@@ -15,4 +15,5 @@ idf_component_register(
         serial_provision
         crash_capture
         esp_app_format
+        oom_guard
 )

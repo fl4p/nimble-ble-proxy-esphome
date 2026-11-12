@@ -5,6 +5,14 @@ set(EXTRA_COMPONENT_DIRS components)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
+# QEMU OOM self-test only (idf.py -B build-qemu-oom -DNBP_OOM_SELFTEST=1 …):
+# app_main runs api_server::oom_selftest instead of the firmware. Defined for
+# every component (main, api_server, ble_backend's gatt_discovery seam).
+# Never in a firmware build.
+if(NBP_OOM_SELFTEST)
+    idf_build_set_property(COMPILE_DEFINITIONS "NBP_OOM_SELFTEST=1" APPEND)
+endif()
+
 project(nimble_ble_proxy
     LANGUAGES C CXX
     VERSION 0.2.3)

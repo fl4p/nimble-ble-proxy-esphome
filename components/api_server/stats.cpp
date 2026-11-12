@@ -25,6 +25,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs.h"
+#include "oom_guard.h"
 #include "proxy_config.h"
 #include "scanner.h"
 
@@ -784,8 +785,8 @@ void sample_cpu_pct(int *cpu0, int *cpu1) {
 esp_err_t stats_get(httpd_req_t *req) {
   // The base object is ~280 chars worst case (with heap_largest/heap_min
   // and the capability flags); the optional ap_rx/ap_tx 64-bit byte
-  // counters (NAT builds) add ~60 more.
-  char buf[448];
+  // counters (NAT builds) add ~60 more, the oom counters ~70.
+  char buf[512];
   size_t n = build_stats_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
@@ -959,6 +960,17 @@ size_t build_stats_json(char *buf, size_t cap) {
         buf + n, cap - n, ",\"ap_rx\":%llu,\"ap_tx\":%llu",
         static_cast<unsigned long long>(nt.ap_rx_bytes),
         static_cast<unsigned long long>(nt.ap_tx_bytes));
+    if (m > 0) n += m;
+  }
+  // Failed heap allocations since boot, every caller (oom_guard's heap
+  // hook), and the throwing-new calls that waited for heap and recovered.
+  // Near-misses: nonzero means something ran out, handled or not.
+  if (static_cast<size_t>(n) < cap) {
+    int m = std::snprintf(
+        buf + n, cap - n, ",\"oom\":%lu,\"oom_last_size\":%lu,\"oom_new_waits\":%lu",
+        static_cast<unsigned long>(oom_guard::count()),
+        static_cast<unsigned long>(oom_guard::last_size()),
+        static_cast<unsigned long>(oom_guard::new_recovered()));
     if (m > 0) n += m;
   }
   if (static_cast<size_t>(n) < cap) {

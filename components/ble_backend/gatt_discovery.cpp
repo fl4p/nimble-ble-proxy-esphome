@@ -9,17 +9,24 @@
 #include "NimBLERemoteDescriptor.h"
 #include "NimBLERemoteService.h"
 #include "NimBLEUUID.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "oom_guard.h"
 #include "pb_encode.h"
 
 #include <cstring>
-#include <memory>
+#include <vector>
 
 namespace ble_backend::gatt_discovery {
 
 namespace {
 
 constexpr const char *TAG = "ble.gatt.disc";
+
+// GATT error code sent for an allocation failure (HA logs it with the
+// address; bleak-esphome fails the get_services call).
+constexpr int32_t kErrNoMemory = -3;
+constexpr size_t kDiscoveryMinFreeHeap = 6 * 1024;
 
 // Pack a NimBLEUUID into the proto's (short_uuid OR uuid[hi,lo]) layout.
 // aioesphomeapi's uuid_from_pair(hi, lo) expects [0]=high 64 bits,
@@ -71,6 +78,10 @@ void pack_uuid(const NimBLEUUID &uuid, uint32_t *short_out,
 // api_client tasks have only 8 KiB stack, so this MUST NOT live on the
 // stack of run(). send_to invokes the encode callback synchronously
 // before returning, so unique_ptr scoped to run() is sufficient.
+//
+// Allocated with oom_guard::make_unique, NOT std::make_unique: without
+// C++ exceptions a failed throwing new aborts (field crash 2026-11-12,
+// heap_min 244 B, api_client task), so the nullptr check was dead code.
 struct ServicesEncodeCtx {
   proxyapi_BluetoothGATTGetServicesResponse msg;
 };
@@ -139,9 +150,9 @@ void emit_error(uint32_t owner, uint64_t address, int32_t err) {
                    &encode_error, &ctx);
 }
 
-}  // namespace
-
-Status run(uint64_t address, uint32_t owner) {
+// Look up the owner's link, walk its attribute table. On failure the error
+// reply is already sent; returns nullptr.
+NimBLEClient *discover(uint64_t address, uint32_t owner, Status *st) {
   auto *client =
       static_cast<NimBLEClient *>(connection::client_for(address, owner));
   if (client == nullptr) {
@@ -149,11 +160,29 @@ Status run(uint64_t address, uint32_t owner) {
              static_cast<unsigned long long>(address),
              static_cast<unsigned long>(owner));
     emit_error(owner, address, /*err=*/-1);
-    return Status::NotConnected;
+    *st = Status::NotConnected;
+    return nullptr;
   }
 
   ESP_LOGI(TAG, "discover %012llx",
            static_cast<unsigned long long>(address));
+
+  // discoverAttributes() builds NimBLE-cpp's attribute objects with the
+  // throwing operator new, which we cannot make nothrow; on OOM it waits
+  // CONFIG_NBP_OOM_NEW_WAIT_MS and then aborts (oom_guard.h). Refuse to
+  // start it with less than kDiscoveryMinFreeHeap left. A heuristic, not a
+  // guarantee: ~100 attribute objects of ~60-100 B for the largest peers we
+  // serve, plus vector growth.
+  const size_t free_now = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+  if (free_now < kDiscoveryMinFreeHeap) {
+    ESP_LOGW(TAG, "OOM: %u B free < %u B, not starting discovery of %012llx",
+             static_cast<unsigned>(free_now),
+             static_cast<unsigned>(kDiscoveryMinFreeHeap),
+             static_cast<unsigned long long>(address));
+    emit_error(owner, address, kErrNoMemory);
+    *st = Status::NoMemory;
+    return nullptr;
+  }
 
   // Force a fresh walk so cached state from a prior session is rebuilt.
   // discoverAttributes() walks services → characteristics → descriptors.
@@ -161,20 +190,50 @@ Status run(uint64_t address, uint32_t owner) {
     ESP_LOGW(TAG, "discoverAttributes failed for %012llx",
              static_cast<unsigned long long>(address));
     emit_error(owner, address, /*err=*/-2);
-    return Status::EncodeFailed;
+    *st = Status::EncodeFailed;
+    return nullptr;
   }
+  return client;
+}
 
-  auto ctx = std::make_unique<ServicesEncodeCtx>();
+}  // namespace
+
+Status run(uint64_t address, uint32_t owner) {
+  NimBLEClient *client = nullptr;
+#if NBP_OOM_SELFTEST
+  // QEMU OOM self-test (no BLE): skip the link, exercise the allocation
+  // and the reply with an empty service list.
+  if (address != kOomSelftestAddress) {
+#endif
+    Status st = Status::Ok;
+    client = discover(address, owner, &st);
+    if (client == nullptr) return st;
+#if NBP_OOM_SELFTEST
+  }
+#endif
+
+  // After the walk, not before: holding ~25 KiB through discovery would
+  // squeeze the NimBLE allocations above, whose failure aborts.
+  auto ctx = oom_guard::make_unique<ServicesEncodeCtx>();
   if (ctx == nullptr) {
-    ESP_LOGW(TAG, "OOM allocating services encode ctx");
-    emit_error(owner, address, /*err=*/-3);
-    return Status::EncodeFailed;
+    ESP_LOGW(TAG, "OOM: no %u B for the services encode ctx (%012llx); "
+             "free %u largest %u",
+             static_cast<unsigned>(sizeof(ServicesEncodeCtx)),
+             static_cast<unsigned long long>(address),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_DEFAULT)),
+             static_cast<unsigned>(
+                 heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)));
+    emit_error(owner, address, kErrNoMemory);
+    return Status::NoMemory;
   }
   ctx->msg = proxyapi_BluetoothGATTGetServicesResponse_init_zero;
   ctx->msg.address = address;
   ctx->msg.services_count = 0;
 
-  const auto &services = client->getServices(/*refresh=*/false);
+  static const std::vector<NimBLERemoteService *> kNoServices;
+  const auto &services = client != nullptr
+                             ? client->getServices(/*refresh=*/false)
+                             : kNoServices;
 
   // Hard cap by the static array bound; over-budget peripherals get
   // silently truncated for v1 (logged so we notice).

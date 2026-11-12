@@ -354,7 +354,17 @@ ConnectStatus connect(uint64_t address, uint8_t address_type, OwnerId owner,
   s->owner = owner;
   s->abort = false;
   if (s->client == nullptr) {
+    // Created once per slot and kept. createClient() returns nullptr when
+    // NimBLE's client table is full (the clone takes one too); its own
+    // `new NimBLEClient` is the throwing form (oom_guard: waits, then
+    // aborts), which we cannot change.
     s->client = NimBLEDevice::createClient();
+    if (s->client == nullptr) {
+      clear_locked(s);
+      xSemaphoreGive(g_mutex);
+      ESP_LOGW(TAG, "createClient failed (NimBLE client table full?)");
+      return ConnectStatus::NoSlot;
+    }
     s->client->setClientCallbacks(&g_client_cb, /*deleteCallbacks=*/false);
     // NimBLE-Cpp setConnectTimeout takes milliseconds (default 30000).
     s->client->setConnectTimeout(proxy::CONNECT_TIMEOUT_MS);

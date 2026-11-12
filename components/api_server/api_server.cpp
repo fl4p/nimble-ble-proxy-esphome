@@ -7,6 +7,7 @@
 #include "proxy_config.h"
 
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -54,6 +55,8 @@ constexpr UBaseType_t CONN_PRIO = 5;
 // the deadline); worst-case hold ≈ deadline + one poll.
 constexpr int CLIENT_SEND_DEADLINE_MS = 20000;
 constexpr int CLIENT_SEND_POLL_MS = 500;
+// Sleep between send() retries after ENOMEM/ENOBUFS (heap exhausted).
+constexpr int SEND_NOMEM_RETRY_MS = 20;
 
 // TCP keepalive so a half-open client (host crashed or lost power, no
 // FIN/RST) is detected even when we send it nothing: ~30 s idle + 3 × 10 s
@@ -128,6 +131,7 @@ bool send_locked_to(int fd, uint16_t msg_type, size_t payload_len,
   size_t sent = 0;
   const TickType_t t0 = xTaskGetTickCount();
   const TickType_t deadline = pdMS_TO_TICKS(deadline_ms);
+  bool logged_nomem = false;
   while (sent < total) {
     if (xTaskGetTickCount() - t0 >= deadline) {
       // Slow reader: progress, but not the whole frame in time. The
@@ -140,9 +144,23 @@ bool send_locked_to(int fd, uint16_t msg_type, size_t payload_len,
     ssize_t r = ::send(fd, p + sent, total - sent, MSG_NOSIGNAL);
     if (r < 0) {
       // EAGAIN/EWOULDBLOCK = one SO_SNDTIMEO poll with no progress; retry
-      // until the frame deadline. Anything else: peer gone. Caller reaps.
-      if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-      ESP_LOGW(TAG, "send fd=%d failed: errno=%d", fd, errno);
+      // until the frame deadline. ENOMEM/ENOBUFS = lwIP could not get a
+      // pbuf: the heap is exhausted, not the peer gone, so also retry
+      // until the deadline (after a short sleep — it returns at once).
+      // Anything else: peer gone. Caller reaps.
+      const int e = errno;
+      if (e == EAGAIN || e == EWOULDBLOCK) continue;
+      if (e == ENOMEM || e == ENOBUFS) {
+        if (!logged_nomem) {
+          ESP_LOGW(TAG, "send fd=%d: no memory for the frame (errno=%d, "
+                   "free %u); retrying until the deadline", fd, e,
+                   static_cast<unsigned>(esp_get_free_heap_size()));
+          logged_nomem = true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(SEND_NOMEM_RETRY_MS));
+        continue;
+      }
+      ESP_LOGW(TAG, "send fd=%d failed: errno=%d", fd, e);
       return false;
     }
     sent += static_cast<size_t>(r);

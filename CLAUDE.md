@@ -506,3 +506,44 @@
   PASS|FAIL`. Run QEMU without the download strap (`idf.py qemu` adds none;
   `strap_mode=0x07` waits for UART download). IDF logs land in the stdout JSON
   dump, so strip `ESC[…m` log lines before parsing it.
+
+## Heap exhaustion is an error, not an abort (`components/oom_guard`)
+
+- **Without C++ exceptions a failed throwing `new` aborts**, and so does
+  `new (std::nothrow)` with stock libstdc++: since GCC 9 the nothrow form is
+  `try { return ::operator new(n); } catch (...) { return nullptr; }`, and
+  IDF's `__wrap___cxa_allocate_exception` stub aborts before the catch. The
+  field crash of 2026-11-12 (`std::make_unique<ServicesEncodeCtx>` in
+  `gatt_discovery`, heap_min 244 B) was this; its `if (ctx == nullptr)` was
+  dead code. Exceptions stay off (`CONFIG_COMPILER_CXX_EXCEPTIONS=n`): they
+  would cost flash and an emergency pool, and NimBLE-cpp is not
+  exception-safe anyway.
+- **`oom_guard.cpp` replaces the global `operator new` family** (linked
+  `WHOLE_ARCHIVE`). Nothrow new/new[] = `malloc`, nullptr on failure. The
+  throwing forms, which only library code reaches (NimBLE-cpp `new
+  NimBLEClient`/remote attributes, libstdc++ containers), wait up to
+  `CONFIG_NBP_OOM_NEW_WAIT_MS` (2 s, 10 ms steps, task context only) for the
+  heap to come back, then abort with `OOM: operator new(N) failed after M ms
+  wait; free F largest L`, which `/crash` shows. They must never return
+  nullptr: callers do not check and GCC assumes non-null.
+  `check_new_override.py` fails the build (and deletes the ELF) unless the
+  link map shows all four symbols defined by `oom_guard.cpp.obj`.
+- **Our code allocates only through `oom_guard::make<T>()` /
+  `oom_guard::make_unique<T>()` or `malloc`, and handles nullptr.** No
+  `std::string`/`std::vector`/`std::make_unique` in runtime paths; read
+  advert fields with `ble_backend/ad_parse.h`, not NimBLE's `std::string`
+  getters (per advert, on the host task). Init-time and clone-session
+  NimBLE-cpp calls that allocate internally remain (see the commit message).
+- **`/stats.json`: `oom`** = failed heap allocations since boot, every caller
+  (heap_caps failed-alloc hook), handled or not; `oom_last_size`; and
+  `oom_new_waits` = throwing-new calls that waited and then got memory. The
+  `oom` log tag reports new failures every 2 s.
+- **QEMU test:** `idf.py -B build-qemu-oom -DIDF_TARGET=esp32s3
+  -DNBP_OOM_SELFTEST=1 build`, then `idf.py -B build-qemu-oom qemu` (IDF
+  6.0.3; it rebuilds first, so edit nothing in between). It runs the real
+  api_server on lwIP loopback, takes the heap away for real, and prints
+  `OOM-SELFTEST <step>: PASS|FAIL` for GetServices (error -3 reply),
+  nothrow new, throwing new recovering after a wait, an API send that
+  recovers, and one that fails and reaps the client. The last step must end
+  in the `OOM: operator new(2048)` abort. Compile define only, never a
+  firmware build.

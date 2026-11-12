@@ -13,6 +13,7 @@ idf_component_register(
         "handshake.cpp"
         "bt_handlers.cpp"
         "stats.cpp"
+        "oom_selftest.cpp"
     INCLUDE_DIRS
         "."
         "../../include"
@@ -33,6 +34,7 @@ idf_component_register(
         lwip
         nvs_flash
         liveness_wdt
+        oom_guard
 )
 
 # Patch the managed esp-nimble-cpp header to add `setNotifyCallback`.

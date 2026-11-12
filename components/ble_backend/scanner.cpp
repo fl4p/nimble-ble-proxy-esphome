@@ -1,5 +1,6 @@
 #include "scanner.h"
 
+#include "ad_parse.h"
 #include "address.h"
 #include "api_proto.h"
 #include "bthome.h"
@@ -110,8 +111,31 @@ void prune_stale_devices() {
 // pointer) or nullptr when nothing recognized. Manufacturer ID wins
 // over service-UUID when both match because the company ID is usually
 // the more specific signal (e.g. "Ruuvi" beats "EnvSense").
-const char *classify_device(const NimBLEAdvertisedDevice *dev) {
-  std::string mfg = dev->getManufacturerData();
+//
+// Reads the raw payload (ad_parse.h), never NimBLE's std::string getters:
+// this runs on the host task for every advert and must not allocate.
+struct Bytes {
+  const uint8_t *p = nullptr;
+  size_t n = 0;
+  size_t size() const { return n; }
+  uint8_t operator[](size_t i) const { return p[i]; }
+  const uint8_t *data() const { return p; }
+};
+
+// 128-bit UUID written MSB-first (as printed) vs. the LE bytes on air.
+bool uuid128_eq(const uint8_t *le, const uint8_t (&be)[16]) {
+  for (int i = 0; i < 16; ++i) {
+    if (le[i] != be[15 - i]) return false;
+  }
+  return true;
+}
+
+const char *classify_device(const uint8_t *payload, size_t plen) {
+  Bytes mfg;
+  {
+    ad::Field f{};
+    if (ad::find(payload, plen, ad::kManufacturer, &f)) mfg = Bytes{f.value, f.len};
+  }
   if (mfg.size() >= 2) {
     auto b0 = static_cast<uint8_t>(mfg[0]);
     auto b1 = static_cast<uint8_t>(mfg[1]);
@@ -198,55 +222,75 @@ const char *classify_device(const NimBLEAdvertisedDevice *dev) {
   }
   // Fall through to service UUID inspection for devices that don't
   // emit manufacturer-data (BTHome sensors, Eddystone, ESS-only
-  // peripherals, etc).
-  uint8_t n = dev->getServiceUUIDCount();
-  // 128-bit vendor-specific UUIDs — built once at first call. Most
-  // proprietary protocols (Tesla phone-key, Nordic UART, TI SensorTag,
-  // Bose Connect, Pebble) live in this space rather than SIG-allocated
-  // 16-bit UUIDs. Equality test relies on NimBLEUUID::operator==.
-  static const NimBLEUUID TESLA_KEY("74278BDA-B644-4520-8F0C-720EAF059935");
-  static const NimBLEUUID NORDIC_UART("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
-  static const NimBLEUUID TI_SENSORTAG("F000AA00-0451-4000-B000-000000000000");
-  for (uint8_t i = 0; i < n; ++i) {
-    NimBLEUUID u = dev->getServiceUUID(i);
-    uint8_t bs = u.bitSize();
-    if (bs == 16) {
-      const uint8_t *v = u.getValue();
-      uint16_t u16 = uint16_t(v[0]) | (uint16_t(v[1]) << 8);
+  // peripherals, etc). 16-bit lists first, then 128-bit — the order
+  // NimBLE's getServiceUUID(i) enumerated them in.
+  const char *tag16 = nullptr;
+  ad::for_each(payload, plen, [&](const ad::Field &f) {
+    if (f.type != ad::kIncomplete16 && f.type != ad::kComplete16) return false;
+    for (size_t k = 0; k + 2 <= f.len; k += 2) {
+      uint16_t u16 = uint16_t(f.value[k]) | (uint16_t(f.value[k + 1]) << 8);
       switch (u16) {
-        case 0xFCD2: return "BTHome";
-        case 0xFE9F: case 0xFE2C: return "FastPair";
-        case 0xFEAA: return "Eddystone";
-        case 0xFD6F: return "ENS";
-        case 0xFE95: return "MiBeacon";
-        case 0xFDA0: return "SwitchBot";
-        case 0x180F: return "Battery";
-        case 0x181A: return "EnvSense";
-        case 0x1812: return "HID";
-        case 0x180D: return "HeartRate";
-        case 0x1816: return "Cycling";
-        case 0x180A: return "DevInfo";
+        case 0xFCD2: tag16 = "BTHome"; break;
+        case 0xFE9F: case 0xFE2C: tag16 = "FastPair"; break;
+        case 0xFEAA: tag16 = "Eddystone"; break;
+        case 0xFD6F: tag16 = "ENS"; break;
+        case 0xFE95: tag16 = "MiBeacon"; break;
+        case 0xFDA0: tag16 = "SwitchBot"; break;
+        case 0x180F: tag16 = "Battery"; break;
+        case 0x181A: tag16 = "EnvSense"; break;
+        case 0x1812: tag16 = "HID"; break;
+        case 0x180D: tag16 = "HeartRate"; break;
+        case 0x1816: tag16 = "Cycling"; break;
+        case 0x180A: tag16 = "DevInfo"; break;
         default: break;
       }
-    } else if (bs == 128) {
-      if (u == TESLA_KEY) return "Tesla";
-      if (u == NORDIC_UART) return "NordicUART";
-      if (u == TI_SENSORTAG) return "TI SensorTag";
+      if (tag16 != nullptr) return true;
     }
-  }
+    return false;
+  });
+  if (tag16 != nullptr) return tag16;
+  // 128-bit vendor-specific UUIDs. Most proprietary protocols (Tesla
+  // phone-key, Nordic UART, TI SensorTag) live in this space rather than
+  // SIG-allocated 16-bit UUIDs.
+  static const uint8_t TESLA_KEY[16] = {
+      0x74, 0x27, 0x8B, 0xDA, 0xB6, 0x44, 0x45, 0x20,
+      0x8F, 0x0C, 0x72, 0x0E, 0xAF, 0x05, 0x99, 0x35};
+  static const uint8_t NORDIC_UART[16] = {
+      0x6E, 0x40, 0x00, 0x01, 0xB5, 0xA3, 0xF3, 0x93,
+      0xE0, 0xA9, 0xE5, 0x0E, 0x24, 0xDC, 0xCA, 0x9E};
+  static const uint8_t TI_SENSORTAG[16] = {
+      0xF0, 0x00, 0xAA, 0x00, 0x04, 0x51, 0x40, 0x00,
+      0xB0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  const char *tag128 = nullptr;
+  ad::for_each(payload, plen, [&](const ad::Field &f) {
+    if (f.type != ad::kIncomplete128 && f.type != ad::kComplete128) return false;
+    for (size_t k = 0; k + 16 <= f.len; k += 16) {
+      const uint8_t *u = f.value + k;
+      if (uuid128_eq(u, TESLA_KEY)) tag128 = "Tesla";
+      else if (uuid128_eq(u, NORDIC_UART)) tag128 = "NordicUART";
+      else if (uuid128_eq(u, TI_SENSORTAG)) tag128 = "TI SensorTag";
+      if (tag128 != nullptr) return true;
+    }
+    return false;
+  });
+  if (tag128 != nullptr) return tag128;
   return nullptr;
 }
 #endif  // CONFIG_NBP_DEV_DETAILS
 
 void record_device(const NimBLEAdvertisedDevice *dev, uint64_t addr,
                    uint8_t addr_type) {
-  // Parse outside the mutex — getName() walks the AD list.
-  std::string nm = dev->getName();
+  // Parse outside the mutex. Read the name straight from the payload:
+  // getName() returns a std::string (heap for names > 15 B, on the host
+  // task, through the throwing operator new).
+  const auto &payload = dev->getPayload();
+  ad::Field nm{};
+  if (!ad::find_name(payload.data(), payload.size(), &nm)) nm.len = 0;
   int8_t rssi = static_cast<int8_t>(dev->getRSSI());
 #if CONFIG_NBP_DEV_DETAILS
   uint16_t app = dev->haveAppearance() ? dev->getAppearance() : 0;
   bool conn = dev->isConnectable();
-  const char *tag = classify_device(dev);
+  const char *tag = classify_device(payload.data(), payload.size());
 #endif
   uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
@@ -267,10 +311,10 @@ void record_device(const NimBLEAdvertisedDevice *dev, uint64_t addr,
 #endif
   // Persist last non-empty name — many devices put it only in the scan
   // response, so plain adv packets don't overwrite a known name.
-  if (!nm.empty()) {
-    size_t k = nm.size();
+  if (nm.len > 0) {
+    size_t k = nm.len;
     if (k >= sizeof(row.name)) k = sizeof(row.name) - 1;
-    std::memcpy(row.name, nm.data(), k);
+    std::memcpy(row.name, nm.value, k);
     row.name[k] = 0;
   }
   xSemaphoreGive(g_mutex);
@@ -361,11 +405,14 @@ class AdvCallbacks : public NimBLEScanCallbacks {
 
 #if CONFIG_NBP_BTHOME
     // BTHome v2: 16-bit service UUID 0xFCD2 in service-data AD field.
-    // NimBLE returns an empty string when the field is absent.
-    std::string svc = dev->getServiceData(NimBLEUUID(uint16_t{0xFCD2}));
-    if (!svc.empty()) {
-      ble_backend::bthome::ingest(
-          addr_u64, reinterpret_cast<const uint8_t *>(svc.data()), svc.size());
+    // Read from the payload, not getServiceData() (a std::string copy).
+    {
+      const auto &pl = dev->getPayload();
+      ad::Field svc{};
+      if (ad::find_service_data16(pl.data(), pl.size(), 0xFCD2, &svc) &&
+          svc.len > 0) {
+        ble_backend::bthome::ingest(addr_u64, svc.value, svc.len);
+      }
     }
 #endif
 
@@ -383,7 +430,9 @@ class AdvCallbacks : public NimBLEScanCallbacks {
     // Raw adv payload (legacy adv is ≤31 B; with scan response appended
     // up to 62 B). The cap matches BluetoothLERawAdvertisement.data
     // max_size in api_subset.options.
-    auto payload = dev->getPayload();
+    // By reference: `auto` copied the std::vector, a heap allocation per
+    // advert on the host task.
+    const auto &payload = dev->getPayload();
     size_t plen = payload.size();
     if (plen > sizeof(rec.data.bytes)) plen = sizeof(rec.data.bytes);
     if (plen > 0) std::memcpy(rec.data.bytes, payload.data(), plen);

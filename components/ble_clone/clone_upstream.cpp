@@ -352,20 +352,24 @@ bool try_session(uint64_t address, uint8_t address_type) {
   // advertising, so calling on every successful session works for both
   // first-time bring-up and reconnect.
   if (!mirror::stats().advertising) {
-    std::string up_name;
+    // Fixed buffer, not std::string: a > 15 B name would heap-allocate
+    // through the throwing operator new (aborts on OOM, no exceptions).
+    // 29 B is the most a legacy advert can carry as the complete name.
+    char up_name[30] = "";
     auto *gap = g_client->getService(NimBLEUUID(static_cast<uint16_t>(0x1800)));
     if (gap != nullptr) {
       auto *name_chr =
           gap->getCharacteristic(NimBLEUUID(static_cast<uint16_t>(0x2a00)));
       if (name_chr != nullptr) {
         NimBLEAttValue v = name_chr->readValue();
-        if (v.size() > 0) {
-          up_name.assign(reinterpret_cast<const char *>(v.data()), v.size());
-        }
+        size_t k = v.data() != nullptr ? v.size() : 0;
+        if (k >= sizeof(up_name)) k = sizeof(up_name) - 1;
+        if (k > 0) std::memcpy(up_name, v.data(), k);
+        up_name[k] = '\0';
       }
     }
-    if (up_name.empty()) up_name = "clone";
-    mirror::start_advertising(up_name.c_str());
+    if (up_name[0] == '\0') std::strcpy(up_name, "clone");
+    mirror::start_advertising(up_name);
   } else {
     g_reconnects.fetch_add(1, std::memory_order_relaxed);
   }

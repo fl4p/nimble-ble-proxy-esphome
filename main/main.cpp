@@ -3,6 +3,10 @@
 
 #include "ble_backend.h"
 #include "crash_capture.h"
+#include "oom_guard.h"
+#if NBP_OOM_SELFTEST
+#include "oom_selftest.h"
+#endif
 #include "proxy_config.h"
 #include "stats.h"
 #include "serial_provision.h"
@@ -129,6 +133,10 @@ extern "C" void app_main() {
   api_server::stats::install_log_hook();
 #endif
 
+  // Count + log every failed heap allocation from here on (/stats.json
+  // "oom"). The operator new override itself needs no init.
+  oom_guard::init();
+
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     ESP_ERROR_CHECK(nvs_flash_erase());
@@ -142,6 +150,10 @@ extern "C" void app_main() {
   crash_capture::init();
 
   ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+#if NBP_OOM_SELFTEST
+  api_server::oom_selftest::run();  // QEMU test build only; never returns
+#endif
 
   ESP_LOGI(TAG, "nimble-ble-proxy %s booting",
            esp_app_get_description()->version);

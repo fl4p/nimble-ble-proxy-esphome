@@ -544,4 +544,20 @@ config NBP_CRASH_TEST
         firmware for deployed devices; turn it on for a test build with
         -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.crashtest".
 
+config NBP_OOM_NEW_WAIT_MS
+    int "Throwing operator new: wait this long for heap before aborting (ms)"
+    default 2000
+    range 0 30000
+    help
+        The build has no C++ exceptions, so a throwing `new` that cannot
+        get memory has no way to report it and must abort. Our own code
+        uses nothrow allocations and handles failure (components/
+        oom_guard); this only covers the throwing `new` inside NimBLE-cpp
+        and libstdc++ containers. Instead of aborting at once, a task
+        that is allowed to block retries every 10 ms for up to this long
+        (heap exhaustion is usually transient: lwIP send buffers during a
+        WiFi stall), then aborts with "OOM: operator new(N) ...". ISRs,
+        critical sections and pre-scheduler code abort at once. 0 = never
+        wait.
+
 endmenu
