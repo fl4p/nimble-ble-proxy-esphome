@@ -64,14 +64,23 @@ inline constexpr uint32_t BT_PROXY_FEATURE_FLAGS =
     (1u << 0) | (1u << 1) | (1u << 2) | (1u << 5);
 
 // BLE proxy tuning.
-// Trimmed 9->4 to relieve internal-DRAM pressure on this no-PSRAM S3 (see
-// the rationale in sdkconfig.defaults). This is the BT-proxy slot count
-// advertised to HA (bt_handlers.cpp -> BluetoothConnectionsFreeResponse.limit),
-// so HA will only ever open up to 4 BLE links. Keep in sync with
+// Trimmed 9->4->2 to relieve internal-DRAM pressure on this no-PSRAM S3 (see
+// the rationale in sdkconfig.defaults and CLAUDE.md). This is the BT-proxy
+// slot count advertised to HA (bt_handlers.cpp ->
+// BluetoothConnectionsFreeResponse.limit), so HA will only ever open up to 2
+// BLE links (e.g. batmon-ha's BMS link plus one HA device). Keep in sync with
 // CONFIG_BT_NIMBLE_MAX_CONNECTIONS in sdkconfig.defaults AND
 // proxyapi.BluetoothConnectionsFreeResponse.allocated max_count in
 // components/api_proto/api_subset.options.
-inline constexpr uint8_t MAX_CONNECTIONS = 4;
+//
+// NimBLE's limit covers every role, so the clone (one upstream link plus one
+// per local central) and a ble_httpd dashboard session take from the same 2.
+// Each proxy slot also keeps its NimBLEClient once created, and NimBLE-cpp's
+// client table holds only CONFIG_BT_NIMBLE_MAX_CONNECTIONS of them: after HA
+// has used both slots, the clone's createClient() fails until a reboot (it
+// retries with backoff). A clone build that must coexist with proxy links
+// needs BT_NIMBLE_MAX_CONNECTIONS raised above MAX_CONNECTIONS.
+inline constexpr uint8_t MAX_CONNECTIONS = 2;
 #ifdef CONFIG_BT_NIMBLE_MAX_CONNECTIONS
 // We advertise MAX_CONNECTIONS slots to HA and size connection::g_slots by it,
 // so it must never exceed what NimBLE is actually built to handle. (Guarded

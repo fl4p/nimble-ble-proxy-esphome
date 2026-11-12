@@ -34,16 +34,19 @@ CONFIG_BT_NIMBLE_GATT_SERVER=y
 # reset actually clears the table and re-init succeeds. Verified
 # against the Victron SmartShunt clone bring-up, 2026-05-26.
 CONFIG_BT_NIMBLE_DYNAMIC_SERVICE=y
-# NimBLE connection slots. Trimmed 9->4 to reclaim internal DRAM: this is
+# NimBLE connection slots. Trimmed 9->4->2 to reclaim internal DRAM: this is
 # a no-PSRAM S3, and 9 links (host + controller per-link buffers) left only
 # ~42 KB free heap, too fragmented for api_server's 8 KB per-connection task
 # stack (xTaskCreate failures → HA reconnect storm → BLE-scan/coex churn).
-# With NBP_CLONE=y one slot is the clone upstream, leaving 3 for HA-proxy
-# GATT links. MUST stay in sync with proxy::MAX_CONNECTIONS
+# 2 (2026-11) = batmon-ha's BMS link + one HA link; the 4-slot build still
+# ran out of heap (OOM abort in GetServices, heap_min 244 B). The limit
+# covers every role: with NBP_CLONE=y the clone upstream and each local
+# central take a slot too, so clone + proxy links need this raised (see
+# proxy_config.h). MUST stay in sync with proxy::MAX_CONNECTIONS
 # (include/proxy_config.h) and BluetoothConnectionsFreeResponse.allocated
 # max_count (components/api_proto/api_subset.options). NIMBLE_MAX_CONNECTIONS
 # (nimble-cpp) is a non-prompt symbol that auto-tracks this one.
-CONFIG_BT_NIMBLE_MAX_CONNECTIONS=4
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2
 # NimBLE host at INFO; flip to LOG_LEVEL_DEBUG to recompile with LOGD
 # calls when investigating wire-level issues — but it costs ~40 KB BSS
 # (string literals + 64 KiB web console ring) and the runtime DEBUG-only
@@ -51,16 +54,17 @@ CONFIG_BT_NIMBLE_MAX_CONNECTIONS=4
 # initiated" INFO lines.
 CONFIG_BT_NIMBLE_LOG_LEVEL_INFO=y
 CONFIG_BT_NIMBLE_LOG_LEVEL=1
-# BLE controller activity slots = connections + scan + adv. With 4 conns
-# that's 4 + 1 scan + 1 adv = 6 (the S3 default). Each activity reserves
-# controller RAM, so this must track MAX_CONNECTIONS back down from 10.
-CONFIG_BT_CTRL_BLE_MAX_ACT=6
+# BLE controller activity slots = connections + scan + adv. With 2 conns
+# that's 2 + 1 scan + 1 adv = 4. Each activity reserves controller RAM, so
+# this must track MAX_CONNECTIONS (10 -> 6 -> 4).
+CONFIG_BT_CTRL_BLE_MAX_ACT=4
 # Host buffer pools, trimmed for the smaller connection count. ACL pool
-# 24->12 (~3 KB). Left at defaults: HCI event buffers (HI=30/LO=8) — they
+# 24->12->8 (~3 per link, as before, plus 2 spare for MTU-sized discovery
+# and notify bursts that span several 255 B ACL buffers). Left at defaults: HCI event buffers (HI=30/LO=8) — they
 # back adv-report bursts during scan forwarding, so not worth risking for
 # the small saving. Bump ACL back toward 24 if you proxy high-throughput
 # GATT (notify floods) across several links at once.
-CONFIG_BT_NIMBLE_ACL_BUF_COUNT=12
+CONFIG_BT_NIMBLE_ACL_BUF_COUNT=8
 # SMP + bonding: the SECURITY_ENABLE / SM_LEGACY / SM_SC / NVS_PERSIST
 # flags are selected (or not) by main/Kconfig.projbuild's
 # NBP_SMP option, default y. MAX_BONDS is set
