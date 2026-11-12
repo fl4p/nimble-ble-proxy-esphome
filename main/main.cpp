@@ -216,9 +216,8 @@ extern "C" void app_main() {
         nat_router::resume_after_ota();
 #endif
       });
-  // Piggyback the stats UI on the OTA httpd so we don't burn an extra
-  // LWIP socket budget on a second listener.
-  api_server::stats::register_endpoints(ota::handle());
+  // /crash is up from here on, so a boot that hangs in BLE init can still be
+  // diagnosed. The stats UI is registered after ble_backend::start() below.
   crash_capture::register_endpoints(ota::handle());
 #if CONFIG_NBP_LIVENESS_WDT
   // Self-recovery: reboot if the upstream LAN goes unreachable for a sustained
@@ -251,6 +250,14 @@ extern "C" void app_main() {
 #endif  // CONFIG_NBP_BLE
 
 #if CONFIG_NBP_WIFI
+  // Piggyback the stats UI on the OTA httpd so we don't burn an extra
+  // LWIP socket budget on a second listener. Registered only now, after
+  // ble_backend::start(): its handlers read BLE state (/stats.json ->
+  // connection::free_slots, /scan, /txpower, ...), and a GET in the window
+  // before BLE init once asserted on a null mutex (crash 2026-11-12T1519).
+  // connection.cpp is null-safe as well; this closes the window for the
+  // other BLE singletons.
+  api_server::stats::register_endpoints(ota::handle());
   api_server::start();
 #if CONFIG_NBP_WS_PROXY
   // Browser bridge: tunnel the aioesphomeapi TCP protocol over a WebSocket

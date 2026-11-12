@@ -275,8 +275,13 @@ ClientCb g_client_cb;
 
 }  // namespace
 
+// g_mutex is created by ble_backend::start() and never deleted. Every public
+// entry point below checks it first: the dashboard httpd and the api_server
+// can call in before start() (GET /stats.json in the boot window once tripped
+// configASSERT(pxQueue) in xQueueSemaphoreTake, crash 2026-11-12T1519). With
+// no mutex there are no links, so each answers "nothing here".
 void init() {
-  g_mutex = xSemaphoreCreateMutex();
+  if (g_mutex == nullptr) g_mutex = xSemaphoreCreateMutex();
 }
 
 #ifdef CONFIG_NBP_SMP
@@ -313,6 +318,7 @@ void register_free_change_cb(FreeChangeCallback cb) {
 // client's links the moment its API connection closes.
 ConnectStatus connect(uint64_t address, uint8_t address_type, OwnerId owner,
                       ConnectCallback cb, uint16_t *mtu_out) {
+  if (g_mutex == nullptr) return ConnectStatus::NoSlot;
   xSemaphoreTake(g_mutex, portMAX_DELAY);
   if (Slot *held = find_by_addr_locked(address); held != nullptr) {
     OwnerId holder = held->owner;
@@ -438,6 +444,7 @@ ConnectStatus connect(uint64_t address, uint8_t address_type, OwnerId owner,
 }
 
 DisconnectStatus disconnect(uint64_t address, OwnerId owner) {
+  if (g_mutex == nullptr) return DisconnectStatus::NotFound;
   NimBLEClient *client = nullptr;
   Teardown t = Teardown::None;
   xSemaphoreTake(g_mutex, portMAX_DELAY);
@@ -467,6 +474,7 @@ DisconnectStatus disconnect(uint64_t address, OwnerId owner) {
 
 void release_owner(OwnerId owner) {
   if (owner == kNoOwner) return;
+  if (g_mutex == nullptr) return;
   NimBLEClient *clients[proxy::MAX_CONNECTIONS];
   Teardown actions[proxy::MAX_CONNECTIONS];
   uint8_t n = 0;
@@ -494,6 +502,7 @@ void release_owner(OwnerId owner) {
 }
 
 uint8_t free_slots() {
+  if (g_mutex == nullptr) return proxy::MAX_CONNECTIONS;
   uint8_t n = 0;
   xSemaphoreTake(g_mutex, portMAX_DELAY);
   for (auto &s : g_slots) {
@@ -504,6 +513,7 @@ uint8_t free_slots() {
 }
 
 uint8_t in_use_addresses(uint64_t *out, uint8_t cap) {
+  if (g_mutex == nullptr) return 0;
   uint8_t n = 0;
   xSemaphoreTake(g_mutex, portMAX_DELAY);
   for (auto &s : g_slots) {
@@ -516,6 +526,7 @@ uint8_t in_use_addresses(uint64_t *out, uint8_t cap) {
 }
 
 void disconnect_unowned() {
+  if (g_mutex == nullptr) return;
   NimBLEClient *clients[proxy::MAX_CONNECTIONS];
   Teardown actions[proxy::MAX_CONNECTIONS];
   uint8_t n = 0;
@@ -534,6 +545,7 @@ void disconnect_unowned() {
 }
 
 void *client_for(uint64_t address, OwnerId owner) {
+  if (g_mutex == nullptr) return nullptr;
   void *p = nullptr;
   xSemaphoreTake(g_mutex, portMAX_DELAY);
   Slot *s = find_by_addr_locked(address);
@@ -546,6 +558,7 @@ void *client_for(uint64_t address, OwnerId owner) {
 }
 
 OwnerId owner_of_client(const void *client) {
+  if (g_mutex == nullptr) return kNoOwner;
   OwnerId o = kNoOwner;
   xSemaphoreTake(g_mutex, portMAX_DELAY);
   for (auto &s : g_slots) {
