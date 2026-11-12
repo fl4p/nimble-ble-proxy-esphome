@@ -37,7 +37,9 @@
   contention. Fix was sizing NimBLE to what's actually used — 1 clone
   upstream + ~3 HA links: `BT_NIMBLE_MAX_CONNECTIONS 9→4`,
   `BT_CTRL_BLE_MAX_ACT 10→6`, `BT_NIMBLE_ACL_BUF_COUNT 24→12` (freed ~13 KB;
-  42→55 KB steady, SA-Query loop gone, port-forwards work). The connection
+  42→55 KB steady, SA-Query loop gone, port-forwards work). 2026-11: further
+  to 2 links (batmon-ha's BMS + one HA link), `MAX_ACT 4`, `ACL_BUF_COUNT 8`
+  (see "Heap budget" below). The connection
   count is coupled across **three** files — keep them in sync:
   `BT_NIMBLE_MAX_CONNECTIONS` (`sdkconfig.defaults`), `proxy::MAX_CONNECTIONS`
   (`include/proxy_config.h`, the slot count advertised to HA), and the nanopb
@@ -547,3 +549,66 @@
   recovers, and one that fails and reaps the client. The last step must end
   in the `OOM: operator new(2048)` abort. Compile define only, never a
   firmware build.
+
+## Heap budget on the NAT S3 (2026-11, after the GetServices OOM)
+
+- **A stalled API client pins ~25 KiB, not 5.7 KiB.** IDF builds lwIP with
+  `LWIP_NETIF_TX_SINGLE_PBUF`, so `tcp_write` allocates a full-MSS pbuf
+  (~1.55 KiB measured) for every new segment however small the frame, and
+  with `TCP_NODELAY` each notify/advert batch is its own segment until ACKed.
+  `TCP_SND_QUEUELEN` (16) is the only bound: QEMU measured 16 × 60 B frames
+  to a non-ACKing peer = 24 972 B of heap. `TCP_SND_BUF` (5760 B) counts
+  payload only and says nothing about heap.
+- **`NBP_API_CLIENT_TXQ_CAP` (8192)** caps it. `send_capped()` in
+  `api_server.cpp` measures the heap of the pcb's unsent + unacked segments
+  (`heap_caps_get_containing_block_size` per seg/pbuf, read in the tcpip
+  thread via `tcpip_api_call`; lwIP has `MEMP_MEM_MALLOC=1`, so all of it is
+  heap). At or over the cap, advert batches for that client are dropped
+  (they never block the host/flush task any more), other frames wait for the
+  queue to drain, and a client over the cap for 20 s is reaped. A healthy LAN
+  client holds 1 segment (1.55 KiB). `/stats.json`: `api_txq` ([id, last,
+  max] per client), `api_txq_max`, `api_txq_drops`, `api_txq_reaps`,
+  `api_refused`.
+- **`NBP_API_MAX_CLIENTS` (2)**: each client is ~9.3 KiB at rest (8 KiB task
+  stack, TCB, socket; QEMU). A further client is accepted and reset at once
+  (`no client slot … refusing`).
+- **GetServices sends one service per response** (`api_subset.options`
+  services `max_count:1`): the encode ctx is 2936 B instead of 23 376 B. The
+  23 KiB contiguous block was exactly the allocation that failed in the field
+  OOM of 2026-11-12.
+- **`/log` ring `NBP_WEB_CONSOLE_RING_SIZE` 4096** (was 8192, `.noinit`,
+  comes out of the heap region). The magic word mixes in the size, so an OTA
+  that changes it does not replay a misread ring.
+- **The clone supervisor (12 KiB stack) only starts for an enabled target**
+  (`ble_clone::start_if_enabled`, also called from `POST /clone`). Before, a
+  device with clone compiled in but disabled carried an idle 12 KiB task.
+- **Clone vs 2 slots:** NimBLE's connection limit covers every role, and each
+  proxy slot keeps its `NimBLEClient`, so once HA has used both slots the
+  clone's `createClient()` fails until reboot (it retries with backoff), and a
+  clone with a local central connected leaves no link for HA. Raise
+  `BT_NIMBLE_MAX_CONNECTIONS` above `proxy::MAX_CONNECTIONS` on a device that
+  clones and proxies at once.
+- **Stats endpoints register after `ble_backend::start()`**, and every
+  `connection::` accessor is null-safe: a `GET /stats.json` in the boot window
+  asserted in `free_slots()` (crash 2026-11-12T1519). `/crash` stays early.
+- **QEMU:** `idf.py -B build_qemu_heap -DIDF_TARGET=esp32s3
+  -DNBP_HEAP_SELFTEST=1 build`, then `… qemu` (IDF 6.0.3). Prints
+  `HEAP-SELFTEST <step>: PASS|FAIL` for the boot race, the 3rd-client
+  refusal, a stalled client under lossy and non-lossy traffic, and
+  `HEAP-MEASURE` numbers. The stall is real: a test-only `LWIP_HOOK_IP4_INPUT`
+  (`nbp_lwip_hooks.h`) drops every segment to the stalled client's port, so
+  data is sent and never ACKed. Add `CONFIG_NBP_API_CLIENT_TXQ_CAP=0` via an
+  extra defaults file to measure the uncapped case.
+- **Not changed, deliberately** (send-stall risk), the next levers with
+  estimates: `ESP_WIFI_STATIC_RX_BUFFER_NUM` 10→6 (~6.4 KiB permanent);
+  `DYNAMIC_TX_BUFFER_NUM` 32→16 and `DYNAMIC_RX_BUFFER_NUM` 32→16 (only
+  allocated under load, cut the burst peak by up to ~25 KiB each);
+  `TCP_SND_BUF`/`TCP_WND` 5760→2880 (`TCP_SND_QUEUELEN` 16→8, so an
+  uncapped socket pins ~12 KiB instead of ~25 KiB). Other levers, not
+  tried: `NBP_NAT_TABLE_SIZE` 512→256 (8 KiB, one 16 KiB block → 8 KiB),
+  api_client stack 8→6 KiB (QEMU high-water leaves 4.6 KiB free, the OOM
+  core 4.8 KiB at GetServices depth; 2 KiB per client), httpd task stack
+  (1.1 KiB of 7 KiB used in the core; ~3 KiB), NimBLE `MSYS_2_BLOCK_COUNT`
+  24→12 (~3.8 KiB), freeing a proxy slot's remote attribute cache on
+  disconnect (a few KiB per peer; needs care: discovery may be walking it).
+
