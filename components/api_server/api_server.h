@@ -54,4 +54,8 @@ struct TxqStats {
 };
 TxqStats txq_stats();
 
+// esp_timer_get_time() of the last frame from an API client that reached us
+// over the STA uplink (not loopback, not the SoftAP subnet); 0 if none.
+int64_t last_rx_us();
+
 }  // namespace api_server

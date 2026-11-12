@@ -229,6 +229,7 @@ extern "C" void app_main() {
   // Self-recovery: reboot if the upstream LAN goes unreachable for a sustained
   // window (a WiFi/coex livelock under heavy forwarded throughput keeps tasks
   // alive — so the Task-WDT never fires — while the IP path is dead).
+  liveness_wdt::set_client_rx_source(&api_server::last_rx_us);
   liveness_wdt::start();
 #endif
 #if CONFIG_NBP_BLE

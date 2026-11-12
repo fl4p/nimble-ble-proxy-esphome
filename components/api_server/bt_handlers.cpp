@@ -22,6 +22,7 @@
 #include "NimBLERemoteCharacteristic.h"
 #include "NimBLERemoteDescriptor.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
 #include "pb_decode.h"
 #include "pb_encode.h"
 
@@ -312,6 +313,43 @@ bool handle_device_request(const uint8_t *payload, size_t payload_len,
   return true;
 }
 
+// Links whose on-demand discovery failed part-way. discoverAttributes()
+// fills the service list before it walks characteristics, so after such a
+// failure the list is non-empty but incomplete; without this mark the
+// "list empty" test would never look again and later handles would stay
+// unknown until the peer reconnects (fill_gaps). Touched from several
+// connection tasks.
+NimBLEClient *g_partial[proxy::MAX_CONNECTIONS] = {};
+portMUX_TYPE g_partial_mux = portMUX_INITIALIZER_UNLOCKED;
+
+bool is_partial(NimBLEClient *c) {
+  bool found = false;
+  taskENTER_CRITICAL(&g_partial_mux);
+  for (auto *p : g_partial) found = found || p == c;
+  taskEXIT_CRITICAL(&g_partial_mux);
+  return found;
+}
+
+void set_partial(NimBLEClient *c, bool partial) {
+  taskENTER_CRITICAL(&g_partial_mux);
+  bool done = false;
+  for (auto &p : g_partial) {
+    if (p == c) {
+      if (!partial) p = nullptr;
+      done = true;
+    }
+  }
+  if (partial && !done) {
+    for (auto &p : g_partial) {
+      if (p == nullptr) {
+        p = c;
+        break;
+      }
+    }
+  }
+  taskEXIT_CRITICAL(&g_partial_mux);
+}
+
 bool handle_get_services(const uint8_t *payload, size_t payload_len,
                          const Context &ctx) {
   proxyapi_BluetoothGATTGetServicesRequest req =
@@ -321,34 +359,92 @@ bool handle_get_services(const uint8_t *payload, size_t payload_len,
     return true;
   }
   // Owner-only (gatt_discovery::run checks), so two clients can never
-  // run discovery on one link concurrently.
+  // run discovery on one link concurrently. A full discovery supersedes a
+  // failed on-demand one: the client sees its errors itself.
+  if (auto *c = static_cast<NimBLEClient *>(
+          ble_backend::connection::client_for(req.address, ctx.client_id))) {
+    set_partial(c, false);
+  }
   ble_backend::gatt_discovery::run(req.address, ctx.client_id);
   return true;
 }
 
-NimBLERemoteCharacteristic *char_at(NimBLEClient *client, uint16_t handle) {
-  const auto &services = client->getServices(/*refresh=*/false);
-  for (auto *svc : services) {
-    const auto &chars = svc->getCharacteristics(/*refresh=*/false);
-    for (auto *chr : chars) {
+// Every connect clears the NimBLEClient attribute cache
+// (connection::connect, deleteAttributes=true), and discovery otherwise
+// runs only on BluetoothGATTGetServicesRequest. We advertise
+// REMOTE_CACHING, so HA (disk cache) and bleak_esphome (per-process
+// cache) skip GetServices on a reconnect. Without this, every read/write
+// and the notify registration then failed against an empty cache, and the
+// peer's notifications were dropped as "NimBLEClient: unknown handle: N"
+// (issue #2, batmon-ha #391). Stock ESPHome rediscovers on every connect
+// in its own GATT client; we do it on first use instead, here on the API
+// connection task (discoverAttributes blocks, so never on the host task).
+void ensure_discovered(NimBLEClient *client) {
+  if (!client->getServices(/*refresh=*/false).empty()) return;
+  ESP_LOGI(TAG, "%s: no GetServices since connect; discovering on demand",
+           client->getPeerAddress().toString().c_str());
+  const bool ok = client->discoverAttributes();
+  set_partial(client, !ok);
+  if (!ok) ESP_LOGW(TAG, "on-demand discovery failed part-way; will fill gaps on lookup misses");
+}
+
+// After a partial discovery, fill in only what is missing: services with no
+// characteristics, characteristics with no descriptors. Never a full
+// rediscovery, which would deleteServices() under live notify callbacks
+// (dropping them) while the host task may walk the list. Refreshing an
+// empty vector deletes nothing; new entries are appended on the host task,
+// the same task that walks them for notifications.
+void fill_gaps(NimBLEClient *client) {
+  for (auto *svc : client->getServices(/*refresh=*/false)) {
+    if (svc->getCharacteristics(/*refresh=*/false).empty()) {
+      svc->getCharacteristics(/*refresh=*/true);
+    }
+    for (auto *chr : svc->getCharacteristics(/*refresh=*/false)) {
+      if (chr->getDescriptors(/*refresh=*/false).empty()) {
+        chr->getDescriptors(/*refresh=*/true);
+      }
+    }
+  }
+}
+
+NimBLERemoteCharacteristic *find_char(NimBLEClient *client, uint16_t handle) {
+  for (auto *svc : client->getServices(/*refresh=*/false)) {
+    for (auto *chr : svc->getCharacteristics(/*refresh=*/false)) {
       if (chr->getHandle() == handle) return chr;
     }
   }
   return nullptr;
 }
 
-NimBLERemoteDescriptor *desc_at(NimBLEClient *client, uint16_t handle) {
-  const auto &services = client->getServices(/*refresh=*/false);
-  for (auto *svc : services) {
-    const auto &chars = svc->getCharacteristics(/*refresh=*/false);
-    for (auto *chr : chars) {
-      const auto &descs = chr->getDescriptors(/*refresh=*/false);
-      for (auto *dsc : descs) {
+NimBLERemoteDescriptor *find_desc(NimBLEClient *client, uint16_t handle) {
+  for (auto *svc : client->getServices(/*refresh=*/false)) {
+    for (auto *chr : svc->getCharacteristics(/*refresh=*/false)) {
+      for (auto *dsc : chr->getDescriptors(/*refresh=*/false)) {
         if (dsc->getHandle() == handle) return dsc;
       }
     }
   }
   return nullptr;
+}
+
+NimBLERemoteCharacteristic *char_at(NimBLEClient *client, uint16_t handle) {
+  ensure_discovered(client);
+  auto *chr = find_char(client, handle);
+  if (chr == nullptr && is_partial(client)) {
+    fill_gaps(client);
+    chr = find_char(client, handle);
+  }
+  return chr;
+}
+
+NimBLERemoteDescriptor *desc_at(NimBLEClient *client, uint16_t handle) {
+  ensure_discovered(client);
+  auto *dsc = find_desc(client, handle);
+  if (dsc == nullptr && is_partial(client)) {
+    fill_gaps(client);
+    dsc = find_desc(client, handle);
+  }
+  return dsc;
 }
 
 bool handle_read(uint16_t msg_type, const uint8_t *payload, size_t payload_len,

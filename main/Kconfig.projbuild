@@ -40,16 +40,29 @@ config NBP_LIVENESS_WDT
     default y
     help
         Spawn a supervisor task that probes upstream LAN reachability
-        (STA default gateway + a known-open host) every
-        NBP_LIVENESS_INTERVAL_SECS. After NBP_LIVENESS_THRESHOLD
-        consecutive cycles where ALL targets are unreachable, it calls
-        esp_restart().
+        (TCP connect to the STA default gateway on port 80, plus the
+        optional NBP_LIVENESS_EXTRA_TARGET) every
+        NBP_LIVENESS_INTERVAL_SECS. A cycle also passes when an API
+        client (Home Assistant) sent data recently. After
+        NBP_LIVENESS_THRESHOLD consecutive failed cycles it calls
+        esp_restart(). It only arms after a probe target has answered
+        once this boot, so a LAN whose gateway filters port 80 never
+        triggers a reboot.
 
         Recovers a total network wedge (a WiFi/coex livelock under heavy
         forwarded throughput) where tasks stay alive — so the IDF
         Task-WDT never fires — but the IP path is dead, which otherwise
         needs a physical power-cycle. Runtime-tunable / disable via
         POST /liveness?enabled=0; GET /liveness reports state.
+
+config NBP_LIVENESS_EXTRA_TARGET
+    string "Liveness: extra probe target (ip:port, empty = none)"
+    depends on NBP_LIVENESS_WDT
+    default ""
+    help
+        A known-open TCP service on the upstream LAN, probed when the
+        gateway does not answer, e.g. "192.168.1.10:1883". Leave empty
+        for release builds: an address only means something on one LAN.
 
 config NBP_LIVENESS_INTERVAL_SECS
     int "Liveness: seconds between probe cycles"

@@ -6,6 +6,7 @@
 
 #include "wifi_sta.h"
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_system.h"
@@ -17,7 +18,9 @@
 #include "lwip/sockets.h"
 #include "nvs.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cerrno>
 #include <cstring>
 
@@ -38,11 +41,36 @@ constexpr uint32_t TICK_MS = 2000;
 // letting the task stall: select() bounds it hard.
 constexpr int CONNECT_TIMEOUT_MS = 3000;
 
-// Secondary probe target: a known-open host on the LAN the router bridges to
-// (the MQTT broker). The primary target is the STA's own default gateway, read
-// at runtime. A cycle fails only if BOTH are unreachable.
-constexpr const char *BROKER_IP = "192.168.1.200";
-constexpr uint16_t BROKER_PORT = 1882;
+// Optional secondary probe target ("ip:port", Kconfig). Empty by default:
+// v0.2.3 hard-coded a lab broker here, which on any other LAN never
+// answered (issue #2). The primary target is the STA's default gateway.
+constexpr const char *EXTRA_TARGET = CONFIG_NBP_LIVENESS_EXTRA_TARGET;
+
+// Data from an API client within this many seconds (and at least one probe
+// interval) also proves the LAN path. HA's keepalive ping is every 20 s.
+constexpr uint32_t CLIENT_RX_FRESH_S = 60;
+
+int64_t (*g_client_rx_us)() = nullptr;
+
+// EXTRA_TARGET, parsed once at start(); ip 0 = none.
+uint32_t g_extra_ip_be = 0;
+uint16_t g_extra_port = 0;
+
+// Survives esp_restart (not power-on): set just before a liveness reboot so
+// the next boot starts armed. Otherwise a wedge that comes back before the
+// first probe (~90 s, e.g. SoftAP clients resuming heavy forwarding) would
+// leave the device unarmed and stuck. g_carry_n counts liveness reboots in
+// a row with no probe success in between; each one doubles the threshold
+// (up to 32x, ~1.6 h at the defaults); after that the next boot starts
+// unarmed. So a device that moved to a LAN whose gateway ignores port 80
+// backs off and then stops instead of looping. A successful probe resets
+// the backoff. Checked with a magic word.
+__NOINIT_ATTR uint32_t g_armed_carry;
+__NOINIT_ATTR uint32_t g_carry_n;
+constexpr uint32_t ARMED_CARRY_MAGIC = 0x4C564152u;  // "LVAR"
+constexpr uint32_t CARRY_MAX_SHIFT = 5;
+uint32_t g_backoff_shift = 0;  // this boot's threshold multiplier (log2)
+bool g_have_probe_ok = false;  // a probe target answered this boot
 
 std::atomic<bool> g_started{false};
 std::atomic<bool> g_enabled{true};
@@ -51,6 +79,11 @@ std::atomic<uint32_t> g_threshold{CONFIG_NBP_LIVENESS_THRESHOLD};
 std::atomic<uint32_t> g_failures{0};
 std::atomic<uint32_t> g_last_ok_s{0};
 std::atomic<bool> g_have_ok{false};
+// Set once a probe target (not client traffic) answered this boot. Reboots
+// are armed only after that: a target that never answered proves nothing
+// about a wedge, and on a LAN whose gateway filters port 80 an unarmed
+// watchdog would otherwise reboot every few minutes whenever HA is away.
+std::atomic<bool> g_armed{false};
 std::atomic<bool> g_force_test{false};
 
 // Rolling WiFi-quality history: one sample per probe cycle. 120 @ the 30 s
@@ -92,13 +125,15 @@ void save_nvs() {
   nvs_close(h);
 }
 
-// Non-blocking TCP connect with a hard select() timeout. Returns true if the
-// host is reachable — a refused connection (RST) counts as reachable, since it
-// still proves the L3/ARP path works. Only a timeout or a no-route error means
-// unreachable. The task can never block here.
+// Non-blocking TCP connect with a hard select() timeout. Returns true only
+// when the host answered: a completed handshake, or a refusal (RST), which
+// (ECONNRESET in lwIP), which still proves the L3/ARP path. Everything else is unreachable, including
+// local failures (no socket, ENOMEM/ENOBUFS, select error): a probe that
+// could not run proves nothing, and a heap- or socket-exhausted stack is a
+// wedge this watchdog should count, not excuse. The task can never block here.
 bool reachable(uint32_t ip_be, uint16_t port) {
   int fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (fd < 0) return true;  // local resource hiccup — don't blame the network
+  if (fd < 0) return false;
 
   int flags = ::fcntl(fd, F_GETFL, 0);
   ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
@@ -108,7 +143,7 @@ bool reachable(uint32_t ip_be, uint16_t port) {
   addr.sin_port = htons(port);
   addr.sin_addr.s_addr = ip_be;
 
-  bool ok = true;
+  bool ok = false;
   int rc = ::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
   if (rc == 0) {
     ok = true;  // connected immediately
@@ -118,26 +153,44 @@ bool reachable(uint32_t ip_be, uint16_t port) {
     FD_SET(fd, &wfds);
     timeval tv{.tv_sec = CONNECT_TIMEOUT_MS / 1000, .tv_usec = (CONNECT_TIMEOUT_MS % 1000) * 1000};
     int sel = ::select(fd + 1, nullptr, &wfds, nullptr, &tv);
-    if (sel <= 0) {
-      ok = false;  // timeout (or select error) → unreachable
-    } else {
+    if (sel > 0) {
       int soerr = 0;
       socklen_t len = sizeof(soerr);
-      ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len);
-      // Reached the host unless the stack reports no route / timeout.
-      ok = !(soerr == EHOSTUNREACH || soerr == ENETUNREACH || soerr == ETIMEDOUT ||
-             soerr == EHOSTDOWN || soerr == ENETDOWN);
+      if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) == 0) {
+        // lwIP reports a SYN answered by RST as ECONNRESET (err_to_errno
+        // ERR_RST); it never produces ECONNREFUSED. Both mean "host answered".
+        ok = (soerr == 0 || soerr == ECONNRESET || soerr == ECONNREFUSED);
+      }
     }
   } else {
-    ok = !(errno == EHOSTUNREACH || errno == ENETUNREACH || errno == ETIMEDOUT);
+    ok = (errno == ECONNRESET || errno == ECONNREFUSED);
   }
   ::close(fd);
   return ok;
 }
 
-// Probe the STA default gateway (port 80) and the broker. Reachable if either
-// responds; *rtt_ms gets the connect latency of whichever answered (0xFFFF on
-// total failure).
+bool parse_target(const char *spec, uint32_t *ip_be, uint16_t *port) {
+  if (spec == nullptr || *spec == '\0') return false;
+  const char *colon = std::strrchr(spec, ':');
+  if (colon == nullptr || colon == spec) return false;
+  char host[16];
+  size_t hl = static_cast<size_t>(colon - spec);
+  if (hl >= sizeof(host)) return false;
+  std::memcpy(host, spec, hl);
+  host[hl] = '\0';
+  char *end = nullptr;
+  long p = std::strtol(colon + 1, &end, 10);
+  if (end == colon + 1 || *end != '\0' || p <= 0 || p > 65535) return false;
+  uint32_t ip = ::inet_addr(host);
+  if (ip == INADDR_NONE) return false;
+  *ip_be = ip;
+  *port = static_cast<uint16_t>(p);
+  return true;
+}
+
+// Probe the STA default gateway (port 80), then the optional extra target.
+// Reachable if either responds; *rtt_ms gets the connect latency of whichever
+// answered (0xFFFF on total failure).
 bool probe_cycle(uint16_t *rtt_ms) {
   uint32_t gw_be = 0;
   esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -151,16 +204,24 @@ bool probe_cycle(uint16_t *rtt_ms) {
       return true;
     }
   }
-  uint32_t broker_be = ::inet_addr(BROKER_IP);
-  if (broker_be != INADDR_NONE) {
+  if (g_extra_ip_be != 0) {
     int64_t t0 = esp_timer_get_time();
-    if (reachable(broker_be, BROKER_PORT)) {
+    if (reachable(g_extra_ip_be, g_extra_port)) {
       *rtt_ms = clamp_rtt_ms(esp_timer_get_time() - t0);
       return true;
     }
   }
   *rtt_ms = 0xFFFF;
   return false;
+}
+
+// True if an API client sent data within the freshness window.
+bool client_traffic_fresh() {
+  if (g_client_rx_us == nullptr) return false;
+  int64_t last = g_client_rx_us();
+  if (last <= 0) return false;
+  uint32_t window_s = std::max(CLIENT_RX_FRESH_S, g_interval_s.load() + 10);
+  return esp_timer_get_time() - last < static_cast<int64_t>(window_s) * 1000000;
 }
 
 // Snapshot RSSI (uplink via STA AP-record, downlink via the weakest associated
@@ -191,8 +252,15 @@ void record_sample(bool ok, uint16_t rtt_ms) {
   xSemaphoreGive(g_hist_mtx);
 }
 
-[[noreturn]] void do_reboot(const char *why) {
+[[noreturn]] void do_reboot(const char *why, bool carry = true) {
   ESP_LOGE(TAG, "%s — restarting to recover", why);
+  // Stop carrying once the backoff is at its cap with still no probe
+  // success: the next boot starts unarmed, so a board on a LAN where no
+  // probe target answers ends up rebooting at most ~6 times, not forever.
+  // The forced self-test carries only after a real probe success, so it
+  // exercises this path without starting a backoff chain.
+  g_carry_n = g_have_probe_ok ? 0 : g_backoff_shift + 1;
+  g_armed_carry = (carry && g_carry_n <= CARRY_MAX_SHIFT) ? ARMED_CARRY_MAGIC : 0;
   vTaskDelay(pdMS_TO_TICKS(150));  // let the log drain to serial/web-console
   esp_restart();
 }
@@ -204,7 +272,7 @@ void record_sample(bool ok, uint16_t rtt_ms) {
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(TICK_MS));
 
-    if (g_force_test.exchange(false)) do_reboot("forced liveness self-test");
+    if (g_force_test.exchange(false)) do_reboot("forced liveness self-test", /*carry=*/g_have_probe_ok);
     if (!g_enabled.load()) continue;
 
     uint32_t now = uptime_s();
@@ -232,14 +300,26 @@ void record_sample(bool ok, uint16_t rtt_ms) {
     record_sample(ok, rtt);
 
     if (ok) {
+      g_have_probe_ok = true;
+      g_backoff_shift = 0;
+      if (!g_armed.exchange(true)) ESP_LOGI(TAG, "probe target answered; armed");
+    } else if (client_traffic_fresh()) {
+      // HA is talking to us, so the LAN path works even if the gateway
+      // ignores port 80. The chart still records the failed probe.
+      ok = true;
+    }
+
+    if (ok) {
       g_failures.store(0);
       g_last_ok_s.store(now);
       g_have_ok.store(true);
       continue;
     }
 
+    if (!g_armed.load()) continue;  // no target has ever answered: no evidence of a wedge
+
     uint32_t f = g_failures.fetch_add(1) + 1;
-    uint32_t thr = g_threshold.load();
+    uint32_t thr = g_threshold.load() << g_backoff_shift;
     ESP_LOGW(TAG, "upstream LAN unreachable (%u/%u)", (unsigned)f, (unsigned)thr);
     if (f >= thr) do_reboot("upstream LAN unreachable past threshold");
   }
@@ -247,9 +327,27 @@ void record_sample(bool ok, uint16_t rtt_ms) {
 
 }  // namespace
 
+void set_client_rx_source(int64_t (*last_rx_us)()) { g_client_rx_us = last_rx_us; }
+
 void start() {
   if (g_started.exchange(true)) return;
   load_nvs();
+  if (EXTRA_TARGET[0] != '\0') {
+    if (parse_target(EXTRA_TARGET, &g_extra_ip_be, &g_extra_port)) {
+      ESP_LOGI(TAG, "extra probe target %s", EXTRA_TARGET);
+    } else {
+      ESP_LOGW(TAG, "ignoring bad extra probe target '%s' (want ip:port)", EXTRA_TARGET);
+    }
+  }
+  const bool carried = esp_reset_reason() == ESP_RST_SW && g_armed_carry == ARMED_CARRY_MAGIC;
+  g_armed_carry = 0;
+  if (carried) {
+    g_backoff_shift = std::min(g_carry_n, CARRY_MAX_SHIFT);
+    g_armed.store(true);
+    ESP_LOGW(TAG, "previous boot was a liveness restart; starting armed (threshold x%u)",
+             1u << g_backoff_shift);
+  }
+  g_carry_n = 0;
   g_hist_mtx = xSemaphoreCreateMutex();
   xTaskCreate(&task, "liveness", 4096, nullptr, 3, nullptr);
   ESP_LOGI(TAG, "started: interval=%us threshold=%u enabled=%d",
@@ -262,6 +360,7 @@ State get_state() {
   s.interval_s = g_interval_s.load();
   s.threshold = g_threshold.load();
   s.failures = g_failures.load();
+  s.armed = g_armed.load();
   s.last_ok_age_s = g_have_ok.load() ? (uptime_s() - g_last_ok_s.load()) : UINT32_MAX;
   return s;
 }

@@ -9,6 +9,8 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_netif.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -144,9 +146,30 @@ void set_abortive_close(int fd) {
   }
 }
 
+// esp_timer time of the last frame received from an upstream API client
+// (0 = none yet). The liveness watchdog takes it as proof that the STA path
+// works, so clients on loopback (the WS bridge) or on our own SoftAP subnet
+// don't count: they would keep a dead uplink looking alive.
+std::atomic<int64_t> g_last_rx_us{0};
+
 ssize_t socket_read(void *ctx, uint8_t *buf, size_t n) {
   int fd = *static_cast<int *>(ctx);
   return ::recv(fd, buf, n, 0);
+}
+
+// True if `peer` (network order) reaches us over the STA uplink: not
+// loopback and not inside the SoftAP's subnet.
+bool is_upstream_peer(uint32_t peer_be) {
+  const uint32_t host = ntohl(peer_be);
+  if ((host >> 24) == 127) return false;
+  esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+  esp_netif_ip_info_t info{};
+  if (ap != nullptr && esp_netif_is_netif_up(ap) &&
+      esp_netif_get_ip_info(ap, &info) == ESP_OK && info.netmask.addr != 0 &&
+      (peer_be & info.netmask.addr) == (info.ip.addr & info.netmask.addr)) {
+    return false;
+  }
+  return true;
 }
 
 // In one broadcast every client after the first gets only what is left of
@@ -498,12 +521,14 @@ void connection_task(void *arg) {
   // Captured now: after an abort/RST the PCB is gone and getpeername fails,
   // which is exactly the case the disconnect log needs it for.
   char peer_s[16] = "?";
+  bool upstream = false;
   {
     sockaddr_in peer{};
     socklen_t peer_len = sizeof(peer);
     if (::getpeername(client_fd, reinterpret_cast<sockaddr *>(&peer),
                       &peer_len) == 0) {
       inet_ntoa_r(peer.sin_addr, peer_s, sizeof(peer_s));
+      upstream = is_upstream_peer(peer.sin_addr.s_addr);
     }
   }
   ESP_LOGI(TAG, "client connected (fd=%d, id=%lu, total=%u)", client_fd,
@@ -518,7 +543,7 @@ void connection_task(void *arg) {
   const char *why = "unknown";
   while (dispatch_one(client_fd, client_id, rx_payload, sizeof(rx_payload),
                       &subs, &why)) {
-    // loop
+    if (upstream) g_last_rx_us.store(esp_timer_get_time(), std::memory_order_relaxed);
   }
   // A reaped socket's recv() fails as a side effect of our shutdown(), so
   // the reap is the real cause. Read it before unregister clears the slot.
@@ -664,6 +689,8 @@ void listener_task(void *) {
 bool has_active_client() {
   return g_active_count.load(std::memory_order_acquire) > 0;
 }
+
+int64_t last_rx_us() { return g_last_rx_us.load(std::memory_order_relaxed); }
 
 bool send_async(uint16_t msg_type, EncodeFn encode, void *ctx) {
   if (g_active_count.load(std::memory_order_acquire) == 0) return false;

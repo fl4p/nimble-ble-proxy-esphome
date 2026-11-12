@@ -55,9 +55,11 @@ inline constexpr uint16_t API_PORT = 6053;
 //   bit 0 = PASSIVE_SCAN
 //   bit 1 = ACTIVE_CONNECTIONS
 //   bit 2 = REMOTE_CACHING  (REQUIRED by modern aioesphomeapi for any
-//                            GATT connection through the proxy — we always
-//                            do a fresh discovery so we ignore cache hints,
-//                            but HA needs to see this bit to proceed)
+//                            GATT connection through the proxy). With it,
+//                            clients holding a service cache skip
+//                            GetServices on reconnect, so the proxy must
+//                            discover on its own: see ensure_discovered()
+//                            in bt_handlers.cpp.
 //   bit 5 = RAW_ADVERTISEMENTS
 // See bluetooth_proxy.h:42-50 in esphome for the full enum.
 inline constexpr uint32_t BT_PROXY_FEATURE_FLAGS =

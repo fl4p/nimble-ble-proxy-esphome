@@ -549,9 +549,10 @@ esp_err_t liveness_get(httpd_req_t *req) {
     snprintf(age, sizeof(age), "%u", static_cast<unsigned>(s.last_ok_age_s));
   int n = snprintf(buf, sizeof(buf),
                    "{\"enabled\":%s,\"interval\":%u,\"threshold\":%u,"
-                   "\"failures\":%u,\"last_ok_s\":%s}",
+                   "\"failures\":%u,\"armed\":%s,\"last_ok_s\":%s}",
                    s.enabled ? "true" : "false", static_cast<unsigned>(s.interval_s),
-                   static_cast<unsigned>(s.threshold), static_cast<unsigned>(s.failures), age);
+                   static_cast<unsigned>(s.threshold), static_cast<unsigned>(s.failures),
+                   s.armed ? "true" : "false", age);
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
 }
@@ -1805,7 +1806,12 @@ void replay_previous_boot(char *tail, esp_reset_reason_t reason) {
       if (*r != '\r') *w++ = *r;
     }
     *w = '\0';
-    if (*line != '\0') ESP_LOGW("prevboot", "%s", line);
+    // Skip lines that were themselves a replay (and its markers), so a
+    // second reset does not nest the boot before last into this one.
+    const bool replayed = std::strstr(line, ") prevboot: ") != nullptr ||
+                          std::strstr(line, "of the previous boot (reset:") != nullptr ||
+                          std::strstr(line, "---- end of previous boot ----") != nullptr;
+    if (*line != '\0' && !replayed) ESP_LOGW("prevboot", "%s", line);
     line = (nl != nullptr) ? nl + 1 : nullptr;
   }
   ESP_LOGW(TAG, "---- end of previous boot ----");

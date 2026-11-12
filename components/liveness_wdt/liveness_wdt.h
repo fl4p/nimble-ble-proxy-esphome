@@ -2,9 +2,9 @@
 // and esp_restart()s the device after sustained failure. Recovers a total
 // network wedge (WiFi/coex livelock under heavy forwarded throughput) where
 // tasks stay alive — so the IDF Task-WDT never fires — but the IP path is dead.
-// The probe is multi-target (STA gateway + a known-open LAN host) and only a
-// cycle where *all* targets are unreachable counts as a failure, so a single
-// filtered/down target can't trigger a spurious reboot.
+// A cycle passes if the STA gateway (TCP :80) or the optional extra target
+// answers, or an API client sent data recently. Reboots are armed only after
+// a probe target answered once this boot.
 
 #pragma once
 
@@ -17,11 +17,16 @@ namespace liveness_wdt {
 // Idempotent — a second call is a no-op. No-op when CONFIG_NBP_LIVENESS_WDT=n.
 void start();
 
+// Where to read the last API-client receive time (esp_timer µs, 0 = never).
+// Recent client traffic counts as a passed cycle. Call before start().
+void set_client_rx_source(int64_t (*last_rx_us)());
+
 struct State {
   bool enabled;
   uint32_t interval_s;     // seconds between probe cycles
   uint32_t threshold;      // consecutive failed cycles before reboot
   uint32_t failures;       // current consecutive-failure count
+  bool armed;              // a probe target answered this boot; reboots possible
   uint32_t last_ok_age_s;  // seconds since the last reachable cycle (UINT32_MAX if never)
 };
 

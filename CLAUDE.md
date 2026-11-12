@@ -612,3 +612,28 @@
   24→12 (~3.8 KiB), freeing a proxy slot's remote attribute cache on
   disconnect (a few KiB per peer; needs care: discovery may be walking it).
 
+## Liveness watchdog targets (v0.2.4, issue #2)
+
+- The probe used to hard-code Fab's lab broker `192.168.1.200:1882` as the
+  second target. On other LANs it never answered, the gateway (`:80`) was the
+  only target, and a slow or filtered gateway rebooted a reporter's C3 every
+  ~3 min. Now: gateway `:80`, plus `CONFIG_NBP_LIVENESS_EXTRA_TARGET`
+  ("ip:port", empty in the repo; set it in a local sdkconfig for the lab
+  repeater). Only a handshake or a RST counts as reachable; local socket
+  errors count as failures.
+- Frames from an *upstream* API client within 60 s also pass a cycle
+  (`api_server::last_rx_us`; loopback = WS bridge and SoftAP-subnet peers
+  don't count, they would hide a dead uplink).
+- Reboots arm only after a probe target answered once this boot (`"armed"`
+  in `GET /liveness`). A liveness reboot carries the armed state across
+  `esp_restart` (`__NOINIT` magic), so a wedge that recurs before the first
+  probe still reboots. Each carried reboot without a probe success doubles
+  the threshold (cap 32x), so a board moved to a LAN whose gateway ignores
+  `:80` backs off instead of looping.
+- Panic records already survive the reset: `GET /crash` (crash_capture).
+  Ask for it before guessing at a `panic` reset reason.
+- On-demand GATT discovery (`ensure_discovered`, bt_handlers.cpp) retries
+  while a link's last discovery failed part-way (`g_partial`). Known
+  pre-existing risk: any `discoverAttributes()` after notifications are on
+  (GetServices, or that retry) deletes the service list on the connection
+  task while the host task may walk it for a notification.
