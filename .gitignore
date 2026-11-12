@@ -45,3 +45,8 @@ web-flasher/firmware/
 
 # Local pi subagent artifacts.
 .pi-subagents/
+
+# Extra build dirs (idf.py -B build-<x>) and the ELF archive used to
+# symbolicate core dumps (etc/idf-devtools/elf_archive.py).
+build-*/
+elf-archive/

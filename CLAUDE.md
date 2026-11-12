@@ -385,8 +385,8 @@
   reset but power-on, `install_log_hook` re-logs the last 1.5 KB of the
   previous boot under tag `prevboot`, plus `reset reason: …`. To diagnose
   an unexplained reboot, read `/log` after it comes back. Panic/WDT
-  backtraces go through `esp_rom_printf`, not the hook, so they are not in
-  it (serial only).
+  backtraces go through `esp_rom_printf`, not the hook, so the ring does
+  not hold them; `crash_capture` (next section) records them instead.
 - **`NimBLEClient: unknown handle: N` is a dropped notification, not noise —
   don't mute it.** The proxy forwards notifications via
   `chr->setNotifyCallback` on NimBLEClient's own attribute cache
@@ -396,3 +396,50 @@
   during discovery). Open question: why is the handle missing (notifies
   arriving before discovery finishes, or HA skipping discovery with cached
   services)?
+
+## Crash capture: panic info and core dumps over HTTP (`components/crash_capture`)
+
+- **Two layers, both read over HTTP** (no serial needed):
+  1. **RTC record** (`CONFIG_NBP_CRASH_CAPTURE`, default y). `-Wl,--wrap=
+     esp_panic_handler` runs `__wrap_esp_panic_handler` before IDF's handler:
+     it copies reason, abort/assert text, PC, EXCVADDR/MTVAL, cause, task name,
+     a 16-entry walked backtrace and the first 8 bytes of the ELF SHA into
+     `RTC_NOINIT` memory (last 3 panics, ~1 KB RTC slow, CRC-checked). The next
+     boot logs new records to `/log` (tag `crash`, IDF `Backtrace:` format).
+     Needs no partition-table change. On RISC-V (C3/C6) there is no unwinder:
+     entries after mepc/ra are a stack scan for code addresses (`stack_scan`).
+  2. **ELF core dump to flash** (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH`,
+     `sdkconfig.defaults`). Partition `coredump` at 0x3E0000 (128 KB, after
+     `ota_1`, all older offsets unchanged). **An app OTA never rewrites the
+     table at 0x8000**, so devices flashed before it was added have no such
+     partition: `crash_capture::init()` then registers the free flash after
+     the last partition with `esp_partition_register_external()` (rejects any
+     overlap with the running table, bounded by the header flash size) and
+     re-runs `esp_core_dump_init()`. Boot shows `esp_core_dump_flash: No core
+     dump partition found!` twice (IDF's own init, before app_main), then
+     `crash: partition table has no coredump partition; using free flash
+     0x3e0000+0x20000`. That is expected.
+- **Endpoints:** `GET /crash` (JSON: records newest first, `running_elf`,
+  `coredump.{region,state,size}`), `GET /coredump` (raw core, 404 if none),
+  `POST /crash?erase=1` (clears records and the core dump),
+  `POST /crash-test?kind=null|abort&confirm=yes` (`CONFIG_NBP_CRASH_TEST`,
+  panics 500 ms after replying). A test panic within
+  `NBP_CLONE_BOOT_GUARD_SECS` of boot trips the clone boot guard.
+- **Symbolicate:** `scripts/crash_decode.py --host <ip>` (or
+  `scripts/crash_decode.py crash.json coredump.bin`) runs addr2line on the
+  RTC backtraces and `esp-coredump info_corefile` on the core, picking the ELF
+  from `elf-archive/` by SHA. Needs the IDF env (addr2line, esp-coredump) and
+  `zstd`. **Archive the ELF of every image you flash**: `idf.py flash` does it
+  via `idf_ext.py`; after an OTA run `python3 etc/idf-devtools/elf_archive.py
+  archive <device> --method ota --build-dir <dir>`. `esp-coredump` only
+  decodes against the exact ELF (`CONFIG_APP_RETRIEVE_LEN_ELF_SHA=64`).
+  After a fresh clone: `git submodule update --init etc/idf-devtools`.
+- **RAM cost** (IDF 5.5, measured with `idf.py size`): S3 −4.3 KB DIRAM,
+  C3 −3.2 KB DRAM vs. both off. Most of it is the core dump (1.8 KB own stack,
+  `CONFIG_ESP_COREDUMP_STACK_SIZE=1792`, plus ~1 KB buffers) and ~1.1 KB of
+  FreeRTOS data it pulls in. The RTC record costs no heap (RTC slow memory).
+- **QEMU** (`idf.py qemu`, IDF 6.0.3, esp32s3) reaches app_main and is enough to
+  test the capture path: a forced panic in `crash_capture::init()` produced a
+  matching RTC record and a valid core on the next boot with the *old* table.
+  IDF 5.5 images hang in QEMU after `coexist:` before app_main (unchanged
+  v0.2.3 does too), so they cannot be boot-tested there.
