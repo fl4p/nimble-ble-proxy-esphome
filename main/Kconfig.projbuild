@@ -506,10 +506,22 @@ config NBP_WEB_CONSOLE
         colors via ansi_up. UART/JTAG output is unaffected — this
         is purely a copy.
 
-        Ring sizes itself from CONFIG_BT_NIMBLE_LOG_LEVEL_DEBUG:
-        64 KiB with NimBLE DEBUG on, 8 KiB otherwise. The 64 KiB
-        path is the dashboard's largest BSS consumer; disable here
-        if you don't need the web console (UART logging stays).
+        Ring size is NBP_WEB_CONSOLE_RING_SIZE, or 64 KiB when NimBLE
+        logs at DEBUG. The 64 KiB path is the dashboard's largest BSS
+        consumer; disable here if you don't need the web console (UART
+        logging stays).
+
+config NBP_WEB_CONSOLE_RING_SIZE
+    int "Web UI: log ring size in bytes"
+    depends on NBP_WEB_CONSOLE
+    range 1024 65536
+    default 4096
+    help
+        RAM (.noinit DRAM, taken from the heap region) for the /log ring.
+        4 KiB holds roughly 50 log lines; the dashboard polls every
+        500 ms, so it only loses lines while no page is open. Was 8 KiB
+        before 2026-11 (heap pressure on the no-PSRAM S3 NAT build).
+        Ignored (64 KiB) when NimBLE logs at DEBUG.
 
 config NBP_CRASH_CAPTURE
     bool "Keep panic info across the reboot (/crash, /coredump)"

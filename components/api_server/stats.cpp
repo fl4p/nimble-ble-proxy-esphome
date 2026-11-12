@@ -77,7 +77,8 @@ NatThroughputProvider g_nat_throughput_provider = nullptr;
 #if defined(CONFIG_BT_NIMBLE_LOG_LEVEL_DEBUG) || defined(CONFIG_NIMBLE_CPP_LOG_LEVEL_DEBUG)
 constexpr size_t LOG_RING_SIZE = 65536;
 #else
-constexpr size_t LOG_RING_SIZE = 8192;
+// Kconfig NBP_WEB_CONSOLE_RING_SIZE (4 KiB; 8 KiB before 2026-11).
+constexpr size_t LOG_RING_SIZE = CONFIG_NBP_WEB_CONSOLE_RING_SIZE;
 #endif
 // The ring lives in .noinit DRAM: not zeroed at boot, so it survives a
 // panic, a watchdog reset or esp_restart() (e.g. the liveness WDT). The next
@@ -87,7 +88,9 @@ constexpr size_t LOG_RING_SIZE = 8192;
 __NOINIT_ATTR char g_log_ring[LOG_RING_SIZE];
 __NOINIT_ATTR uint32_t g_log_seq;
 __NOINIT_ATTR uint32_t g_log_magic;
-constexpr uint32_t LOG_MAGIC = 0x4E42504Cu;  // "NBPL"
+// "NBPL" mixed with the ring size: after an OTA that changes the size the
+// old ring is not ours (the .noinit layout moved), so it is not replayed.
+constexpr uint32_t LOG_MAGIC = 0x4E42504Cu ^ static_cast<uint32_t>(LOG_RING_SIZE);
 // How much of the previous boot's log to replay (most recent bytes).
 constexpr size_t PREV_TAIL_BYTES = 1536;
 SemaphoreHandle_t g_log_mutex = nullptr;
