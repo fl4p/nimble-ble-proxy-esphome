@@ -511,4 +511,30 @@ config NBP_WEB_CONSOLE
         path is the dashboard's largest BSS consumer; disable here
         if you don't need the web console (UART logging stays).
 
+config NBP_CRASH_CAPTURE
+    bool "Keep panic info across the reboot (/crash, /coredump)"
+    default y
+    help
+        Wraps esp_panic_handler to copy the exception (reason, abort/
+        assert message, PC, faulting address, task, backtrace) into
+        RTC_NOINIT memory before IDF prints it to the UART. The next
+        boot logs it to /log and serves it at GET /crash; POST
+        /crash?erase=1 clears it. Needs no partition-table change, so
+        it works on devices that can only be updated over OTA.
+
+        With CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH it also serves the
+        full ELF core dump at GET /coredump. When the running partition
+        table has no `coredump` partition (devices flashed before it
+        was added), the free flash after the last partition is
+        registered as one at runtime, so OTA-only devices get a full
+        dump too.
+
+config NBP_CRASH_TEST
+    bool "POST /crash-test?kind=null|abort&confirm=yes panics on purpose"
+    depends on NBP_CRASH_CAPTURE
+    default y
+    help
+        Deliberate panic to exercise the capture path end to end. The
+        request must carry confirm=yes; anything else is rejected.
+
 endmenu

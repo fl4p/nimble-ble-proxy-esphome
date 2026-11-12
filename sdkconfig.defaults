@@ -152,6 +152,19 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 
+# Crash dumps (see components/crash_capture). ELF core dump to the
+# `coredump` partition at the end of flash; devices whose table predates it
+# get the same region registered at runtime. The full 64-char ELF SHA lets
+# esp-coredump / etc/idf-devtools/elf_archive.py match the dump to its ELF
+# (a 9-char prefix never equals the ELF's 64-char SHA, so the decode drops
+# to addr2line only). STACK_SIZE: run the dump on its own stack, so a crash
+# in a task with little stack headroom still gets a dump (1.8 KB DRAM).
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_COREDUMP_CHECK_BOOT=y
+CONFIG_ESP_COREDUMP_STACK_SIZE=1792
+CONFIG_APP_RETRIEVE_LEN_ELF_SHA=64
+
 # C++ exceptions disabled — IDF default; cheaper code.
 CONFIG_COMPILER_CXX_EXCEPTIONS=n
 CONFIG_COMPILER_CXX_RTTI=n

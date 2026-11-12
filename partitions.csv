@@ -10,3 +10,8 @@ otadata,  data, ota,     0xf000,   0x2000,
 phy_init, data, phy,     0x11000,  0x1000,
 ota_0,    app,  ota_0,   0x20000,  0x1E0000,
 ota_1,    app,  ota_1,   0x200000, 0x1E0000,
+# ELF core dump (CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH). Appended in the free
+# 128 KB after ota_1 so every offset above is unchanged. An app OTA does not
+# rewrite this table, so devices flashed before this line get the same
+# region registered at runtime (components/crash_capture).
+coredump, data, coredump, 0x3E0000, 0x20000,

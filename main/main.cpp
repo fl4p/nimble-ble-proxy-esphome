@@ -2,6 +2,7 @@
 // Each subsystem is a separate IDF component; main just wires them together.
 
 #include "ble_backend.h"
+#include "crash_capture.h"
 #include "proxy_config.h"
 #include "stats.h"
 #include "serial_provision.h"
@@ -135,6 +136,11 @@ extern "C" void app_main() {
   }
   ESP_ERROR_CHECK(err);
 
+  // Report a panic captured by the previous boot (RTC record, flash core
+  // dump) into /log, and give a pre-coredump partition table a coredump
+  // region. After install_log_hook so it lands in the web console.
+  crash_capture::init();
+
   ESP_ERROR_CHECK(esp_event_loop_create_default());
 
   ESP_LOGI(TAG, "nimble-ble-proxy %s booting",
@@ -201,6 +207,7 @@ extern "C" void app_main() {
   // Piggyback the stats UI on the OTA httpd so we don't burn an extra
   // LWIP socket budget on a second listener.
   api_server::stats::register_endpoints(ota::handle());
+  crash_capture::register_endpoints(ota::handle());
 #if CONFIG_NBP_LIVENESS_WDT
   // Self-recovery: reboot if the upstream LAN goes unreachable for a sustained
   // window (a WiFi/coex livelock under heavy forwarded throughput keeps tasks
