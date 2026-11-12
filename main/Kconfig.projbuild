@@ -519,7 +519,8 @@ config NBP_CRASH_CAPTURE
         assert message, PC, faulting address, task, backtrace) into
         RTC_NOINIT memory before IDF prints it to the UART. The next
         boot logs it to /log and serves it at GET /crash; POST
-        /crash?erase=1 clears it. Needs no partition-table change, so
+        /crash?erase=1 with the header `X-Crash-Confirm: yes` clears
+        it. Needs no partition-table change, so
         it works on devices that can only be updated over OTA.
 
         With CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH it also serves the
@@ -530,11 +531,17 @@ config NBP_CRASH_CAPTURE
         dump too.
 
 config NBP_CRASH_TEST
-    bool "POST /crash-test?kind=null|abort&confirm=yes panics on purpose"
+    bool "POST /crash-test panics on purpose (test builds only)"
     depends on NBP_CRASH_CAPTURE
-    default y
+    default n
     help
-        Deliberate panic to exercise the capture path end to end. The
-        request must carry confirm=yes; anything else is rejected.
+        Deliberate panic to exercise the capture path end to end:
+        POST /crash-test?kind=null|abort with the header
+        `X-Crash-Confirm: yes` (anything else is rejected). The header
+        is not CORS-safelisted and the server answers no preflight, so
+        another web page cannot trigger it from a visitor's browser,
+        but anyone who can reach the device can. Keep it off in
+        firmware for deployed devices; turn it on for a test build with
+        -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.crashtest".
 
 endmenu

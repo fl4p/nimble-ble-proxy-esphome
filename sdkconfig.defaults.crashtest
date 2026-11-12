@@ -1,0 +1,4 @@
+# Test-build overlay: enables POST /crash-test (deliberate panic).
+#   idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.crashtest" build
+# Never for firmware that goes to a deployed device.
+CONFIG_NBP_CRASH_TEST=y

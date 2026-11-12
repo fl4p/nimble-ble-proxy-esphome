@@ -403,11 +403,13 @@
   1. **RTC record** (`CONFIG_NBP_CRASH_CAPTURE`, default y). `-Wl,--wrap=
      esp_panic_handler` runs `__wrap_esp_panic_handler` before IDF's handler:
      it copies reason, abort/assert text, PC, EXCVADDR/MTVAL, cause, task name,
-     a 16-entry walked backtrace and the first 8 bytes of the ELF SHA into
-     `RTC_NOINIT` memory (last 3 panics, ~1 KB RTC slow, CRC-checked). The next
-     boot logs new records to `/log` (tag `crash`, IDF `Backtrace:` format).
-     Needs no partition-table change. On RISC-V (C3/C6) there is no unwinder:
-     entries after mepc/ra are a stack scan for code addresses (`stack_scan`).
+     a 16-entry walked backtrace, a random nonce and the first 8 bytes of the
+     ELF SHA (read at panic time, so a panic before `init()` still names its
+     image) into `RTC_NOINIT` memory (last 3 panics, ~1 KB RTC slow,
+     CRC-checked). The next boot logs new records to `/log` (tag `crash`, IDF
+     `Backtrace:` format). Needs no partition-table change. On RISC-V (C3/C6)
+     there is no unwinder: entries after mepc/ra are a stack scan for code
+     addresses (`stack_scan`).
   2. **ELF core dump to flash** (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH`,
      `sdkconfig.defaults`). Partition `coredump` at 0x3E0000 (128 KB, after
      `ota_1`, all older offsets unchanged). **An app OTA never rewrites the
@@ -419,31 +421,88 @@
      dump partition found!` twice (IDF's own init, before app_main), then
      `crash: partition table has no coredump partition; using free flash
      0x3e0000+0x20000`. That is expected.
-- **Endpoints:** `GET /crash` (JSON: records newest first, `running_elf`,
-  `coredump.{region,state,size}`), `GET /coredump` (raw core, 404 if none),
-  `POST /crash?erase=1` (clears records and the core dump),
-  `POST /crash-test?kind=null|abort&confirm=yes` (`CONFIG_NBP_CRASH_TEST`,
-  panics 500 ms after replying). A test panic within
-  `NBP_CLONE_BOOT_GUARD_SECS` of boot trips the clone boot guard.
+- **A panic during capture must not cost the records.** The record is built
+  in a DRAM scratch copy and committed to RTC last (slot, count, then CRC);
+  a nested entry (fault inside capture or inside IDF's handler/core dump, or
+  the other core panicking) finishes the commit and flags the record
+  `nested`, so the CRC always matches before the reset. Ownership is an
+  `esp_cpu_compare_and_set`. The old code bumped `count` before the CRC, and
+  a fault in between made the next boot wipe all records silently.
+- **The boot reports what it could not capture.** `init()` logs at E level
+  when the store failed its CRC (`store_state` `corrupt`), at W when an OTA
+  changed the layout (`old_layout`; the version word is `kLayout << 16 |
+  sizeof(Store)`, so bump `kLayout` on any Record/Store change), and
+  `crash reset (<reason>), no record captured` when `esp_reset_reason()` is a
+  panic/WDT/lockup but no new record arrived. `GET /crash` carries
+  `last_reset_reason`, `store_was_valid`, `store_state` and
+  `crash_without_record`.
+- **Core dump ↔ record tie.** `capture()` writes seq/uptime/nonce into
+  `g_core_tag` (`COREDUMP_DRAM_ATTR`, so it is in every core; magic
+  `NBPCTAG1`) and the nonce into the record. `crash_decode.py` refuses a core
+  whose tag is not the newest record's (exit 2: stale, or nonce 0 = a panic
+  that recorded nothing) or that has no record to compare against (exit 3);
+  `--allow-stale` / `--allow-unverified` print it anyway. PC and task alone
+  are not enough: the same bug crashes at the same PC every time. Cores from
+  firmware before the tag fall back to task+PC and say so.
+- **Endpoints:** `GET /crash` (JSON, chunked, no size cap: records newest
+  first, `running_elf`, the boot fields above, `coredump.{region,state,size,
+  error}`), `GET /coredump` (raw core, 404 unless its checksum is valid),
+  `GET /coredump?raw=1` (the region whatever its state; header
+  `X-Coredump-State`), `POST /crash?erase=1` (clears records and the core
+  dump). `coredump.state` is `none` (blank), `ok`, `invalid` (header
+  unreadable, with the IDF error) or `bad_checksum`; only `none` means there
+  is nothing there.
+- **Destructive endpoints need the header `X-Crash-Confirm: yes`** (erase and
+  crash-test). It is not CORS-safelisted and the server answers no preflight,
+  so a page on another origin cannot fire them from a browser. It is not
+  authentication: anyone on the LAN can still send it.
+- **`POST /crash-test?kind=null|abort` is compiled out by default**
+  (`CONFIG_NBP_CRASH_TEST` default n since 2026-11-12). For a test build use
+  `-DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.crashtest"`.
+  Never put a crash-test build on a deployed device; test panics belong in
+  QEMU (below). A test panic within `NBP_CLONE_BOOT_GUARD_SECS` of boot trips
+  the clone boot guard.
 - **Symbolicate:** `scripts/crash_decode.py --host <ip>` (or
   `scripts/crash_decode.py crash.json coredump.bin`) runs addr2line on the
   RTC backtraces and `esp-coredump info_corefile` on the core, picking the ELF
   from `elf-archive/` by SHA. Needs the IDF env (addr2line, esp-coredump) and
-  `zstd`. **Archive the ELF of every image you flash**: `idf.py flash` does it
-  via `idf_ext.py`; after an OTA run `python3 etc/idf-devtools/elf_archive.py
-  archive <device> --method ota --build-dir <dir>`. `esp-coredump` only
-  decodes against the exact ELF (`CONFIG_APP_RETRIEVE_LEN_ELF_SHA=64`).
-  The ELF core stores that SHA as 64 hex chars; `elf_archive.py decode`'s
-  own auto-match searches for the 32 raw bytes, misses, and silently falls
-  back to "latest build flashed", so `crash_decode.py` matches the hex itself
-  and passes `--sha`.
+  `zstd`. `app_elf_sha256` is the SHA-256 of the ELF file, so every ELF is
+  hashed before use: an archive blob that is not the build its metadata
+  names, a metadata SHA that differs beyond the 8-hex blob key, or an
+  `--elf` that is not the crashed build all fail (exit 2) instead of
+  decoding garbage. **Archive the ELF of every image you flash**: `idf.py
+  flash` does it via `idf_ext.py`; after an OTA run `python3
+  etc/idf-devtools/elf_archive.py archive <device> --method ota --build-dir
+  <dir>`. `esp-coredump` only decodes against the exact ELF
+  (`CONFIG_APP_RETRIEVE_LEN_ELF_SHA=64`). `elf_archive.py` matches the core's
+  SHA as 64 hex chars or 32 raw bytes, and guesses from the flash history only
+  when given `--device/--at`, with a warning.
   After a fresh clone: `git submodule update --init etc/idf-devtools`.
+- **Build guard:** `components/crash_capture/check_panic_wrap.py` runs after
+  every link (deferred `POST_BUILD` on the ELF) and fails the build, deleting
+  the ELF, unless the map's cross-reference table shows `panic_handler.c.obj`
+  referencing `__wrap_esp_panic_handler` and nothing but crash_capture
+  calling the real `esp_panic_handler`. `--wrap` only rewrites references
+  between objects, so an IDF refactor would otherwise make the capture dead
+  code without a warning. Costs ~0.05 s.
+- **`CONFIG_ESP_PANIC_HANDLER_IRAM` is incompatible** (`#error`): the wrapper
+  and what it calls run from flash. **Task-WDT expiry is not captured**:
+  `CONFIG_ESP_TASK_WDT_PANIC` is off, so the TWDT only prints and no panic
+  happens. Turning it on would reboot the device on every TWDT trigger, a
+  runtime behaviour change, so it is left off.
 - **RAM cost** (IDF 5.5, measured with `idf.py size`): S3 −4.3 KB DIRAM,
   C3 −3.2 KB DRAM vs. both off. Most of it is the core dump (1.8 KB own stack,
   `CONFIG_ESP_COREDUMP_STACK_SIZE=1792`, plus ~1 KB buffers) and ~1.1 KB of
-  FreeRTOS data it pulls in. The RTC record costs no heap (RTC slow memory).
+  FreeRTOS data it pulls in. The RTC record costs no heap (RTC slow memory);
+  the scratch record adds ~0.4 KB DRAM .bss.
 - **QEMU** (`idf.py qemu`, IDF 6.0.3, esp32s3) reaches app_main and is enough to
-  test the capture path: a forced panic in `crash_capture::init()` produced a
-  matching RTC record and a valid core on the next boot with the *old* table.
-  IDF 5.5 images hang in QEMU after `coexist:` before app_main (unchanged
-  v0.2.3 does too), so they cannot be boot-tested there.
+  test the capture path. IDF 5.5 images hang in QEMU after `coexist:` before
+  app_main (unchanged v0.2.3 does too), so they cannot be boot-tested there.
+  **Self-test:** build with `idf.py -B build-qemu-st -DNBP_CRASH_SELFTEST=1
+  build` (compile define, never a firmware build). Each boot runs one step
+  and prints the `/crash` JSON between `SELFTEST-JSON-BEGIN/END n` lines:
+  plain panic; fault while committing; fault while building; corrupted CRC +
+  restart; panic with capture skipped. Every step logs `SELFTEST step n:
+  PASS|FAIL`. Run QEMU without the download strap (`idf.py qemu` adds none;
+  `strap_mode=0x07` waits for UART download). IDF logs land in the stdout JSON
+  dump, so strip `ESC[…m` log lines before parsing it.
