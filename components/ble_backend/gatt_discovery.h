@@ -2,10 +2,9 @@
 // in the caller's task (NimBLE walks the peer's attribute table over
 // air; this blocks for ~hundreds of ms for typical peripherals).
 //
-// V1 emits ONE BluetoothGATTGetServicesResponse per request — fine for
-// the ~8 services / 12 chars / 6 descriptors limits set in
-// api_subset.options. Real chunking against proxy::GATT_DISCOVERY_CHUNK_BYTES
-// is a v0.2 concern when proxying complex peripherals.
+// Emits one BluetoothGATTGetServicesResponse per service (any number of
+// services; 12 chars / 6 descriptors each, api_subset.options), then the
+// Done response.
 
 #pragma once
 
@@ -25,7 +24,7 @@ enum class Status : int32_t {
 
 // Run discovery on a connected slot owned by API client `owner` (see
 // connection::OwnerId). A link held by another client is treated as not
-// connected. Emits one services response + one done response (or one
+// connected. Emits one services response per service + one done response (or one
 // error response) to `owner` only (publish::send_to).
 // Returns the final status; callers usually log + ignore.
 //

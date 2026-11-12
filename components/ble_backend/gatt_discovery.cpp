@@ -71,17 +71,21 @@ void pack_uuid(const NimBLEUUID &uuid, uint32_t *short_out,
 }
 
 // Context owned for the duration of one discovery — passed to send_to
-// for the services + done encodes.
+// for each services response.
 //
-// HEAP-allocated: proxyapi_BluetoothGATTGetServicesResponse is ~25 KiB
-// (worst-case static nanopb arrays for 8 services × 12 chars × 6 descs).
-// api_client tasks have only 8 KiB stack, so this MUST NOT live on the
-// stack of run(). send_to invokes the encode callback synchronously
-// before returning, so unique_ptr scoped to run() is sufficient.
+// One service per BluetoothGATTGetServicesResponse (api_subset.options:
+// services max_count 1), as ESPHome itself sends them; aioesphomeapi
+// collects responses until the Done message. The struct is ~2.9 KiB (12
+// chars x 6 descs of static nanopb arrays). It used to hold 8 services,
+// ~23 KiB in ONE contiguous block: the field OOM of 2026-11-12 was exactly
+// that allocation (operator new(23376) with heap_min 244 B), and a 23 KiB
+// block is rarely free on the NAT build even when 40 KiB are. 8 services of
+// a real peer did not fit MAX_MESSAGE_SIZE (2048) either.
 //
-// Allocated with oom_guard::make_unique, NOT std::make_unique: without
-// C++ exceptions a failed throwing new aborts (field crash 2026-11-12,
-// heap_min 244 B, api_client task), so the nullptr check was dead code.
+// HEAP-allocated, not on the api_client stack (8 KiB). send_to invokes the
+// encode callback synchronously before returning, so unique_ptr scoped to
+// run() is sufficient. Allocated with oom_guard::make_unique, NOT
+// std::make_unique: without C++ exceptions a failed throwing new aborts.
 struct ServicesEncodeCtx {
   proxyapi_BluetoothGATTGetServicesResponse msg;
 };
@@ -212,7 +216,7 @@ Status run(uint64_t address, uint32_t owner) {
   }
 #endif
 
-  // After the walk, not before: holding ~25 KiB through discovery would
+  // After the walk, not before: holding it through discovery would
   // squeeze the NimBLE allocations above, whose failure aborts.
   auto ctx = oom_guard::make_unique<ServicesEncodeCtx>();
   if (ctx == nullptr) {
@@ -226,19 +230,14 @@ Status run(uint64_t address, uint32_t owner) {
     emit_error(owner, address, kErrNoMemory);
     return Status::NoMemory;
   }
-  ctx->msg = proxyapi_BluetoothGATTGetServicesResponse_init_zero;
-  ctx->msg.address = address;
-  ctx->msg.services_count = 0;
 
   static const std::vector<NimBLERemoteService *> kNoServices;
   const auto &services = client != nullptr
                              ? client->getServices(/*refresh=*/false)
                              : kNoServices;
 
-  // Hard cap by the static array bound; over-budget peripherals get
-  // silently truncated for v1 (logged so we notice).
-  constexpr size_t kMaxServices =
-      sizeof(ctx->msg.services) / sizeof(ctx->msg.services[0]);
+  static_assert(sizeof(ctx->msg.services) / sizeof(ctx->msg.services[0]) == 1,
+                "one service per response: services max_count must be 1");
   constexpr size_t kMaxChars =
       sizeof(ctx->msg.services[0].characteristics) /
       sizeof(ctx->msg.services[0].characteristics[0]);
@@ -246,15 +245,11 @@ Status run(uint64_t address, uint32_t owner) {
       sizeof(ctx->msg.services[0].characteristics[0].descriptors) /
       sizeof(ctx->msg.services[0].characteristics[0].descriptors[0]);
 
-  size_t svc_idx = 0;
   for (const auto *svc : services) {
-    if (svc_idx >= kMaxServices) {
-      ESP_LOGW(TAG, "truncating: more than %u services on %012llx",
-               static_cast<unsigned>(kMaxServices),
-               static_cast<unsigned long long>(address));
-      break;
-    }
-    auto &out_svc = ctx->msg.services[svc_idx];
+    ctx->msg = proxyapi_BluetoothGATTGetServicesResponse_init_zero;
+    ctx->msg.address = address;
+    ctx->msg.services_count = 1;
+    auto &out_svc = ctx->msg.services[0];
     out_svc = proxyapi_BluetoothGATTService_init_zero;
     out_svc.handle = svc->getHandle();
     pack_uuid(svc->getUUID(), &out_svc.short_uuid, out_svc.uuid,
@@ -264,7 +259,12 @@ Status run(uint64_t address, uint32_t owner) {
     out_svc.characteristics_count = 0;
     size_t ch_idx = 0;
     for (auto *chr : chars) {
-      if (ch_idx >= kMaxChars) break;
+      if (ch_idx >= kMaxChars) {
+        ESP_LOGW(TAG, "truncating: more than %u characteristics in service "
+                 "0x%04x on %012llx", static_cast<unsigned>(kMaxChars),
+                 svc->getHandle(), static_cast<unsigned long long>(address));
+        break;
+      }
       auto &out_ch = out_svc.characteristics[ch_idx];
       out_ch = proxyapi_BluetoothGATTCharacteristic_init_zero;
       out_ch.handle = chr->getHandle();
@@ -288,17 +288,16 @@ Status run(uint64_t address, uint32_t owner) {
       ++ch_idx;
     }
     out_svc.characteristics_count = ch_idx;
-    ++svc_idx;
-  }
-  ctx->msg.services_count = svc_idx;
 
-  // Services, done and errors answer the owner's request only.
-  if (!publish::send_to(owner,
-                        proxyapi::MSG_BLUETOOTH_GATT_GET_SERVICES_RESPONSE,
-                        &encode_services, ctx.get())) {
-    ESP_LOGW(TAG, "send services failed");
-    return Status::SendFailed;
+    // Services, done and errors answer the owner's request only.
+    if (!publish::send_to(owner,
+                          proxyapi::MSG_BLUETOOTH_GATT_GET_SERVICES_RESPONSE,
+                          &encode_services, ctx.get())) {
+      ESP_LOGW(TAG, "send services failed");
+      return Status::SendFailed;
+    }
   }
+  ctx.reset();
 
   DoneEncodeCtx d;
   d.msg = proxyapi_BluetoothGATTGetServicesDoneResponse_init_zero;

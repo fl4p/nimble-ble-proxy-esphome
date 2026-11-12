@@ -34,12 +34,13 @@ proxyapi.BluetoothConnectionsFreeResponse.allocated   max_count:4
 proxyapi.BluetoothGATTDescriptor.uuid                 max_count:2
 proxyapi.BluetoothGATTCharacteristic.uuid             max_count:2
 proxyapi.BluetoothGATTService.uuid                    max_count:2
-# Per-chunk caps for discovery responses. Chunks are flushed when encoded
-# size exceeds proxy::GATT_DISCOVERY_CHUNK_BYTES, so these are just safety
-# upper bounds — bump if you proxy unusually complex peripherals.
+# Per-response caps for discovery. gatt_discovery sends ONE service per
+# GetServicesResponse (as ESPHome does), so the response struct is ~2.9 KiB
+# instead of ~23 KiB for 8 services (field OOM 2026-11-12). Characteristics
+# and descriptors beyond these caps are truncated (logged).
 proxyapi.BluetoothGATTCharacteristic.descriptors      max_count:6
 proxyapi.BluetoothGATTService.characteristics         max_count:12
-proxyapi.BluetoothGATTGetServicesResponse.services    max_count:8
+proxyapi.BluetoothGATTGetServicesResponse.services    max_count:1
 
 # ---- GATT read/write/notify payloads ----
 # Bounded by negotiated MTU (≤ ATT_MTU_MAX = 517). 512 is the GATT spec cap

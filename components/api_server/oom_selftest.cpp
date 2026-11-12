@@ -189,18 +189,26 @@ bool read_error(proxyapi_BluetoothGATTErrorResponse *out, uint16_t *type) {
 
 void step_get_services_ok() {
   if (!get_services_request()) return result("getservices_ok", false, "send");
-  uint16_t t1 = 0, t2 = 0;
+  // One response per service (none here: no BLE in QEMU), then Done.
+  uint16_t t = 0;
   size_t l = 0;
-  bool ok = read_frame(&t1, &l) && read_frame(&t2, &l);
-  result("getservices_ok",
-         ok && t1 == proxyapi::MSG_BLUETOOTH_GATT_GET_SERVICES_RESPONSE &&
-             t2 == proxyapi::MSG_BLUETOOTH_GATT_GET_SERVICES_DONE_RESPONSE,
-         "types %u,%u", t1, t2);
+  unsigned n_svc = 0;
+  bool ok = false;
+  while (read_frame(&t, &l)) {
+    if (t == proxyapi::MSG_BLUETOOTH_GATT_GET_SERVICES_RESPONSE) {
+      ++n_svc;
+      continue;
+    }
+    ok = t == proxyapi::MSG_BLUETOOTH_GATT_GET_SERVICES_DONE_RESPONSE;
+    break;
+  }
+  result("getservices_ok", ok, "%u service response(s), last type %u", n_svc,
+         t);
 }
 
 void step_get_services_oom() {
   const uint32_t c0 = oom_guard::count();
-  hog(12 * 1024);  // < sizeof(ServicesEncodeCtx); room for lwIP
+  hog(2 * 1024);  // < sizeof(ServicesEncodeCtx) (~2.9 KiB); room for lwIP
   const uint32_t c1 = oom_guard::count();
   const size_t f = free_now(), lg = largest_now();
   bool sent = get_services_request();
