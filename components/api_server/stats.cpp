@@ -1,4 +1,5 @@
 #include "stats.h"
+#include "api_server.h"
 
 #include "ble_backend.h"
 #include "bthome.h"
@@ -707,7 +708,8 @@ esp_err_t reboot_post(httpd_req_t *req) {
 // Temperature uses the ESP32-S3 internal silicon-temperature sensor
 // (±1-2 °C absolute, fine for trend visibility).
 
-#if SOC_TEMP_SENSOR_SUPPORTED
+// QEMU (heap self-test) has no temperature sensor: the read never returns.
+#if SOC_TEMP_SENSOR_SUPPORTED && !NBP_HEAP_SELFTEST
 temperature_sensor_handle_t g_temp_handle = nullptr;
 bool g_temp_init_done = false;
 
@@ -788,8 +790,9 @@ void sample_cpu_pct(int *cpu0, int *cpu1) {
 esp_err_t stats_get(httpd_req_t *req) {
   // The base object is ~280 chars worst case (with heap_largest/heap_min
   // and the capability flags); the optional ap_rx/ap_tx 64-bit byte
-  // counters (NAT builds) add ~60 more, the oom counters ~70.
-  char buf[512];
+  // counters (NAT builds) add ~60 more, the oom counters ~70, the API
+  // send-queue figures ~100 + ~40 per client.
+  char buf[768];
   size_t n = build_stats_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
@@ -975,6 +978,36 @@ size_t build_stats_json(char *buf, size_t cap) {
         static_cast<unsigned long>(oom_guard::last_size()),
         static_cast<unsigned long>(oom_guard::new_recovered()));
     if (m > 0) n += m;
+  }
+  // API clients and their send queues (heap lwIP holds for unsent +
+  // unacked data; NBP_API_CLIENT_TXQ_CAP). api_txq: [id, at last send,
+  // high-water] per connected client; omitted while a stalled send holds
+  // the TX lock (api_txq_busy).
+  if (static_cast<size_t>(n) < cap) {
+    const api_server::TxqStats t = api_server::txq_stats();
+    int m = std::snprintf(
+        buf + n, cap - n,
+        ",\"api_clients\":%u,\"api_max_clients\":%u,\"api_refused\":%lu,"
+        "\"api_txq_cap\":%lu,\"api_txq_max\":%lu,\"api_txq_drops\":%lu,"
+        "\"api_txq_reaps\":%lu,\"api_txq_busy\":%s,\"api_txq\":[",
+        t.n_clients, proxy::MAX_API_CLIENTS,
+        static_cast<unsigned long>(t.refused),
+        static_cast<unsigned long>(t.cap), static_cast<unsigned long>(t.max_all),
+        static_cast<unsigned long>(t.drops), static_cast<unsigned long>(t.reaps),
+        t.busy ? "true" : "false");
+    if (m > 0) n += m;
+    for (uint8_t i = 0; !t.busy && i < t.n_clients &&
+                        static_cast<size_t>(n) < cap; ++i) {
+      m = std::snprintf(buf + n, cap - n, "%s[%lu,%lu,%lu]", i ? "," : "",
+                        static_cast<unsigned long>(t.clients[i].id),
+                        static_cast<unsigned long>(t.clients[i].last),
+                        static_cast<unsigned long>(t.clients[i].max));
+      if (m > 0) n += m;
+    }
+    if (static_cast<size_t>(n) < cap) {
+      m = std::snprintf(buf + n, cap - n, "]");
+      if (m > 0) n += m;
+    }
   }
   if (static_cast<size_t>(n) < cap) {
     int m = std::snprintf(buf + n, cap - n, "}");

@@ -57,3 +57,18 @@ int nbp_ip4_canforward(struct pbuf *p, u32_t dest);
 #define LWIP_HOOK_IP4_CANFORWARD(p, dest) \
   nbp_ip4_canforward((p), (dest))
 #endif
+
+#if NBP_HEAP_SELFTEST
+// QEMU heap self-test only (compile define, never firmware): drops inbound
+// TCP segments to one port so a loopback client looks like a stalled WiFi
+// peer (data sent, never ACKed). Implemented in api_server/heap_selftest.cpp.
+struct netif;
+#ifdef __cplusplus
+extern "C" {
+#endif
+int nbp_selftest_ip4_input(struct pbuf *p, struct netif *inp);
+#ifdef __cplusplus
+}
+#endif
+#define LWIP_HOOK_IP4_INPUT(p, inp) nbp_selftest_ip4_input((p), (inp))
+#endif

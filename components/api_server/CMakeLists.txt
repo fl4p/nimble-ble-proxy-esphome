@@ -14,6 +14,7 @@ idf_component_register(
         "bt_handlers.cpp"
         "stats.cpp"
         "oom_selftest.cpp"
+        "heap_selftest.cpp"
     INCLUDE_DIRS
         "."
         "../../include"

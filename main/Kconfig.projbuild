@@ -111,6 +111,38 @@ config NBP_AP_FALLBACK_SECS
         Bumping this is harmless on a healthy network; lower it for
         faster recovery when the configured AP is known-bad.
 
+config NBP_API_MAX_CLIENTS
+    int "API: concurrent aioesphomeapi clients"
+    depends on NBP_WIFI
+    range 1 8
+    default 2
+    help
+        Connections the plaintext API on :6053 serves at once. A further
+        client is accepted and closed at once (RST), and the log says
+        "no client slot". Each client costs an 8 KiB task stack, one
+        lwIP socket, and up to NBP_API_CLIENT_TXQ_CAP of queued send
+        data, so on the no-PSRAM S3 NAT build every slot is ~10-18 KiB of
+        heap at worst. ESPHome's default is 4; 2 covers Home Assistant
+        plus one more (batmon-ha, or a CLI / browser WebSocket client).
+
+config NBP_API_CLIENT_TXQ_CAP
+    int "API: per-client cap on heap held by unsent/unacked data (bytes)"
+    depends on NBP_WIFI
+    range 0 65536
+    default 8192
+    help
+        Upper bound on the heap one API client's TCP send queue may hold
+        (the pbufs and segments lwIP keeps until the peer ACKs them).
+        lwIP's own bound is TCP_SND_QUEUELEN segments, and with
+        LWIP_NETIF_TX_SINGLE_PBUF every segment is a full-MSS pbuf (~1.5
+        KiB) however small the frame, so one stalled client could pin
+        ~25 KiB. Over the cap: advertisement batches for that client are
+        dropped; any other frame waits for the queue to drain, and a
+        client still over the cap after the 20 s send deadline is reaped
+        (RST). 0 disables the cap.
+        /stats.json reports the per-client high-water mark (api_txq_max)
+        and the drops (api_txq_drops) / reaps (api_txq_reaps).
+
 config NBP_WS_PROXY
     bool "WebSocket bridge: aioesphomeapi over ws://<host>/api (browser clients)"
     depends on NBP_WIFI

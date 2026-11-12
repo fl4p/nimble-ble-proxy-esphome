@@ -7,6 +7,9 @@
 #if NBP_OOM_SELFTEST
 #include "oom_selftest.h"
 #endif
+#if NBP_HEAP_SELFTEST
+#include "heap_selftest.h"
+#endif
 #include "proxy_config.h"
 #include "stats.h"
 #include "serial_provision.h"
@@ -153,6 +156,9 @@ extern "C" void app_main() {
 
 #if NBP_OOM_SELFTEST
   api_server::oom_selftest::run();  // QEMU test build only; never returns
+#endif
+#if NBP_HEAP_SELFTEST
+  api_server::heap_selftest::run();  // QEMU test build only; never returns
 #endif
 
   ESP_LOGI(TAG, "nimble-ble-proxy %s booting",

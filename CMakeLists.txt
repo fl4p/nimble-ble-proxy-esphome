@@ -12,6 +12,13 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 if(NBP_OOM_SELFTEST)
     idf_build_set_property(COMPILE_DEFINITIONS "NBP_OOM_SELFTEST=1" APPEND)
 endif()
+# QEMU heap self-test only (idf.py -B build-qemu-heap -DNBP_HEAP_SELFTEST=1 …):
+# app_main runs api_server::heap_selftest (send-queue cap, client refusal,
+# stats boot race). Also arms a test-only lwIP input hook (nbp_lwip_hooks.h)
+# that fakes a stalled peer. Never in a firmware build.
+if(NBP_HEAP_SELFTEST)
+    idf_build_set_property(COMPILE_DEFINITIONS "NBP_HEAP_SELFTEST=1" APPEND)
+endif()
 
 project(nimble_ble_proxy
     LANGUAGES C CXX

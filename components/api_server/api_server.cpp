@@ -6,12 +6,21 @@
 #include "handshake.h"
 #include "proxy_config.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lwip/api.h"
+// sockets_priv.h has no extern "C" guard (lwip_socket_dbg_get_socket).
+extern "C" {
+#include "lwip/priv/sockets_priv.h"
+}
+#include "lwip/priv/tcp_priv.h"
+#include "lwip/priv/tcpip_priv.h"
 #include "lwip/sockets.h"
+#include "lwip/tcp.h"
 
 #include <algorithm>
 #include <array>
@@ -68,6 +77,10 @@ constexpr int CLIENT_KEEPCNT = 3;
 
 bool g_started = false;
 
+// While a client's send queue is over the cap, a frame that must not be lost
+// re-checks it this often until the frame deadline.
+constexpr int TXQ_WAIT_POLL_MS = 50;
+
 // Active clients. fd -1 in unused slots. Guarded by g_clients_mutex.
 // Read by send_async (broadcast), send_to (targeted) and
 // has_active_client.
@@ -85,6 +98,26 @@ struct ClientEntry {
   bool reaped = false;
 };
 std::array<ClientEntry, proxy::MAX_API_CLIENTS> g_clients;
+
+// Per-slot send-queue state, indexed like g_clients. Read and written only
+// under g_tx_mutex (every sender holds it); reset by register_client while
+// the slot is still free, which no sender can have snapshotted.
+struct TxqState {
+  // Tick at which the queue was first seen at or over the cap, 0 = under.
+  TickType_t over_since = 0;
+  bool over = false;
+  uint32_t last = 0;  // heap the queue held at the last check
+  uint32_t max = 0;   // high-water mark for this connection
+};
+std::array<TxqState, proxy::MAX_API_CLIENTS> g_txq;
+static_assert(proxy::MAX_API_CLIENTS <= sizeof(TxqStats::clients) /
+                                          sizeof(TxqStats::clients[0]),
+              "TxqStats::clients is too small for NBP_API_MAX_CLIENTS");
+// Since boot, all clients.
+uint32_t g_txq_max_all = 0;
+std::atomic<uint32_t> g_txq_drops{0};
+std::atomic<uint32_t> g_txq_reaps{0};
+std::atomic<uint32_t> g_refused{0};
 std::atomic<uint32_t> g_next_client_id{1};
 SemaphoreHandle_t g_clients_mutex = nullptr;
 std::atomic<uint8_t> g_active_count{0};
@@ -121,6 +154,86 @@ ssize_t socket_read(void *ctx, uint8_t *buf, size_t n) {
 // itself stalls, all clients stall at once; per-client 20 s deadlines would
 // hold g_tx_mutex (and the NimBLE host task) for up to N × 20 s.
 constexpr int CLIENT_SEND_MIN_SHARE_MS = 1000;
+
+// ---- per-client send-queue cap (NBP_API_CLIENT_TXQ_CAP) ----
+//
+// The heap a client's TCP send queue holds is NOT its byte count: IDF builds
+// lwIP with LWIP_NETIF_TX_SINGLE_PBUF, so tcp_write allocates a full-MSS pbuf
+// (~1.5 KiB) for every new segment, however small the frame. With
+// TCP_NODELAY each small frame (notify, advert batch) leaves as its own
+// segment and stays allocated until ACKed. A peer that stops ACKing (WiFi
+// stall) pins up to TCP_SND_QUEUELEN (16) such segments, ~25 KiB per client,
+// while lwIP's byte accounting (TCP_SND_BUF 5760) shows a fraction of that.
+// So the cap is on the measured heap: the allocated size of every segment
+// and pbuf on the pcb's unsent + unacked lists, read in the tcpip thread.
+struct TxqCall {
+  tcpip_api_call_data base;  // must be first: lwIP passes &base back
+  int fd;
+  bool ok;
+  uint32_t heap;  // heap held by unsent + unacked segments
+  uint16_t segs;  // pcb->snd_queuelen (pbufs)
+  uint16_t bytes; // TCP_SND_BUF - snd_buf (payload bytes)
+};
+
+uint32_t seg_list_heap(const tcp_seg *seg) {
+  uint32_t n = 0;
+  for (; seg != nullptr; seg = seg->next) {
+    // MEMP_MEM_MALLOC=1 and MEM_LIBC_MALLOC=1 (IDF lwipopts.h): segments and
+    // pbufs are plain heap blocks. Containing-block size, so a MEMP_SIZE
+    // offset in front of the object does not matter.
+    n += heap_caps_get_containing_block_size(const_cast<tcp_seg *>(seg));
+    for (const pbuf *p = seg->p; p != nullptr; p = p->next) {
+      n += heap_caps_get_containing_block_size(const_cast<pbuf *>(p));
+    }
+  }
+  return n;
+}
+
+err_t txq_query_fn(tcpip_api_call_data *c) {
+  auto *q = reinterpret_cast<TxqCall *>(c);
+  q->ok = false;
+  lwip_sock *sock = lwip_socket_dbg_get_socket(q->fd);
+  if (sock == nullptr || sock->conn == nullptr ||
+      NETCONNTYPE_GROUP(netconn_type(sock->conn)) != NETCONN_TCP) {
+    return ERR_OK;
+  }
+  const tcp_pcb *pcb = sock->conn->pcb.tcp;
+  if (pcb == nullptr) return ERR_OK;
+  q->heap = seg_list_heap(pcb->unsent) + seg_list_heap(pcb->unacked);
+  q->segs = pcb->snd_queuelen;
+  q->bytes = static_cast<uint16_t>(TCP_SND_BUF - pcb->snd_buf);
+  q->ok = true;
+  return ERR_OK;
+}
+
+// Heap held by `fd`'s send queue, or false if it cannot be read (socket
+// already torn down: the send itself then reports the error).
+bool txq_query(int fd, TxqCall *q) {
+  *q = TxqCall{};
+  q->fd = fd;
+  if (tcpip_api_call(&txq_query_fn, &q->base) != ERR_OK) return false;
+  return q->ok;
+}
+
+// Slot index of `fd` in g_clients, or -1.
+int slot_of_fd(int fd) {
+  int idx = -1;
+  xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
+  for (size_t i = 0; i < g_clients.size(); ++i) {
+    if (g_clients[i].fd == fd) {
+      idx = static_cast<int>(i);
+      break;
+    }
+  }
+  xSemaphoreGive(g_clients_mutex);
+  return idx;
+}
+
+// Advertisement batches are the only frames a client can miss without a
+// protocol consequence (the next batch carries the same devices).
+bool is_lossy(uint16_t msg_type) {
+  return msg_type == proxyapi::MSG_BLUETOOTH_LE_RAW_ADVERTISEMENTS_RESPONSE;
+}
 
 // Write the payload in g_tx_buf to a specific fd. Caller holds g_tx_mutex.
 bool send_locked_to(int fd, uint16_t msg_type, size_t payload_len,
@@ -168,6 +281,72 @@ bool send_locked_to(int fd, uint16_t msg_type, size_t payload_len,
   return true;
 }
 
+enum class Tx { Sent, Dropped, Failed };
+
+// send_locked_to behind the per-client send-queue cap. Caller holds
+// g_tx_mutex. While the client's queue holds >= the cap: a lossy frame is
+// dropped for this client (Dropped), and the client is reaped once it has
+// been over the cap for CLIENT_SEND_DEADLINE_MS; any other frame waits for
+// the queue to drain until `deadline_ms`, then fails (caller reaps). Under
+// the cap the frame is sent as before, so a client holds at most the cap
+// plus one frame (<= 2 segments, ~3 KiB).
+Tx send_capped(int fd, uint16_t msg_type, size_t payload_len,
+               int deadline_ms = CLIENT_SEND_DEADLINE_MS) {
+  if constexpr (proxy::API_CLIENT_TXQ_CAP == 0) {
+    return send_locked_to(fd, msg_type, payload_len, deadline_ms) ? Tx::Sent
+                                                                 : Tx::Failed;
+  }
+  const int slot = slot_of_fd(fd);
+  TxqState *st = slot >= 0 ? &g_txq[slot] : nullptr;
+  const TickType_t t0 = xTaskGetTickCount();
+  while (true) {
+    TxqCall q;
+    if (!txq_query(fd, &q) || st == nullptr) break;  // let send() decide
+    st->last = q.heap;
+    if (q.heap > st->max) st->max = q.heap;
+    if (q.heap > g_txq_max_all) g_txq_max_all = q.heap;
+    const TickType_t now = xTaskGetTickCount();
+    if (q.heap < proxy::API_CLIENT_TXQ_CAP) {
+      if (st->over) {
+        ESP_LOGI(TAG, "fd=%d send queue back under the cap (%lu B)", fd,
+                 static_cast<unsigned long>(q.heap));
+      }
+      st->over = false;
+      st->over_since = 0;
+      break;
+    }
+    if (!st->over) {
+      st->over = true;
+      st->over_since = now;
+      ESP_LOGW(TAG, "fd=%d send queue at %lu B heap (%u segs, %u B unacked "
+               "or unsent) >= cap %u; dropping its advert batches",
+               fd, static_cast<unsigned long>(q.heap), q.segs, q.bytes,
+               static_cast<unsigned>(proxy::API_CLIENT_TXQ_CAP));
+    }
+    if (is_lossy(msg_type)) {
+      if (now - st->over_since >= pdMS_TO_TICKS(CLIENT_SEND_DEADLINE_MS)) {
+        ESP_LOGW(TAG, "fd=%d over the send-queue cap for %d ms; reaping", fd,
+                 CLIENT_SEND_DEADLINE_MS);
+        g_txq_reaps.fetch_add(1, std::memory_order_relaxed);
+        return Tx::Failed;
+      }
+      g_txq_drops.fetch_add(1, std::memory_order_relaxed);
+      return Tx::Dropped;
+    }
+    if (now - t0 >= pdMS_TO_TICKS(deadline_ms)) {
+      ESP_LOGW(TAG, "fd=%d send queue still %lu B >= cap after %d ms; "
+               "reaping", fd, static_cast<unsigned long>(q.heap), deadline_ms);
+      g_txq_reaps.fetch_add(1, std::memory_order_relaxed);
+      return Tx::Failed;
+    }
+    vTaskDelay(pdMS_TO_TICKS(TXQ_WAIT_POLL_MS));
+  }
+  const int used_ms = static_cast<int>(pdTICKS_TO_MS(xTaskGetTickCount() - t0));
+  const int left_ms = std::max(deadline_ms - used_ms, CLIENT_SEND_POLL_MS);
+  return send_locked_to(fd, msg_type, payload_len, left_ms) ? Tx::Sent
+                                                            : Tx::Failed;
+}
+
 // Add/remove a client fd from the active set. Returns the client's id,
 // or 0 if no slot is free; in that case the caller should reject the
 // connection.
@@ -181,6 +360,7 @@ uint32_t register_client(int fd) {
       s.fd = fd;
       s.id = id;
       s.reaped = false;
+      g_txq[&s - g_clients.data()] = TxqState{};
       break;
     }
   }
@@ -274,7 +454,7 @@ bool dispatch_one(int fd, uint32_t client_id, uint8_t *rx_payload,
     if (hr.handled) {
       is_handshake = true;
       if (hr.response_type != 0) {
-        if (!send_locked_to(fd, hr.response_type, hr.payload_len)) {
+        if (send_capped(fd, hr.response_type, hr.payload_len) != Tx::Sent) {
           keep_open = false;
           *why = "send failed";
         }
@@ -450,7 +630,14 @@ void listener_task(void *) {
 
     uint32_t client_id = register_client(client_fd);
     if (client_id == 0) {
-      ESP_LOGW(TAG, "no client slot; closing fd=%d", client_fd);
+      // All NBP_API_MAX_CLIENTS slots taken: refuse with an RST right away
+      // (nothing was sent, so nothing lingers in FIN-WAIT), no task, no
+      // buffers. aioesphomeapi sees "connection reset" and retries later.
+      const uint32_t n = g_refused.fetch_add(1, std::memory_order_relaxed) + 1;
+      ESP_LOGW(TAG, "no client slot (max_clients=%u); refusing fd=%d "
+               "(refused %lu since boot)", proxy::MAX_API_CLIENTS, client_fd,
+               static_cast<unsigned long>(n));
+      set_abortive_close(client_fd);
       ::close(client_fd);
       continue;
     }
@@ -505,8 +692,11 @@ bool send_async(uint16_t msg_type, EncodeFn encode, void *ctx) {
           static_cast<int>(pdTICKS_TO_MS(xTaskGetTickCount() - t0));
       const int budget_ms =
           std::max(CLIENT_SEND_DEADLINE_MS - used_ms, CLIENT_SEND_MIN_SHARE_MS);
-      if (send_locked_to(fds_snapshot[i], msg_type, n, budget_ms)) {
+      const Tx r = send_capped(fds_snapshot[i], msg_type, n, budget_ms);
+      if (r == Tx::Sent) {
         any_sent = true;
+      } else if (r == Tx::Dropped) {
+        // Over its send-queue cap: this client misses this advert batch.
       } else {
         // Peer is gone (EPIPE / ECONNRESET / EBADF). Without reaping,
         // the fd lingers in g_clients and the connection_task's
@@ -548,13 +738,45 @@ bool send_to(uint32_t client_id, uint16_t msg_type, EncodeFn encode,
     size_t resp_cap = sizeof(g_tx_buf) - frame_codec::MAX_HEADER_LEN;
     size_t n = encode ? encode(ctx, resp_payload, resp_cap) : 0;
     if (n > 0) {
-      sent = send_locked_to(fd, msg_type, n);
-      if (!sent) dead = fd;
+      const Tx r = send_capped(fd, msg_type, n);
+      sent = r == Tx::Sent;
+      if (r == Tx::Failed) dead = fd;
     }
   }
   if (dead >= 0) reap_dead(&dead, 1);  // under g_tx_mutex — see reap_dead
   xSemaphoreGive(g_tx_mutex);
   return sent;
+}
+
+TxqStats txq_stats() {
+  TxqStats out{};
+  out.cap = static_cast<uint32_t>(proxy::API_CLIENT_TXQ_CAP);
+  out.drops = g_txq_drops.load(std::memory_order_relaxed);
+  out.reaps = g_txq_reaps.load(std::memory_order_relaxed);
+  out.refused = g_refused.load(std::memory_order_relaxed);
+  if (g_tx_mutex == nullptr || g_clients_mutex == nullptr) return out;
+  // Short wait only: a stalled send holds g_tx_mutex for up to 20 s, and
+  // /stats.json must not hang on it. Then the per-client numbers are
+  // reported as unknown (max_all stays exact: it is only ever raised).
+  if (xSemaphoreTake(g_tx_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
+    for (size_t i = 0; i < g_clients.size(); ++i) {
+      if (g_clients[i].fd < 0) continue;
+      out.clients[out.n_clients].id = g_clients[i].id;
+      out.clients[out.n_clients].last = g_txq[i].last;
+      out.clients[out.n_clients].max = g_txq[i].max;
+      ++out.n_clients;
+    }
+    xSemaphoreGive(g_clients_mutex);
+    out.max_all = g_txq_max_all;
+    out.busy = false;
+    xSemaphoreGive(g_tx_mutex);
+  } else {
+    out.busy = true;
+    out.n_clients = g_active_count.load(std::memory_order_acquire);
+    out.max_all = g_txq_max_all;  // word read; may be one update stale
+  }
+  return out;
 }
 
 void start() {
