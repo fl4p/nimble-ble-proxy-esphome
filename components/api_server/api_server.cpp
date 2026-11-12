@@ -82,6 +82,8 @@ bool g_started = false;
 // While a client's send queue is over the cap, a frame that must not be lost
 // re-checks it this often until the frame deadline.
 constexpr int TXQ_WAIT_POLL_MS = 50;
+// An over-cap episode is logged once it has lasted this long.
+constexpr int TXQ_LOG_AFTER_MS = 1000;
 
 // Active clients. fd -1 in unused slots. Guarded by g_clients_mutex.
 // Read by send_async (broadcast), send_to (targeted) and
@@ -108,6 +110,7 @@ struct TxqState {
   // Tick at which the queue was first seen at or over the cap, 0 = under.
   TickType_t over_since = 0;
   bool over = false;
+  bool logged = false;  // this over-cap episode has been logged
   uint32_t last = 0;  // heap the queue held at the last check
   uint32_t max = 0;   // high-water mark for this connection
 };
@@ -307,12 +310,13 @@ bool send_locked_to(int fd, uint16_t msg_type, size_t payload_len,
 enum class Tx { Sent, Dropped, Failed };
 
 // send_locked_to behind the per-client send-queue cap. Caller holds
-// g_tx_mutex. While the client's queue holds >= the cap: a lossy frame is
-// dropped for this client (Dropped), and the client is reaped once it has
-// been over the cap for CLIENT_SEND_DEADLINE_MS; any other frame waits for
-// the queue to drain until `deadline_ms`, then fails (caller reaps). Under
-// the cap the frame is sent as before, so a client holds at most the cap
-// plus one frame (<= 2 segments, ~3 KiB).
+// g_tx_mutex. While the client's queue is full (heap >= the cap, or lwIP
+// could not take the frame without blocking): a lossy frame is dropped for
+// this client (Dropped) without blocking, and the client is reaped once it
+// has been full for CLIENT_SEND_DEADLINE_MS; any other frame waits for the
+// queue to drain until `deadline_ms`, then fails (caller reaps). Otherwise
+// the frame is sent as before, so a client holds at most the cap plus one
+// frame (<= 2 segments, ~3 KiB).
 Tx send_capped(int fd, uint16_t msg_type, size_t payload_len,
                int deadline_ms = CLIENT_SEND_DEADLINE_MS) {
   if constexpr (proxy::API_CLIENT_TXQ_CAP == 0) {
@@ -329,26 +333,45 @@ Tx send_capped(int fd, uint16_t msg_type, size_t payload_len,
     if (q.heap > st->max) st->max = q.heap;
     if (q.heap > g_txq_max_all) g_txq_max_all = q.heap;
     const TickType_t now = xTaskGetTickCount();
-    if (q.heap < proxy::API_CLIENT_TXQ_CAP) {
-      if (st->over) {
-        ESP_LOGI(TAG, "fd=%d send queue back under the cap (%lu B)", fd,
-                 static_cast<unsigned long>(q.heap));
+    // Full: over the heap cap, or lwIP could not take the frame without
+    // blocking (TCP_SND_BUF payload bytes or TCP_SND_QUEUELEN pbufs; a
+    // frame may add up to 2). With large frames (600 B advert batches) the
+    // byte limit is reached first, at ~8 segments / 12.4 KiB, so the heap
+    // cap alone would let a lossy send block for the whole deadline.
+    const size_t frame = payload_len + frame_codec::MAX_HEADER_LEN;
+    const bool full = q.heap >= proxy::API_CLIENT_TXQ_CAP ||
+                      q.bytes + frame > TCP_SND_BUF ||
+                      q.segs + 2u > TCP_SND_QUEUELEN;
+    if (!full) {
+      if (st->logged) {
+        ESP_LOGI(TAG, "fd=%d send queue drained (%lu B) after %lu ms", fd, static_cast<unsigned long>(q.heap),
+                 static_cast<unsigned long>(
+                     pdTICKS_TO_MS(now - st->over_since)));
       }
       st->over = false;
+      st->logged = false;
       st->over_since = 0;
       break;
     }
     if (!st->over) {
       st->over = true;
       st->over_since = now;
-      ESP_LOGW(TAG, "fd=%d send queue at %lu B heap (%u segs, %u B unacked "
-               "or unsent) >= cap %u; dropping its advert batches",
+    }
+    // Brief touches of the cap are normal on WiFi (ACKs ~250 ms late); log
+    // only an episode that lasts, or the ring fills with them.
+    if (!st->logged &&
+        now - st->over_since >= pdMS_TO_TICKS(TXQ_LOG_AFTER_MS)) {
+      st->logged = true;
+      ESP_LOGW(TAG, "fd=%d send queue full: %lu B heap (%u segs, %u B "
+               "unacked or unsent), cap %u, for %d ms; dropping its advert "
+               "batches",
                fd, static_cast<unsigned long>(q.heap), q.segs, q.bytes,
-               static_cast<unsigned>(proxy::API_CLIENT_TXQ_CAP));
+               static_cast<unsigned>(proxy::API_CLIENT_TXQ_CAP),
+               TXQ_LOG_AFTER_MS);
     }
     if (is_lossy(msg_type)) {
       if (now - st->over_since >= pdMS_TO_TICKS(CLIENT_SEND_DEADLINE_MS)) {
-        ESP_LOGW(TAG, "fd=%d over the send-queue cap for %d ms; reaping", fd,
+        ESP_LOGW(TAG, "fd=%d send queue full for %d ms; reaping", fd,
                  CLIENT_SEND_DEADLINE_MS);
         g_txq_reaps.fetch_add(1, std::memory_order_relaxed);
         return Tx::Failed;
@@ -357,7 +380,7 @@ Tx send_capped(int fd, uint16_t msg_type, size_t payload_len,
       return Tx::Dropped;
     }
     if (now - t0 >= pdMS_TO_TICKS(deadline_ms)) {
-      ESP_LOGW(TAG, "fd=%d send queue still %lu B >= cap after %d ms; "
+      ESP_LOGW(TAG, "fd=%d send queue still full (%lu B) after %d ms; "
                "reaping", fd, static_cast<unsigned long>(q.heap), deadline_ms);
       g_txq_reaps.fetch_add(1, std::memory_order_relaxed);
       return Tx::Failed;

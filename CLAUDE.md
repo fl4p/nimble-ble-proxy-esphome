@@ -559,14 +559,17 @@
   `TCP_SND_QUEUELEN` (16) is the only bound: QEMU measured 16 × 60 B frames
   to a non-ACKing peer = 24 972 B of heap. `TCP_SND_BUF` (5760 B) counts
   payload only and says nothing about heap.
-- **`NBP_API_CLIENT_TXQ_CAP` (8192)** caps it. `send_capped()` in
+- **`NBP_API_CLIENT_TXQ_CAP` (16384)** caps it. `send_capped()` in
   `api_server.cpp` measures the heap of the pcb's unsent + unacked segments
   (`heap_caps_get_containing_block_size` per seg/pbuf, read in the tcpip
   thread via `tcpip_api_call`; lwIP has `MEMP_MEM_MALLOC=1`, so all of it is
   heap). At or over the cap, advert batches for that client are dropped
   (they never block the host/flush task any more), other frames wait for the
-  queue to drain, and a client over the cap for 20 s is reaped. A healthy LAN
-  client holds 1 segment (1.55 KiB). `/stats.json`: `api_txq` ([id, last,
+  queue to drain, and a client over the cap for 20 s is reaped. On loopback a
+  client holds 1 segment, but over WiFi a healthy batmon/HA client regularly
+  holds 6 (9.3 KiB for ~200 B of notifies: ACKs ~250 ms late, measured on
+  .231 with the first 8 KiB cap, which it hit several times a second). An
+  over-cap episode is logged only after 1 s. `/stats.json`: `api_txq` ([id, last,
   max] per client), `api_txq_max`, `api_txq_drops`, `api_txq_reaps`,
   `api_refused`.
 - **`NBP_API_MAX_CLIENTS` (2)**: each client is ~9.3 KiB at rest (8 KiB task

@@ -142,7 +142,7 @@ config NBP_API_CLIENT_TXQ_CAP
     int "API: per-client cap on heap held by unsent/unacked data (bytes)"
     depends on NBP_WIFI
     range 0 65536
-    default 8192
+    default 16384
     help
         Upper bound on the heap one API client's TCP send queue may hold
         (the pbufs and segments lwIP keeps until the peer ACKs them).
@@ -153,6 +153,11 @@ config NBP_API_CLIENT_TXQ_CAP
         dropped; any other frame waits for the queue to drain, and a
         client still over the cap after the 20 s send deadline is reaped
         (RST). 0 disables the cap.
+        Sizing (2026-11, .231): a healthy HA/batmon client over WiFi
+        regularly holds 6 segments (9.3 KiB for ~200 B of notifies; the
+        ACKs come back ~250 ms late), so 8 KiB was hit several times a
+        second. 16 KiB is ~10 segments; uncapped, a stalled peer pins
+        16 segments, ~25 KiB.
         /stats.json reports the per-client high-water mark (api_txq_max)
         and the drops (api_txq_drops) / reaps (api_txq_reaps).
 
