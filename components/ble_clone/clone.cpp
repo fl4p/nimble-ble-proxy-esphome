@@ -132,6 +132,8 @@ size_t build_clone_json(char *buf, size_t cap) {
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
 
+void start_if_enabled();
+
 const char *handle_clone_set(const char *query, bool *reboot_required) {
   if (reboot_required) *reboot_required = false;
   if (query == nullptr) return "missing query";
@@ -177,6 +179,7 @@ const char *handle_clone_set(const char *query, bool *reboot_required) {
 #endif
 
   if (!config::set(next)) return "nvs write failed";
+  start_if_enabled();
 
   // NimBLE's GATT DB is one-shot: changing the target MAC after the
   // mirror has been built means the next session's services may differ,
@@ -216,13 +219,28 @@ esp_err_t clone_post(httpd_req_t *req) {
 
 }  // namespace
 
+// Start the upstream supervisor (12 KiB stack) if a target is enabled.
+// Idempotent. Without a target the task would only idle, so a device with
+// clone compiled in but disabled keeps those 12 KiB of heap; enabling a
+// target via POST /clone starts it then.
+void start_if_enabled() {
+  const config::Target t = config::snapshot();
+  if (!t.enabled || t.address == 0) return;
+  if (upstream::start()) {
+    ESP_LOGI(TAG, "supervisor running");
+  } else {
+    ESP_LOGE(TAG, "the supervisor is NOT running (no heap)");
+  }
+}
+
 void init() {
   upstream::init();
-  if (upstream::start()) {
-    ESP_LOGI(TAG, "init done; supervisor running");
-  } else {
-    ESP_LOGE(TAG, "init done, but the supervisor is NOT running (no heap)");
+  const config::Target t = config::snapshot();
+  if (!t.enabled || t.address == 0) {
+    ESP_LOGI(TAG, "init done; no enabled target, supervisor not started");
+    return;
   }
+  start_if_enabled();
 }
 
 void register_endpoints(void *httpd_handle) {

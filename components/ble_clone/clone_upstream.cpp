@@ -57,7 +57,9 @@ QueueHandle_t g_write_queue = nullptr;
 TaskHandle_t g_supervisor_task = nullptr;
 NimBLEClient *g_client = nullptr;
 
-std::atomic<State> g_state{State::Idle};
+// Disabled until the supervisor runs (it is started only for an enabled
+// target, see clone.cpp start_if_enabled).
+std::atomic<State> g_state{State::Disabled};
 std::atomic<uint64_t> g_address{0};
 std::atomic<uint16_t> g_mtu{0};
 std::atomic<uint32_t> g_reconnects{0};

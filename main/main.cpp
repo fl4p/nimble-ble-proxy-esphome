@@ -298,6 +298,8 @@ extern "C" void app_main() {
 #if CONFIG_NBP_CLONE
   // Clone supervisor runs alongside the ESPHome-style scanner/proxy.
   // load() reads target MAC from NVS; init() spawns the supervisor task
+  // (only when a target is enabled; POST /clone starts it later otherwise,
+  // so a disabled clone costs no 12 KiB stack)
   // that scans → connects → discovers → builds the local GATT mirror,
   // then calls ble_httpd::activate() to register all services in one
   // shot. register_endpoints() exposes /clone for runtime config
