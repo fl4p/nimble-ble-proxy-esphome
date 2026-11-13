@@ -437,7 +437,11 @@ function parseLine(line) {
 async function apiText(line) {
   if (TRANSPORT === 'ble') return bleFetch(line);
   const [method, path] = parseLine(line);
-  const r = await fetch(path, { method });
+  // State-changing /nat and /portmap POSTs need this header (CSRF guard,
+  // nat_router.cpp); a cross-origin page cannot send it without a preflight.
+  const headers = method === 'POST' && /^\/(nat|portmap)(\?|$)/.test(path)
+    ? { 'X-Nat-Confirm': 'yes' } : {};
+  const r = await fetch(path, { method, headers });
   if (!r.ok) {
     const t = await r.text().catch(() => '');
     throw new Error(t || `${path}: ${r.status}`);

@@ -504,7 +504,8 @@ first. A static lease pins a MAC to an IP: the server always offers that
 client that IP, NAKs its requests for any other, and never gives the IP to
 anyone else, even while the client is away. Configure with
 `POST /nat?lease_mac=70:04:1d:a6:ab:30&lease_ip=192.168.4.2` (add or
-replace) and `POST /nat?lease_mac=70:04:1d:a6:ab:30&lease_del=1`; up to 8
+replace) and `POST /nat?lease_mac=70:04:1d:a6:ab:30&lease_del=1` (both with
+`X-Nat-Confirm: yes`); up to 8
 leases, persisted in NVS (`nat`/`leases`). The IP must be in the DHCP pool
 (192.168.4.2 .. .101 for the default AP address) and not reserved for
 another MAC. A change deauthenticates every associated client whose current
@@ -520,6 +521,12 @@ a small registry (`components/dhcps_hostname`), which `/nat` looks up per
 station. The built-in server is left fully intact — no fork, no
 `CONFIG_LWIP_DHCPS` change. The dashboard NAT panel renders the array as a
 "hostname / IP / MAC / RSSI" table.
+
+Every `POST /nat` and `POST /portmap` needs the header `X-Nat-Confirm: yes`
+(400 without it), e.g. `curl -X POST -H 'X-Nat-Confirm: yes' …`. It is a
+CSRF guard, not authentication: a page on another origin cannot send a
+custom header without a CORS preflight, which httpd never answers. The
+dashboard sends it.
 
 `POST /nat?enabled=0|1`, `?ssid=…`, `?psk=…` toggle/reconfigure the AP,
 `?lease_mac=…&lease_ip=…` / `&lease_del=1` set static leases (above);

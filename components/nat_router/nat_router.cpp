@@ -682,6 +682,26 @@ int append_stations_json(char *buf, int off, size_t cap,
 
 // ──────────────────────────── HTTP endpoints ───────────────────────
 
+// Every state-changing POST /nat and /portmap needs `X-Nat-Confirm: yes`
+// (same idea as crash_capture's X-Crash-Confirm). A custom header is not
+// CORS-safelisted, so a page on another origin cannot send it without a
+// preflight, which httpd never answers: a drive-by no-cors fetch() or form
+// cannot move a lease, deauth fry/flat, add a forward or drop the SoftAP.
+// Not authentication: anyone on the LAN can still send the header.
+constexpr const char *kConfirmHdr = "X-Nat-Confirm";
+
+bool confirmed(httpd_req_t *req) {
+  char v[8];
+  return httpd_req_get_hdr_value_str(req, kConfirmHdr, v, sizeof(v)) ==
+             ESP_OK &&
+         std::strcmp(v, "yes") == 0;
+}
+
+esp_err_t send_unconfirmed(httpd_req_t *req) {
+  return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                             "needs header X-Nat-Confirm: yes");
+}
+
 esp_err_t nat_get(httpd_req_t *req) {
   esp_netif_ip_info_t ap_info = {};
   if (g_ap != nullptr) esp_netif_get_ip_info(g_ap, &ap_info);
@@ -746,6 +766,7 @@ esp_err_t nat_get(httpd_req_t *req) {
 // deauthenticates the clients whose address now disagrees, so they rejoin
 // with the right one.
 esp_err_t nat_post(httpd_req_t *req) {
+  if (!confirmed(req)) return send_unconfirmed(req);
   char query[160];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
@@ -835,6 +856,7 @@ esp_err_t nat_post(httpd_req_t *req) {
 // POST /portmap?proto=tcp&mport=8080&daddr=192.168.4.50&dport=80
 // POST /portmap?del=1&proto=tcp&mport=8080
 esp_err_t portmap_post(httpd_req_t *req) {
+  if (!confirmed(req)) return send_unconfirmed(req);
   char query[160];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");

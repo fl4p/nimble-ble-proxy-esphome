@@ -233,7 +233,7 @@
   NAT S3's fixed-IP port-forwards (fry/flat telnet + scope) pointed at the
   wrong board after reboots (2026-11-13: flat got .2, fry .3/.4). Leases
   are configured with `POST /nat?lease_mac=…&lease_ip=…` (`&lease_del=1`
-  removes), persisted in NVS `nat`/`leases`, listed in `GET /nat` `leases`.
+  removes; header `X-Nat-Confirm: yes`, see Crash capture), persisted in NVS `nat`/`leases`, listed in `GET /nat` `leases`.
   The .231 table: fry `70:04:1d:a6:ab:30` → .2, flat `70:04:1d:a4:ea:34` →
   .4 (WiFi STA MAC = BLE MAC − 2 on both, checked against the lease table).
 - Mechanism (`components/dhcps_hostname/dhcps_static.c`): the server first
@@ -503,6 +503,11 @@
   crash-test). It is not CORS-safelisted and the server answers no preflight,
   so a page on another origin cannot fire them from a browser. It is not
   authentication: anyone on the LAN can still send it.
+- **The same guard on the NAT router (2026-11-13): every `POST /nat`
+  (enable, AP creds, static leases) and `POST /portmap` needs `X-Nat-Confirm:
+  yes`**, else 400. A lease change deauths fry/flat, so a drive-by no-cors
+  fetch from any LAN page must not reach it. The dashboard's `apiText()`
+  adds the header for those two paths; `ble_httpd` does not route them.
 - **`POST /crash-test?kind=null|abort` is compiled out by default**
   (`CONFIG_NBP_CRASH_TEST` default n since 2026-11-12). For a test build use
   `-DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.crashtest"`.
