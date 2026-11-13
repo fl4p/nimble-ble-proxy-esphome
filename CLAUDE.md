@@ -605,7 +605,9 @@
 - **Not changed, deliberately** (send-stall risk), the next levers with
   estimates: `ESP_WIFI_STATIC_RX_BUFFER_NUM` 10→6 (~6.4 KiB permanent);
   `DYNAMIC_TX_BUFFER_NUM` 32→16 and `DYNAMIC_RX_BUFFER_NUM` 32→16 (only
-  allocated under load, cut the burst peak by up to ~25 KiB each);
+  allocated under load; **measured 2026-11-13, `docs/wifi-buffer-throughput.md`:
+  no throughput cost, but a 100 B UDP flood still takes the heap to
+  1.4–5 KB — it only turns the failed 1700 B allocs into driver drops**);
   `TCP_SND_BUF`/`TCP_WND` 5760→2880 (`TCP_SND_QUEUELEN` 16→8, so an
   uncapped socket pins ~12 KiB instead of ~25 KiB). Other levers, not
   tried: `NBP_NAT_TABLE_SIZE` 512→256 (8 KiB, one 16 KiB block → 8 KiB),
