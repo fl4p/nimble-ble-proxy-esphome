@@ -227,6 +227,51 @@
   this natively (`CONFIG_LWIP_DHCPS_REPORT_CLIENT_HOSTNAME`) — prefer that
   if/when the project moves to IDF 6 and drop the hook.
 
+## Static SoftAP DHCP leases — same hook, plus a second parse
+
+- IDF's DHCP server has no reservations: it assigns in join order, so the
+  NAT S3's fixed-IP port-forwards (fry/flat telnet + scope) pointed at the
+  wrong board after reboots (2026-11-13: flat got .2, fry .3/.4). Leases
+  are configured with `POST /nat?lease_mac=…&lease_ip=…` (`&lease_del=1`
+  removes), persisted in NVS `nat`/`leases`, listed in `GET /nat` `leases`.
+  The .231 table: fry `70:04:1d:a6:ab:30` → .2, flat `70:04:1d:a4:ea:34` →
+  .4 (WiFi STA MAC = BLE MAC − 2 on both, checked against the lease table).
+- Mechanism (`components/dhcps_hostname/dhcps_static.c`): the server first
+  looks the client's MAC up in its private IP-sorted lease list and the
+  allocator skips every IP in that list, so an always-present entry
+  (static MAC, static IP, lease timer `UINT32_MAX`) IS a static lease. The
+  `LWIP_HOOK_DHCPS_POST_STATE` macro expands inside `handle_dhcp()` and
+  uses its locals `dhcps`/`tlen` and the file-static `parse_msg()`: after
+  each parse it pins the entries (dropping a static MAC's other entry and
+  anyone else holding a reserved IP) and, if this packet was answered from
+  the unpinned list, parses it once more. Pinning per packet also survives
+  `dhcps_stop/start` (every `set_ap_dns()`), RELEASE and expiry.
+- **IDF-coupled**: mirrors the private `list_node`, relies on `struct
+  dhcps_pool` and the local names `dhcps`, `tlen`, `parse_msg` (a rename is
+  a compile error, not a silent no-op). Same in IDF 5.5 and 6.0.3. Verify
+  with `nm …/dhcpserver.c.obj | grep nbp_dhcps_static` (`U`).
+- A change deauths associated clients whose address now disagrees
+  (`kick_mismatched`), else they keep it until renewal (half the 120 min
+  lease). The IP must lie in the derived pool (.2 .. .101).
+- **QEMU:** `idf.py -B build-qemu-dhcps -DIDF_TARGET=esp32s3
+  -DNBP_DHCPS_SELFTEST=1 build`, then `… qemu` (IDF 6.0.3). Runs the real
+  server on lwIP loopback and prints `DHCPS-SELFTEST <step>: PASS|FAIL`
+  (join order, INIT-REBOOT NAK, renew of a reserved IP, server restart,
+  RELEASE, table cleared).
+
+## WiFi disconnect reasons (`wifi_sta`)
+
+- `WIFI_EVENT_STA_DISCONNECTED` is logged under tag `wifi_ev` (the `wifi`
+  tag is held at WARN for the driver) with reason code + name, the RSSI the
+  event carries and the BSSID; `STA back after N ms (M failed reconnect
+  attempts)` on the next IP. Failed retries log only on a reason change and
+  every 10th attempt. SoftAP `AP_STADISCONNECTED` logs reason + MAC, and
+  joins log the MAC.
+- `/stats.json`: `sta_disc`, `sta_disc_reason`, `sta_disc_rssi`,
+  `sta_disc_down_ms`, `ap_disc`, `ap_disc_reason`, `ap_disc_mac`. `GET
+  /wifidisc`: the last 8 events with names and uptime stamps (160 B ring),
+  since the 4 KB `/log` ring rolls over within minutes.
+
 ## NAPT table size — lwIP asserts if it can't allocate it (ESP32-C3 boot loop)
 
 - On the first `esp_netif_napt_enable`, lwIP `mem_calloc`s the whole NAPT

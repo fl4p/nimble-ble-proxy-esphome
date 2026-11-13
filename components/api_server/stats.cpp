@@ -59,6 +59,7 @@ std::atomic<uint32_t> g_notifies{0};
 // is "non-null → invoke".
 CloneStatsProvider g_clone_stats_provider = nullptr;
 NatThroughputProvider g_nat_throughput_provider = nullptr;
+StatsAppender g_wifi_disc_provider = nullptr;
 
 #if CONFIG_NBP_WEB_CONSOLE
 // ---- log ring buffer ----
@@ -792,8 +793,9 @@ esp_err_t stats_get(httpd_req_t *req) {
   // The base object is ~280 chars worst case (with heap_largest/heap_min
   // and the capability flags); the optional ap_rx/ap_tx 64-bit byte
   // counters (NAT builds) add ~60 more, the oom counters ~70, the API
-  // send-queue figures ~100 + ~40 per client.
-  char buf[768];
+  // send-queue figures ~100 + ~40 per client, the WiFi disconnect fields
+  // ~170. Measured 2026-11-13 on the NAT S3: ~520-700 B before the WiFi fields.
+  char buf[1024];
   size_t n = build_stats_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
@@ -869,6 +871,8 @@ void set_clone_stats_provider(CloneStatsProvider fn) {
 void set_nat_throughput_provider(NatThroughputProvider fn) {
   g_nat_throughput_provider = fn;
 }
+
+void set_wifi_disc_provider(StatsAppender fn) { g_wifi_disc_provider = fn; }
 
 size_t build_stats_json(char *buf, size_t cap) {
   // BLE-sourced counters. When NBP_BLE is off the backend (scanner +
@@ -978,6 +982,11 @@ size_t build_stats_json(char *buf, size_t cap) {
         static_cast<unsigned long>(oom_guard::count()),
         static_cast<unsigned long>(oom_guard::last_size()),
         static_cast<unsigned long>(oom_guard::new_recovered()));
+    if (m > 0) n += m;
+  }
+  // WiFi disconnect counters and the last reasons (wifi_sta).
+  if (g_wifi_disc_provider && static_cast<size_t>(n) < cap) {
+    int m = g_wifi_disc_provider(buf + n, cap - n);
     if (m > 0) n += m;
   }
   // API clients and their send queues (heap lwIP holds for unsent +

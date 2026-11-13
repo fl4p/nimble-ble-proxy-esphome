@@ -20,6 +20,34 @@ extern "C" {
 // (and out[0]='\0' when cap>0) otherwise.
 bool dhcps_hostname_lookup(const uint8_t mac[6], char *out, size_t cap);
 
+// Static SoftAP DHCP leases (dhcps_static.c). The DHCP server always gives
+// `mac` the address `ip` and never gives `ip` to another client, whatever
+// the join order. nat_router owns the persisted table and pushes it here;
+// the lwIP hook reads it on every DHCP packet. A change applies from the
+// next DHCP packet; a client that already holds another address keeps it
+// until it renews or rejoins.
+#define DHCPS_STATIC_LEASE_MAX 8
+
+typedef struct {
+  uint8_t mac[6];  // wire order
+  uint32_t ip;     // IPv4, network byte order
+} dhcps_static_lease_t;
+
+// Replace the whole table (n <= DHCPS_STATIC_LEASE_MAX; extra entries are
+// dropped). The caller validates the entries.
+void dhcps_static_set(const dhcps_static_lease_t *tbl, size_t n);
+
+// The static IP for `mac` (network order), or 0 when it has none.
+uint32_t dhcps_static_lookup(const uint8_t mac[6]);
+
+// Whether `ip` (network order) is reserved for some MAC.
+bool dhcps_static_is_reserved(uint32_t ip);
+
+#if NBP_DHCPS_SELFTEST
+// QEMU self-test (dhcps_static_selftest.c); never returns.
+void dhcps_static_selftest_run(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

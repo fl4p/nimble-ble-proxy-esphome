@@ -11,6 +11,7 @@ idf_component_register(
         ble_httpd
         ws_proxy
         nat_router
+        dhcps_hostname
         liveness_wdt
         serial_provision
         crash_capture

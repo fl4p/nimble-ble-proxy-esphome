@@ -181,6 +181,34 @@ Cumulative counters and instantaneous state. Always available.
 - `temp_c` — ESP32-S3 internal silicon temperature sensor, °C, one
   decimal. ±1-2 °C absolute accuracy, fine for trend visibility. Sensor
   is lazy-installed on first `/stats.json` hit.
+- WiFi disconnects (WiFi builds; `wifi_sta`):
+  `"sta_disc":1,"sta_disc_reason":200,"sta_disc_rssi":-71,"sta_disc_down_ms":6070,
+  "ap_disc":3,"ap_disc_reason":2,"ap_disc_mac":"70:04:1d:a6:ab:30"`.
+  `sta_disc` counts losses of the upstream link (failed reconnect attempts
+  are not counted); reason, RSSI (as the driver reported it with the event)
+  and outage length (disconnect to the next IP) are the last loss's.
+  `ap_disc` counts SoftAP clients leaving, with the last one's reason and
+  MAC. Reasons are `wifi_err_reason_t`; `/wifidisc` adds their names.
+
+### `GET /wifidisc` *(WiFi builds)*
+
+The last 8 WiFi disconnect events, newest first, kept in RAM because the
+`/log` ring (4 KB) rolls over within minutes. `t_s` is uptime at the event,
+`age_s` how long ago; `sta_down_ms` is non-zero while the upstream link is
+down. STA events carry the upstream BSSID, RSSI and `down_ms` (0 until the
+link is back); AP events carry the client's MAC.
+
+```json
+{"uptime_s":5000,"sta_down_ms":0,"total":2,"events":[
+ {"if":"ap","t_s":4810,"age_s":190,"reason":2,"name":"AUTH_EXPIRE","mac":"70:04:1d:a6:ab:30"},
+ {"if":"sta","t_s":3002,"age_s":1998,"reason":200,"name":"BEACON_TIMEOUT","mac":"aa:bb:cc:dd:ee:ff","rssi":-71,"down_ms":6070}]}
+```
+
+The same events are logged under tag `wifi_ev`: `STA disconnected: reason
+200 (BEACON_TIMEOUT), rssi -71 dBm, bssid …; reconnecting`, then `STA back
+after 6070 ms (2 failed reconnect attempts)`; failed attempts are logged
+when the reason changes and every 10th time; `AP client … left: reason 2
+(AUTH_EXPIRE)` and `AP client … joined (aid 1)`.
 
 ### `GET /devices` *(gated by `CONFIG_NBP_DEVICES_PANEL`)*
 
@@ -466,7 +494,23 @@ SoftAP/NAT router status + control. `GET` returns:
 `stations` lists the currently-associated SoftAP clients. `mac` + `rssi`
 come from `esp_wifi_ap_get_sta_list`; `ip` from the DHCP server's MAC↔IP
 pairing (`esp_wifi_ap_get_sta_list_with_ip`); `hostname` is the client's
-DHCP **option 12** (Host Name), empty when the client didn't send one.
+DHCP **option 12** (Host Name), empty when the client didn't send one;
+`static` is true when the MAC has a static lease. `leases` lists the static
+leases (`[{"mac":"70:04:1d:a6:ab:30","ip":"192.168.4.2"}]`).
+
+**Static leases.** IDF's DHCP server hands out the pool in join order, so
+after a reboot a port-forward to a fixed IP reaches whichever client joined
+first. A static lease pins a MAC to an IP: the server always offers that
+client that IP, NAKs its requests for any other, and never gives the IP to
+anyone else, even while the client is away. Configure with
+`POST /nat?lease_mac=70:04:1d:a6:ab:30&lease_ip=192.168.4.2` (add or
+replace) and `POST /nat?lease_mac=70:04:1d:a6:ab:30&lease_del=1`; up to 8
+leases, persisted in NVS (`nat`/`leases`). The IP must be in the DHCP pool
+(192.168.4.2 .. .101 for the default AP address) and not reserved for
+another MAC. A change deauthenticates every associated client whose current
+address disagrees with the table, so it rejoins and gets the right one at
+once (otherwise it would keep the old address until it renews, up to an
+hour). Implementation: `components/dhcps_hostname/dhcps_static.c`.
 
 IDF 5.5's DHCP server parses past option 12 and discards it, so we recover
 it with a custom lwIP hook (`LWIP_HOOK_DHCPS_POST_STATE`, wired via
@@ -477,7 +521,8 @@ station. The built-in server is left fully intact — no fork, no
 `CONFIG_LWIP_DHCPS` change. The dashboard NAT panel renders the array as a
 "hostname / IP / MAC / RSSI" table.
 
-`POST /nat?enabled=0|1`, `?ssid=…`, `?psk=…` toggle/reconfigure the AP;
+`POST /nat?enabled=0|1`, `?ssid=…`, `?psk=…` toggle/reconfigure the AP,
+`?lease_mac=…&lease_ip=…` / `&lease_del=1` set static leases (above);
 `/portmap` (separate endpoint) adds/deletes inbound forwards.
 
 ### `POST /trace?on=<0|1>`

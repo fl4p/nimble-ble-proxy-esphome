@@ -10,6 +10,9 @@
 #if NBP_HEAP_SELFTEST
 #include "heap_selftest.h"
 #endif
+#if NBP_DHCPS_SELFTEST
+#include "dhcps_hostname.h"
+#endif
 #include "proxy_config.h"
 #include "stats.h"
 #include "serial_provision.h"
@@ -162,6 +165,9 @@ extern "C" void app_main() {
 #if NBP_HEAP_SELFTEST
   api_server::heap_selftest::run();  // QEMU test build only; never returns
 #endif
+#if NBP_DHCPS_SELFTEST
+  dhcps_static_selftest_run();  // QEMU test build only; never returns
+#endif
 
   ESP_LOGI(TAG, "nimble-ble-proxy %s booting",
            esp_app_get_description()->version);
@@ -201,6 +207,9 @@ extern "C" void app_main() {
   wifi_sta::start_and_wait_for_ip();
   mdns_announce::start();
   ota::start();
+  // GET /wifidisc + the sta_disc/ap_disc fields in /stats.json.
+  wifi_sta::register_endpoints(ota::handle());
+  api_server::stats::set_wifi_disc_provider(&wifi_sta::append_disc_stats_json);
   // Free the single radio for the duration of an OTA upload: drop the SoftAP
   // and pause the BLE scan so coex can't starve the transfer (the
   // SA-Query/heap death-spiral that makes a loaded device's OTA crawl and time

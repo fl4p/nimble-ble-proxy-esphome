@@ -196,7 +196,7 @@ void print_tasks() {
 void step_boot_race() {
   // Before connection::init(): g_mutex is null, as in the boot window
   // between httpd start and ble_backend::start(). Used to assert.
-  static char buf[768];
+  static char buf[1024];
   const size_t n = api_server::stats::build_stats_json(buf, sizeof(buf));
   const uint8_t freeslots = ble_backend::connection::free_slots();
   uint64_t addrs[proxy::MAX_CONNECTIONS];
@@ -397,7 +397,7 @@ void run() {
   step_stall_strict();
   print_tasks();
   g_b_run.store(false);
-  static char buf[768];
+  static char buf[1024];
   api_server::stats::build_stats_json(buf, sizeof(buf));
   std::printf("HEAP-STATS %s\n", buf);
   std::printf("HEAP-SELFTEST summary: %d failure(s); free %u min %u\n", g_fail,

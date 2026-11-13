@@ -1,6 +1,6 @@
 set(srcs "")
 if(CONFIG_NBP_NAT_ROUTER)
-    list(APPEND srcs "dhcps_hostname.c")
+    list(APPEND srcs "dhcps_hostname.c" "dhcps_static.c" "dhcps_static_selftest.c")
 endif()
 
 # Gate matches nat_router: with NAT off, srcs is empty and this builds as an
@@ -10,5 +10,6 @@ endif()
 idf_component_register(
     SRCS ${srcs}
     INCLUDE_DIRS "include"
-    REQUIRES lwip freertos
+    REQUIRES lwip freertos log
+    PRIV_REQUIRES esp_netif
 )

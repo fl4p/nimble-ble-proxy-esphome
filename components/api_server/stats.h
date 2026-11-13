@@ -41,6 +41,12 @@ struct NatThroughput {
 using NatThroughputProvider = void (*)(NatThroughput *out);
 void set_nat_throughput_provider(NatThroughputProvider fn);
 
+// Optional provider that appends extra ,"key":value pairs to /stats.json
+// (main wires wifi_sta::append_disc_stats_json, so api_server needs no
+// wifi_sta dependency). Returns what snprintf returns.
+using StatsAppender = int (*)(char *buf, size_t cap);
+void set_wifi_disc_provider(StatsAppender fn);
+
 // Build the same JSON body that /stats.json returns into a caller-
 // supplied buffer. Returns bytes written (truncated at cap-1 by
 // snprintf semantics). Safe to call from any task. The CPU-percent
