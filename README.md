@@ -18,6 +18,7 @@ Specifically it is or can be:
 * BLE scanner: decodes BTHome enconded advertisement packages and looks up vendor detaisls
 * SoftAP NAT router with port-mappings
 * Many energy saving knobs to explore the power saving capabilities of an esp32/s3 chip
+* Up to 4 API client connections (stock esphome proxy firmware supports only 1)
 * Boilerplate for any coex WiFi/Bluetooth projects with web-interface
 
 ## Why
