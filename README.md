@@ -63,8 +63,8 @@ client accepts the device as a Bluetooth proxy:
   flow expects (`platform=ESP32`, `network=wifi`, `mac=…`, `version=…`, etc.).
 - **9 concurrent BLE connections**, up to 4 concurrent API clients (e.g. HA
   plus a CLI smoke test at the same time).
-- **HTTP OTA** on port 80 — `POST /update` writes the inactive OTA slot via
-  `esp_ota_*` and reboots into it.
+- **HTTP OTA** on port 80 — `POST /update` (header `X-NBP-Confirm: yes`)
+  writes the inactive OTA slot via `esp_ota_*` and reboots into it.
 - **Optional clone mode** (`CONFIG_NBP_CLONE`) — mirror one BLE peripheral
   as a local GATT server so multiple centrals (HA + a vendor app) share one
   upstream link. Full spec in [`docs/clone.md`](docs/clone.md).
@@ -206,8 +206,16 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 After the first serial flash, subsequent updates can go over WiFi:
 
 ```sh
-curl --data-binary @build/nimble_ble_proxy.bin http://<device-ip>/update
+curl -H 'X-NBP-Confirm: yes' --data-binary @build/nimble_ble_proxy.bin http://<device-ip>/update
 ```
+
+Every state-changing `POST` (`/update`, `/reboot`, `/level`, `/txpower`,
+`/cpufreq`, `/wifips`, `/clone`, …) needs `X-NBP-Confirm: yes`; `/nat`,
+`/portmap`, `/bond` and `/crash` keep their own `X-*-Confirm` headers. A
+web page on another origin cannot send a custom header, so it cannot fire
+these routes; see [`docs/web-ui.md`](docs/web-ui.md#endpoints). The
+`ws://<device>/api` bridge refuses a browser handshake from a foreign
+origin the same way.
 
 Or, for a BLE-only build (no WiFi):
 

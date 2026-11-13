@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.cpp"
+    SRCS "main.cpp" "ws_selftest.cpp"
     INCLUDE_DIRS "." "../include"
     REQUIRES
         ble_backend

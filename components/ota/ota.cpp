@@ -1,6 +1,7 @@
 #include "ota.h"
 
 #include "proxy_config.h"
+#include "http_confirm.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -35,6 +36,7 @@ QuiesceFn g_quiesce_end = nullptr;
 constexpr size_t CHUNK = 4096;
 
 esp_err_t update_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   // OTA is a remote firmware-write primitive — surface it prominently in
   // the web console (WARN) and record who kicked it off.
   char peer[48] = "?";

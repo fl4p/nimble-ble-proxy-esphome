@@ -26,6 +26,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs.h"
+#include "http_confirm.h"
 #include "oom_guard.h"
 #include "proxy_config.h"
 #include "scanner.h"
@@ -61,6 +62,7 @@ std::atomic<uint32_t> g_notifies{0};
 CloneStatsProvider g_clone_stats_provider = nullptr;
 NatThroughputProvider g_nat_throughput_provider = nullptr;
 StatsAppender g_wifi_disc_provider = nullptr;
+StatsAppender g_ws_stats_provider = nullptr;
 
 #if CONFIG_NBP_WEB_CONSOLE
 // ---- log ring buffer ----
@@ -268,6 +270,7 @@ esp_err_t level_get(httpd_req_t *req) {
 }
 
 esp_err_t level_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   char query[64];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
@@ -584,6 +587,7 @@ esp_err_t cpufreq_get(httpd_req_t *req) {
 }
 
 esp_err_t cpufreq_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   char query[32];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
@@ -602,6 +606,7 @@ esp_err_t wifips_get(httpd_req_t *req) {
 }
 
 esp_err_t wifips_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   char query[32];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
@@ -621,6 +626,7 @@ esp_err_t advitvl_get(httpd_req_t *req) {
 }
 
 esp_err_t advitvl_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   char query[32];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
@@ -667,6 +673,7 @@ esp_err_t liveness_get(httpd_req_t *req) {
 }
 
 esp_err_t liveness_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   char query[96];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
@@ -741,6 +748,7 @@ esp_err_t wifihist_get(httpd_req_t *req) {
 #endif  // CONFIG_NBP_LIVENESS_WDT
 
 esp_err_t hostname_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   // Query buffer sized for "val=" + max hostname.
   char query[proxy::HOSTNAME_MAX + 8];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
@@ -758,6 +766,7 @@ esp_err_t hostname_post(httpd_req_t *req) {
 // builds take this via /clone?passkey= instead. This route exists so a
 // build without clone (the ESP32-C3 profile, issue #2) can still change it.
 esp_err_t passkey_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   char query[24];
   char val[12];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
@@ -778,6 +787,7 @@ esp_err_t passkey_post(httpd_req_t *req) {
 #endif
 
 esp_err_t txpower_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   char query[64];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
@@ -789,6 +799,7 @@ esp_err_t txpower_post(httpd_req_t *req) {
 }
 
 esp_err_t trace_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   char query[32];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     query[0] = '\0';
@@ -800,6 +811,7 @@ esp_err_t trace_post(httpd_req_t *req) {
 }
 
 esp_err_t reboot_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   httpd_resp_set_type(req, "text/plain");
   httpd_resp_send(req, "rebooting\n", HTTPD_RESP_USE_STRLEN);
   schedule_reboot();
@@ -918,6 +930,7 @@ esp_err_t scan_get(httpd_req_t *req) {
 }
 
 esp_err_t scan_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   char query[64];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
@@ -981,6 +994,7 @@ void set_nat_throughput_provider(NatThroughputProvider fn) {
 }
 
 void set_wifi_disc_provider(StatsAppender fn) { g_wifi_disc_provider = fn; }
+void set_ws_stats_provider(StatsAppender fn) { g_ws_stats_provider = fn; }
 
 size_t build_stats_json(char *buf, size_t cap) {
   // BLE-sourced counters. When NBP_BLE is off the backend (scanner +
@@ -1095,6 +1109,11 @@ size_t build_stats_json(char *buf, size_t cap) {
   // WiFi disconnect counters and the last reasons (wifi_sta).
   if (g_wifi_disc_provider && static_cast<size_t>(n) < cap) {
     int m = g_wifi_disc_provider(buf + n, cap - n);
+    if (m > 0) n += m;
+  }
+  // WebSocket bridge: live sessions and handshakes refused on Origin.
+  if (g_ws_stats_provider && static_cast<size_t>(n) < cap) {
+    int m = g_ws_stats_provider(buf + n, cap - n);
     if (m > 0) n += m;
   }
   // API clients and their send queues (heap lwIP holds for unsent +

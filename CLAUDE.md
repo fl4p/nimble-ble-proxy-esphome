@@ -18,7 +18,8 @@
   `POST /wifips?li=0` and `POST /cpufreq?mhz=240&ls=0`, or rely on the
   `/log` web-console endpoint while keeping the page polling. Config
   endpoints (`/wifips`, `/cpufreq`, `/txpower`, …) only apply via `POST`;
-  a bare GET just reads.
+  a bare GET just reads. Every such `POST` needs `-H 'X-NBP-Confirm: yes'`
+  (400 without it), see "CSRF guards" below.
 
 - **NAT builds are heap- and coex-bound — don't over-provision NimBLE.**
   This S3 has *no PSRAM*, so WiFi (APSTA) + NimBLE + httpd + NAPT all share
@@ -140,6 +141,12 @@
   the freed singletons. The dashboard `confirm()`s before sending it.
 
 ## OTA over a loaded device — quiesce the radio during the upload
+
+- **OTA command:** `curl -H 'X-NBP-Confirm: yes' --data-binary @build/nimble_ble_proxy.bin
+  http://<device>/update`. Without the header the device answers 400
+  (`needs header X-NBP-Confirm: yes`) and writes nothing; curl still sends
+  the whole body first, httpd discards it. Firmware older than the guard
+  ignores the header, so the same command works on every version.
 
 - **A firmware upload competes for the single radio and gets starved.** On a
   busy NAT build (`/update` POST of ~1.3 MB) the SoftAP forward path + BLE scan
@@ -456,6 +463,53 @@
   A browser JS client must treat inbound WS data as a **continuous ESPHome byte
   stream** (device→browser is chunked at arbitrary boundaries; one WS frame ≠
   one ESPHome message).
+- **The handshake checks `Origin` (2026-11-13).** Browsers apply no CORS to
+  WebSockets, so before it any page open on the LAN could open the bridge and
+  drive GATT writes and PAIR/UNPAIR. Rules (`components/ws_proxy/origin_check.h`):
+  no/empty `Origin` → accept (aioesphomeapi, curl); `Origin` host[:port] ==
+  `Host` → accept (on-device dashboard; default port and case ignored);
+  exact entry in `CONFIG_NBP_WS_ORIGIN_ALLOWLIST` (default empty — the
+  dashboard does not use the bridge, no off-device page does) → accept;
+  anything else, `null` included, → 403 before the 101, `ws_origin_refused`
+  in `/stats.json`. UNPAIR over the native TCP API with no ownership check is
+  stock ESPHome behaviour and stays. Not covered: DNS rebinding.
+- **esp_http_server no longer calls the URI handler for the handshake GET**
+  (IDF commit 222d470312, 2026-02; in release/v5.5 and v6.0.3, not in tag
+  v5.5.3). The old `if (req->method == HTTP_GET)` set-up branch therefore
+  never ran: the first data frame found no session and closed the socket, so
+  the bridge was dead on current IDF builds (read from the IDF source, not
+  run on hardware). The checks now live in
+  `ws_pre_handshake_cb` (Origin, session cap → 503) and the bridge set-up in
+  `ws_post_handshake_cb`; NBP_WS_PROXY selects both
+  `HTTPD_WS_{PRE,POST}_HANDSHAKE_CB_SUPPORT` and ws_proxy.cpp `#error`s
+  without them. A refusal returns non-OK from the pre-callback, so nothing is
+  allocated and httpd closes the socket.
+- **QEMU test:** `idf.py -B build-qemu-ws -DIDF_TARGET=esp32s3
+  -DNBP_WS_SELFTEST=1 -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.wstest"
+  build`, then `… qemu`. Prints `WS-SELFTEST <step>: PASS|FAIL`: forged,
+  null, look-alike and port-mismatch origins get 403 and close; no-origin and
+  same-origin get 101 and a real HelloResponse through the bridge; the third
+  bridge gets 503; 90 refused handshakes cost no heap or task; POST without
+  `X-NBP-Confirm` gets 400. Host test of the policy alone:
+  `components/ws_proxy/host_test/test_origin_check.cpp` (build line inside).
+
+## CSRF guards on the HTTP surface (2026-11-13)
+
+- **Every state-changing `POST` needs a non-safelisted header.** `/level`,
+  `/txpower`, `/cpufreq`, `/scan`, `/advitvl`, `/wifips`, `/hostname`,
+  `/passkey`, `/liveness`, `/trace`, `/reboot`, `/clone`, `/update` need
+  `X-NBP-Confirm: yes` (`include/http_confirm.h`, one shared header for all
+  new guards); `/nat`, `/portmap` (`X-Nat-Confirm`), `/bond`
+  (`X-Bond-Confirm`), `/crash`, `/crash-test` (`X-Crash-Confirm`) keep their
+  older headers. A cross-origin page cannot send a custom header without a
+  preflight and httpd answers no `OPTIONS`. Not authentication.
+- Callers that send it: `web/index.html` `confirmHeaders()` (every POST),
+  `scripts/test_settings.py` `http()`, `scripts/ant-probe/capture_*.py`. The
+  BLE transport (`ble_httpd`) carries no headers and is not gated.
+- **Left unguarded:** `POST /wifi` on the SoftAP provisioning httpd (open AP,
+  plain HTML form for JS-less captive-portal views; anyone on that AP owns
+  the device anyway) and the test-only raw-socket `/bench`
+  (`CONFIG_NBP_BENCH`, discards the body).
 
 ## ESP-IDF workflow (for the agent)
 

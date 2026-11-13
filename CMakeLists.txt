@@ -29,6 +29,14 @@ if(NBP_DHCPS_SELFTEST)
     idf_build_set_property(COMPILE_DEFINITIONS "NBP_DHCPS_SELFTEST=1" APPEND)
 endif()
 
+# QEMU WebSocket-Origin / POST-confirm self-test only (idf.py -B
+# build-qemu-ws -DIDF_TARGET=esp32s3 -DNBP_WS_SELFTEST=1 build, then … qemu):
+# app_main runs ws_selftest::run() against the real httpd, api_server and
+# ws_proxy on lwIP loopback. Never in a firmware build.
+if(NBP_WS_SELFTEST)
+    idf_build_set_property(COMPILE_DEFINITIONS "NBP_WS_SELFTEST=1" APPEND)
+endif()
+
 project(nimble_ble_proxy
     LANGUAGES C CXX
     VERSION 0.2.4)

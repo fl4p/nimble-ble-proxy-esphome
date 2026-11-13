@@ -66,6 +66,38 @@ transport*); responses arrive on the notify characteristic. The
 client-side `apiText` / `apiJson` helpers in `web/index.html` paper
 over the difference.
 
+**Every state-changing `POST` over HTTP needs a confirm header**, else
+400. `/level`, `/txpower`, `/cpufreq`, `/scan`, `/advitvl`, `/wifips`,
+`/hostname`, `/passkey`, `/liveness`, `/trace`, `/reboot`, `/clone` and
+the OTA `/update` need `X-NBP-Confirm: yes` (`include/http_confirm.h`);
+`/nat` and `/portmap` need `X-Nat-Confirm: yes`, `/bond` needs
+`X-Bond-Confirm: yes` and `/crash`, `/crash-test` need `X-Crash-Confirm:
+yes` (older, per-endpoint). It is a CSRF guard, not authentication: a page
+on another origin cannot send a custom header without a CORS preflight,
+which httpd never answers, so a drive-by form post or no-cors `fetch()`
+from any page open on the LAN cannot reach these routes. Anyone on the LAN
+can still send the header. The dashboard's `confirmHeaders()` adds them;
+the BLE transport carries no headers and is not gated (a page reaches it
+only through a Web Bluetooth device the user picked). Example:
+`curl -X POST -H 'X-NBP-Confirm: yes' 'http://<proxy>/wifips?li=0'`.
+
+The one exception is `POST /wifi` on the SoftAP provisioning server
+(`CONFIG_NBP_AP_FALLBACK`, 192.168.4.1 on an open AP): it is a plain HTML
+form that must work in JS-less captive-portal views, and any client on
+that open AP can already reconfigure the device, so it stays unguarded.
+
+**`ws://<proxy>/api` (`CONFIG_NBP_WS_PROXY`) checks `Origin` at the
+handshake**, before the 101, because browsers apply no CORS to
+WebSockets. Accepted: no `Origin` (non-browser clients); an `Origin`
+whose host[:port] equals the `Host` header (the on-device dashboard;
+default ports and case ignored); an exact entry of
+`CONFIG_NBP_WS_ORIGIN_ALLOWLIST` (space/comma separated, default empty,
+since no off-device page uses the bridge). Everything else, including
+`Origin: null` (file:// pages, sandboxed iframes), gets 403 and counts in
+`/stats.json` `ws_origin_refused` (`ws_sessions` = live bridges). Not
+covered: DNS rebinding (the attacker's name resolving to the proxy makes
+its page same-origin), which also defeats the confirm headers.
+
 ### `GET /` — dashboard HTML
 
 Single self-contained page sourced from `web/index.html`, embedded
@@ -132,7 +164,8 @@ Layout (top → bottom):
    `Range.createContextualFragment` (avoids `innerHTML` to stay clear of
    the security hook). Trimmed to 3000 DOM nodes; auto-scrolls only if
    the user was already at the bottom.
-6. **Footer** — OTA `curl` hint.
+6. **Footer** — OTA `curl` hint (`curl -H 'X-NBP-Confirm: yes'
+   --data-binary @firmware.bin http://<host>/update`).
 
 Both charts re-fit on viewport resize / orientation change: a `resize`
 listener calls `u.setSize` / `u2.setSize` with `chartW(el)`, where

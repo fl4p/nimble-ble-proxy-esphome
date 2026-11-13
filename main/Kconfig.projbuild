@@ -165,6 +165,8 @@ config NBP_WS_PROXY
     bool "WebSocket bridge: aioesphomeapi over ws://<host>/api (browser clients)"
     depends on NBP_WIFI
     select HTTPD_WS_SUPPORT
+    select HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT
+    select HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT
     default n
     help
         Add a binary WebSocket route at GET /api on the shared dashboard
@@ -187,6 +189,26 @@ config NBP_WS_PROXY
         page can't exhaust the 16-socket LWIP budget shared with httpd,
         mDNS and clone. Disable for builds that only ever talk to HA over
         plain TCP.
+
+        Browsers apply no CORS to WebSockets, so the handshake checks
+        Origin before answering 101: no Origin (non-browser client) or an
+        Origin whose host[:port] equals the Host header (the on-device
+        dashboard) is accepted, as is anything in NBP_WS_ORIGIN_ALLOWLIST.
+        Everything else, including "null" (file://, sandboxed iframes),
+        gets 403 and counts in /stats.json ws_origin_refused. Needs the
+        pre/post-handshake callbacks of esp_http_server (IDF release/v5.5
+        after 2026-02, v6.0.3+).
+
+config NBP_WS_ORIGIN_ALLOWLIST
+    string "WebSocket bridge: extra allowed Origins"
+    depends on NBP_WS_PROXY
+    default ""
+    help
+        Space- or comma-separated list of exact origins (scheme://host[:port],
+        no trailing slash, e.g. "https://example.github.io") whose pages may
+        open ws://<host>/api in addition to the device's own dashboard.
+        Empty by default: no off-device page uses the bridge. "null" is
+        never accepted, even if listed.
 
 config NBP_NAT_ROUTER
     bool "WiFi NAT router: SoftAP + NAPT out the STA uplink"

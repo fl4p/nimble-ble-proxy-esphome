@@ -263,6 +263,10 @@ POST /clone?addr=AA:BB:CC:DD:EE:FF&type=0&enabled=1[&passkey=NNNNNN]
                       → 200 + {"ok":true,"reboot_required":bool}
 ```
 
+Over HTTP the `POST` needs the header `X-NBP-Confirm: yes` (400 without
+it; CSRF guard, see `docs/web-ui.md` *Endpoints*). The BLE transport is
+not gated.
+
 `reboot_required` is `true` whenever `addr` changes after the GATT
 mirror has already been built (see §7). `passkey` is optional and only
 recognised under `CONFIG_NBP_SMP`; it routes through

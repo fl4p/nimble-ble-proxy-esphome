@@ -49,6 +49,8 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 # ---- HTTP helpers ---------------------------------------------------------
 
 # State-changing POSTs that the firmware gates on a CSRF confirm header.
+# Every POST needs X-NBP-Confirm (include/http_confirm.h); these older
+# routes need their own header instead.
 CONFIRM_HEADERS = (
     ("/nat", "X-Nat-Confirm"),
     ("/portmap", "X-Nat-Confirm"),
@@ -59,6 +61,7 @@ CONFIRM_HEADERS = (
 def http(method: str, path: str, timeout: float = 5.0, confirm: bool = True):
     req = urllib.request.Request(f"http://{BASE}{path}", method=method)
     if method == "POST" and confirm:
+        req.add_header("X-NBP-Confirm", "yes")
         route = path.split("?", 1)[0]
         for prefix, hdr in CONFIRM_HEADERS:
             if route == prefix:
@@ -106,7 +109,8 @@ def _recvn(sock: socket.socket, n: int) -> bytes:
     return buf
 
 
-def ws_connect(ip: str, path: str = "/api", timeout: float = 5.0) -> socket.socket:
+def ws_connect(ip: str, path: str = "/api", timeout: float = 5.0,
+               origin: str | None = None) -> socket.socket:
     sock = socket.create_connection((ip, 80), timeout=timeout)
     sock.settimeout(timeout)
     key = "dGhlIHNhbXBsZSBub25jZQ=="
@@ -116,7 +120,8 @@ def ws_connect(ip: str, path: str = "/api", timeout: float = 5.0) -> socket.sock
         "Connection: Upgrade\r\n"
         "Upgrade: websocket\r\n"
         "Sec-WebSocket-Version: 13\r\n"
-        f"Sec-WebSocket-Key: {key}\r\n\r\n"
+        + (f"Origin: {origin}\r\n" if origin is not None else "")
+        + f"Sec-WebSocket-Key: {key}\r\n\r\n"
     )
     sock.sendall(req.encode())
     # Read response headers (up to blank line).
@@ -401,6 +406,33 @@ def test_ws_bridge():
         sock.close()
 
 
+def test_csrf_guards():
+    print("[CSRF guards: confirm header, WebSocket Origin]")
+    before = get_json("/level")
+    lvl = before.get("nimble")
+    st, body = http("POST", f"/level?nimble={lvl}", confirm=False)
+    check("POST /level without X-NBP-Confirm is refused", st == 400,
+          f"got {st}: {body}")
+    st, body = http("POST", f"/level?nimble={lvl}")
+    check("POST /level with X-NBP-Confirm is accepted", st == 200,
+          f"got {st}: {body}")
+
+    s0 = get_json("/stats.json").get("ws_origin_refused")
+    for origin, want in ((f"http://{BASE}", True), (None, True),
+                         ("http://evil.example", False), ("null", False)):
+        try:
+            sock = ws_connect(BASE, origin=origin)
+            sock.close()
+            ok = True
+        except Exception:
+            ok = False
+        check(f"WS /api with Origin {origin!r} -> "
+              f"{'101' if want else 'refused'}", ok == want)
+    s1 = get_json("/stats.json").get("ws_origin_refused")
+    check("ws_origin_refused counts the two refused handshakes",
+          s0 is not None and s1 == s0 + 2, f"{s0} -> {s1}")
+
+
 def test_cpufreq_persistence():
     print("[cpufreq persistence across reboot]  (disruptive)")
     post("/cpufreq?mhz=160")
@@ -444,6 +476,7 @@ def main() -> int:
     test_wifips_roundtrip()
     test_bond_roundtrip()
     test_ws_bridge()
+    test_csrf_guards()
     if args.reboot:
         test_cpufreq_persistence()
         test_ble_off_reboot()
