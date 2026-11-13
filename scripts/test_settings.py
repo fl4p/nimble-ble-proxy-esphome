@@ -3,8 +3,9 @@
 
 Drives a *live* device over HTTP (the dashboard endpoints) and over the
 WebSocket bridge at ws://<ip>/api (NBP_WS_PROXY). Covers the runtime-tunable
-settings and their persistence, the ls/pdcpu interaction, input validation,
-and the esphome-over-WebSocket handshake + round-trip.
+settings and their persistence, the ls/pdcpu interaction, BLE bonding
+config, input validation, and the esphome-over-WebSocket handshake +
+round-trip.
 
 Stdlib only (urllib + socket) — no pip deps.
 
@@ -47,8 +48,21 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 # ---- HTTP helpers ---------------------------------------------------------
 
-def http(method: str, path: str, timeout: float = 5.0):
+# State-changing POSTs that the firmware gates on a CSRF confirm header.
+CONFIRM_HEADERS = (
+    ("/nat", "X-Nat-Confirm"),
+    ("/portmap", "X-Nat-Confirm"),
+    ("/bond", "X-Bond-Confirm"),
+)
+
+
+def http(method: str, path: str, timeout: float = 5.0, confirm: bool = True):
     req = urllib.request.Request(f"http://{BASE}{path}", method=method)
+    if method == "POST" and confirm:
+        route = path.split("?", 1)[0]
+        for prefix, hdr in CONFIRM_HEADERS:
+            if route == prefix:
+                req.add_header(hdr, "yes")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read().decode()
@@ -281,6 +295,85 @@ def test_wifips_roundtrip():
     check("wifips li=0 (PS off)", f.get("li") == 0, str(f))
 
 
+def test_bond_roundtrip():
+    """/bond: passkey, auto-bond list add/remove, input validation.
+
+    Skipped on firmware built without CONFIG_NBP_SMP (the endpoint 404s).
+    Uses a locally-administered test MAC that no real peer will carry, and
+    always removes it again — the list is capped at 4 entries.
+    """
+    print("[bond: passkey + auto-bond list]")
+    st, _ = http("GET", "/bond")
+    if st == 404:
+        check("skipped: /bond not served (built without CONFIG_NBP_SMP)", True)
+        return
+
+    before = get_json("/bond")
+    original_pin = before.get("passkey")
+    check("bond JSON has passkey", isinstance(original_pin, int), str(before))
+    check("bond JSON has auto list", isinstance(before.get("auto"), list),
+          str(before))
+    check("bond JSON has bonded list", isinstance(before.get("bonded"), list),
+          str(before))
+    # ble_off=true means the NimBLE host was deinited by POST
+    # /txpower?ble=off, so `bonded` is unreadable rather than empty.
+    if before.get("ble_off"):
+        check("skipped the rest: BLE is powered off, reboot to re-test", True)
+        return
+
+    st, _ = http("POST", "/bond?passkey=424242", confirm=False)
+    check("POST /bond without X-Bond-Confirm is refused", st == 400,
+          f"status {st}")
+    check("refused POST /bond left the passkey alone",
+          get_json("/bond")["passkey"] == original_pin)
+    post("/bond?passkey=424242")
+    f = get_json("/bond")
+    check("passkey set to 424242", f.get("passkey") == 424242, str(f))
+    post(f"/bond?passkey={original_pin}")
+    f = get_json("/bond")
+    check("passkey restored", f.get("passkey") == original_pin, str(f))
+
+    test_mac = "02:00:00:aa:bb:cc"
+    post(f"/bond?add={test_mac}")
+    f = get_json("/bond")
+    check("auto-bond add landed", test_mac in [a.lower() for a in f["auto"]],
+          str(f))
+    # Adding twice must not duplicate or fail.
+    post(f"/bond?add={test_mac}")
+    f = get_json("/bond")
+    check("auto-bond add is idempotent",
+          [a.lower() for a in f["auto"]].count(test_mac) == 1, str(f))
+    post(f"/bond?remove={test_mac}")
+    f = get_json("/bond")
+    check("auto-bond remove landed",
+          test_mac not in [a.lower() for a in f["auto"]], str(f))
+
+    st, body = post("/bond?add=nonsense")
+    check("malformed MAC rejected (4xx)", 400 <= st < 500, f"got {st}: {body}")
+    st, body = post("/bond?passkey=1234567")
+    check("out-of-range passkey rejected (4xx)", 400 <= st < 500,
+          f"got {st}: {body}")
+    st, body = post("/bond")
+    check("empty bond POST rejected (4xx)", 400 <= st < 500,
+          f"got {st}: {body}")
+    st, body = post("/bond?unbond=02:00:00:de:ad:00")
+    check("unbond of an unbonded address rejected (4xx)", 400 <= st < 500,
+          f"got {st}: {body}")
+    st, body = post("/bond?passkey=abc")
+    check("non-numeric passkey rejected (4xx)", 400 <= st < 500,
+          f"got {st}: {body}")
+
+    # A request that ends in a 400 must not have applied any earlier
+    # parameter — notably it must not have changed the stored passkey that
+    # every outbound pairing uses.
+    st, _ = post(f"/bond?passkey=999999&add=nonsense")
+    f = get_json("/bond")
+    check("rejected request left the passkey untouched",
+          400 <= st < 500 and f.get("passkey") == original_pin, str(f))
+    check("rejected request left the auto-bond list untouched",
+          test_mac not in [a.lower() for a in f["auto"]], str(f))
+
+
 def test_ws_bridge():
     print("[websocket bridge: handshake + esphome round-trip]")
     try:
@@ -349,6 +442,7 @@ def main() -> int:
     test_txpower_roundtrip()
     test_ble_txpower()
     test_wifips_roundtrip()
+    test_bond_roundtrip()
     test_ws_bridge()
     if args.reboot:
         test_cpufreq_persistence()

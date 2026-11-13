@@ -92,6 +92,81 @@ size_t encode_error(void *vctx, uint8_t *buf, size_t cap) {
       vctx, buf, cap, proxyapi_BluetoothGATTErrorResponse_fields);
 }
 
+size_t encode_pairing_response(void *vctx, uint8_t *buf, size_t cap) {
+  return encode_one<proxyapi_BluetoothDevicePairingResponse>(
+      vctx, buf, cap, proxyapi_BluetoothDevicePairingResponse_fields);
+}
+
+size_t encode_unpairing_response(void *vctx, uint8_t *buf, size_t cap) {
+  return encode_one<proxyapi_BluetoothDeviceUnpairingResponse>(
+      vctx, buf, cap, proxyapi_BluetoothDeviceUnpairingResponse_fields);
+}
+
+size_t encode_clear_cache_response(void *vctx, uint8_t *buf, size_t cap) {
+  return encode_one<proxyapi_BluetoothDeviceClearCacheResponse>(
+      vctx, buf, cap, proxyapi_BluetoothDeviceClearCacheResponse_fields);
+}
+
+// Negative sentinels for the pairing/unpairing/clear-cache responses.
+// Positive values in `error` are NimBLE host codes passed through from
+// ble_backend, so keep ours out of that space.
+// (maybe_unused: which of these is reachable depends on CONFIG_NBP_SMP.)
+[[maybe_unused]] constexpr int32_t ERR_NOT_SUPPORTED = -101;  // no NBP_SMP
+[[maybe_unused]] constexpr int32_t ERR_NOT_CONNECTED = -102;  // no live link of the requester's
+[[maybe_unused]] constexpr int32_t ERR_NO_BOND = -103;  // nothing to remove
+
+// Pairing, unpairing and clear-cache responses answer one request, so
+// like GATT errors they go to the requester only (send_to drops them if
+// that client has gone).
+void send_pairing(uint32_t client_id, uint64_t address, bool paired,
+                  int32_t err) {
+  proxyapi_BluetoothDevicePairingResponse msg =
+      proxyapi_BluetoothDevicePairingResponse_init_zero;
+  msg.address = address;
+  msg.paired = paired;
+  msg.error = err;
+  api_server::send_to(client_id,
+                      proxyapi::MSG_BLUETOOTH_DEVICE_PAIRING_RESPONSE,
+                      &encode_pairing_response, &msg);
+}
+
+void send_unpairing(uint32_t client_id, uint64_t address, bool success,
+                    int32_t err) {
+  proxyapi_BluetoothDeviceUnpairingResponse msg =
+      proxyapi_BluetoothDeviceUnpairingResponse_init_zero;
+  msg.address = address;
+  msg.success = success;
+  msg.error = err;
+  api_server::send_to(client_id,
+                      proxyapi::MSG_BLUETOOTH_DEVICE_UNPAIRING_RESPONSE,
+                      &encode_unpairing_response, &msg);
+}
+
+void send_clear_cache(uint32_t client_id, uint64_t address, bool success,
+                      int32_t err) {
+  proxyapi_BluetoothDeviceClearCacheResponse msg =
+      proxyapi_BluetoothDeviceClearCacheResponse_init_zero;
+  msg.address = address;
+  msg.success = success;
+  msg.error = err;
+  api_server::send_to(client_id,
+                      proxyapi::MSG_BLUETOOTH_DEVICE_CLEAR_CACHE_RESPONSE,
+                      &encode_clear_cache_response, &msg);
+}
+
+#ifdef CONFIG_NBP_SMP
+// Fires from ble_backend's bonding worker task (or synchronously from
+// connection::pair() when the link is already encrypted). `owner` is the
+// client that sent PAIR.
+void on_pair_result(ble_backend::connection::OwnerId owner, uint64_t address,
+                    const ble_backend::connection::PairResult &r) {
+  ESP_LOGI(TAG, "pair %012llx -> paired=%d err=%ld owner=%lu",
+           static_cast<unsigned long long>(address), r.paired,
+           static_cast<long>(r.error), static_cast<unsigned long>(owner));
+  send_pairing(owner, address, r.paired, r.error);
+}
+#endif
+
 // Errors answer one request, so they go to the requester only — a
 // broadcast would land on whichever other client owns `address` and look
 // like a failure of its own pending op.
@@ -302,12 +377,38 @@ bool handle_device_request(const uint8_t *payload, size_t payload_len,
       }
       break;
     }
-    case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR:
-    case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_UNPAIR:
+    case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR: {
+#ifdef CONFIG_NBP_SMP
+      // connection::pair() answers through on_pair_result — either
+      // synchronously (link already encrypted) or from the bonding
+      // worker once SMP resolves. A false return means there was
+      // nothing of the requester's to pair on, so we answer here instead.
+      if (!ble_backend::connection::pair(req.address, ctx.client_id,
+                                         &on_pair_result)) {
+        send_pairing(ctx.client_id, req.address, false, ERR_NOT_CONNECTED);
+      }
+#else
+      send_pairing(ctx.client_id, req.address, false, ERR_NOT_SUPPORTED);
+#endif
+      break;
+    }
+    case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_UNPAIR: {
+#ifdef CONFIG_NBP_SMP
+      // Deleting the bond does not drop a live link — matching BlueZ's
+      // RemoveDevice semantics closely enough for HA's purposes. The bond
+      // store is device-wide, not per link, so no ownership check.
+      bool ok = ble_backend::connection::unpair(req.address);
+      send_unpairing(ctx.client_id, req.address, ok, ok ? 0 : ERR_NO_BOND);
+#else
+      send_unpairing(ctx.client_id, req.address, false, ERR_NOT_SUPPORTED);
+#endif
+      break;
+    }
     case proxyapi_BluetoothDeviceRequestType_BLUETOOTH_DEVICE_REQUEST_TYPE_CLEAR_CACHE:
-      // Pairing/cache flags aren't advertised in our feature bits, but
-      // HA may still send them speculatively — return a graceful error.
-      send_gatt_error(ctx.client_id, req.address, 0, /*err=*/-99);
+      // We hold no GATT cache between connections (every connect clears
+      // NimBLE's attribute cache, deleteAttributes=true), so the
+      // post-condition HA wants is already true.
+      send_clear_cache(ctx.client_id, req.address, true, 0);
       break;
   }
   return true;

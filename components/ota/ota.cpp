@@ -159,11 +159,13 @@ void start() {
   // We're now well past that: /favicon.svg, /txpower, /cpufreq, /scan,
   // /wifips, /hostname, /advitvl (all GET+POST pairs), /devices, /clone
   // GET+POST (clone absorbed /passkey), plus /nat GET+POST and /portmap
-  // POST when the NAT router is built in — ~28 routes today. Each
+  // POST when the NAT router is built in, /bond GET+POST with NBP_SMP —
+  // 38 routes on the full S3 build (39 with NBP_CRASH_TEST). Each
   // unregistered handler is a silent 404 in production (we saw
   // /devices drop at boot), so size with a comfortable margin and add
-  // a runtime assert at registration time.
-  cfg.max_uri_handlers = 40;
+  // a runtime assert at registration time. Each slot is one pointer of
+  // heap (4 B).
+  cfg.max_uri_handlers = 44;
   // CONFIG_LWIP_MAX_SOCKETS=16 leaves the api_server (1 listen + up to
   // 4 clients), mDNS and clone.mirror plenty of room alongside the
   // dashboard. Bumping httpd here to 5 lets a phone + a desktop browser

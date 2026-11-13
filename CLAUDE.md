@@ -350,6 +350,105 @@
   materialise the `default y`. Watch for this whenever adding a Kconfig symbol
   to a configured tree.
 
+## BLE bonding (NBP_SMP) — two paths, and why the second one exists
+
+- The proxy can bond as a **central**: `NimBLEDevice::setSecurityAuth(bond,
+  mitm, sc)` + `IO_CAP=KEYBOARD_ONLY`, with a static passkey injected from
+  `ClientCb::onPassKeyEntry` (`/bond?passkey=`, NVS `stats/ble_passkey`).
+  `CONFIG_BT_NIMBLE_NVS_PERSIST` keeps the resulting bond across reboots.
+- **Path 1 — HA asks.** `BT_PROXY_FEATURE_FLAGS` now sets bit 3 (`PAIRING`,
+  gated on `CONFIG_NBP_SMP`) and bit 4 (`CACHE_CLEARING`), so
+  `bleak-esphome` lets `BleakClient.pair()` through as
+  `BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR`. `bt_handlers` answers with
+  `BluetoothDevicePairingResponse` (85) / `…UnpairingResponse` (86) /
+  `…ClearCacheResponse` (88). CLEAR_CACHE is a truthful no-op — we
+  re-discover on every connect, so "cache cleared" is already the case.
+  **The ESPHome protocol carries no passkey**, which is the one real gap
+  vs a local BlueZ adapter: the PIN has to be on the device beforehand.
+- **Path 2 — the auto-bond list, and it is the one that matters.** HA only
+  sends PAIR *after* a successful connect **and** service discovery. Peers
+  that refuse discovery on an unauthenticated link (Felicity/SolarB packs,
+  batmon-ha#415) drop the connection before that, so path 1 can never
+  trigger for exactly the devices that need it. For an address on the
+  auto-bond list (`/bond?add=MAC`, NVS `stats/auto_bond`, cap
+  `AUTO_BOND_MAX` = `CONFIG_BT_NIMBLE_MAX_BONDS` = 4) `ClientCb::onConnect`
+  **withholds the ConnectionResponse**, runs SMP, and only then tells HA the
+  link is up — so discovery happens over an encrypted link. A failed bond
+  still reports `connected=true` (the link is real, just unauthenticated):
+  that keeps HA's retry behaviour identical to a build without the list.
+- **`secureConnection()` blocks with no timeout of its own** (it waits for
+  `BLE_GAP_EVENT_ENC_CHANGE` or a disconnect — bounded in practice by the
+  30 s SMP timeout). It must not run on the api_server client task (HA's
+  pings would stall) nor on the NimBLE host task (which delivers the very
+  event it waits for), so it runs on a lazily-created `ble_bond` worker
+  (3 KB stack, spawned on first use, deletes itself after 30 s idle, so the
+  stack is heap only while bonding happens; creation, enqueue and idle exit
+  are serialised by `g_bond_start`). A failed `xTaskCreate` falls back to
+  reporting the link unauthenticated / answering PAIR with -102. The async variant
+  (`secureConnection(true)`) is NOT used: NimBLE-cpp only calls
+  `onAuthenticationComplete` on **success**, so async gives no failure edge.
+- **Lock ordering: never call into NimBLE while holding `connection.cpp`'s
+  `g_mutex`.** `getConnInfo()`/`ble_gap_conn_find` take the `ble_hs` lock,
+  and the host task calls our callbacks; taking them in the other order
+  inverts. `onConnect` therefore reads `getMTU()` + `getConnInfo()` *before*
+  the mutex, and `pair()` snapshots the client pointer, releases, then asks.
+- **Slot recycling is handled with a generation counter.** A bonding job
+  carries `{slot, gen}`; `alloc_locked()` bumps `Slot::gen`. A job that
+  finishes after the peer dropped sees the mismatch (or `state != Connected`)
+  and stays silent, so HA never gets two connect results for one attempt —
+  `onDisconnect` already sent `connected=false` in that case.
+- **Ownership (merged onto per-client links, 2026-11).** PAIR is
+  owner-only like every other per-link request (`pair(addr, owner, cb)`;
+  another client's link answers `paired=false, error=-102`), and the
+  pairing, unpairing and clear-cache responses go to the requester alone
+  (`send_to`). The auto-bond's deferred connect result goes to the slot's
+  owner at finish time; if the owner left, `release_owner` has already moved
+  the slot to Disconnecting and the job stays silent. While a result is
+  withheld, a re-CONNECT from the owner answers "in progress"
+  (`OwnInProgress`), not `connected=true`. UNPAIR has no owner check: the
+  bond store is device-wide. When a job finishes on a slot that was freed
+  under it, `bond_finish` fires the free-change callback, because only then
+  does the slot count as free again. No connection slot was added: bonding
+  runs on the proxy's 2 existing slots.
+- **RAM cost** (IDF 6.0.3, `idf.py size` vs main 3f5d6ad): +64 B static
+  `.bss` on both S3 (DIRAM) and C3 (DRAM). NBP_SMP's NimBLE SM/store was
+  already on in main, so the feature adds no NimBLE RAM. Heap: the job
+  queue and start mutex (~0.3 KB) from `connection::init()`; the worker
+  stack (3 KB + TCB) only while a bond is in progress and for 30 s after.
+  Under the ~2 KB threshold, so not Kconfig-gated beyond `NBP_SMP`.
+- **`POST /bond` needs `X-Bond-Confirm: yes`** over HTTP (same CSRF guard as
+  `X-Nat-Confirm`); the dashboard and `scripts/test_settings.py` send it. The
+  BLE dashboard transport carries no headers and is not gated.
+- `NimBLEDevice::isBonded()/deleteBond()` match on the **full NimBLEAddress
+  including type**, but HA only hands us 48 bits (and the adv address type
+  isn't necessarily the identity type in the store). `find_bond()` enumerates
+  `getNumBonds()`/`getBondedAddress(i)` and compares the 48 bits instead.
+- **The bond store is a host facility — guard every read on
+  `ble_backend::powered_off()`.** `POST /txpower?ble=off` does a full
+  `NimBLEDevice::deinit(true)`, so `getNumBonds()` afterwards walks a
+  torn-down `ble_hs`. The dashboard polls `/bond` every 5 s, which makes this
+  a *reliable* abort rather than a rare one. `find_bond`, `bonded_addresses`
+  and `pair()` all check first; `/bond` surfaces `"ble_off":true` so the panel
+  can say why the list is empty instead of implying the keys were deleted.
+  (This is the same guard `build_txpower_json` already used — the pattern is
+  called out in `ble_backend.h`'s comment on `powered_off()`.)
+- **A slot with a bonding job in flight is not allocatable.** The worker
+  holds the slot's `NimBLEClient*` across `secureConnection()`, and slots
+  *reuse* their client object — so re-tenanting the slot in that window would
+  run SMP against the wrong peer. `alloc_locked()`/`free_slots()` share
+  `slot_available_locked()` (`state == Free && !bond_busy`), and
+  `onDisconnect`/`onConnectFail` deliberately clear only `bond_holds_connect`,
+  leaving `bond_busy` to `bond_finish()`. The generation counter alone does
+  *not* cover this: it detects a recycled slot after the fact, but by then
+  SMP has already run on the wrong link.
+- **Sending the deferred connect result is not atomic with the state check.**
+  The peer can drop between `bond_finish()` observing `Connected` and the
+  worker's `connect_cb(connected=true)` — and `onDisconnect` would then have
+  pushed its `connected=false` *first*, leaving HA holding a link that no
+  longer exists. The worker re-checks with `job_link_live()` after the send
+  and emits a corrective `connected=false`. A duplicate disconnect is
+  harmless; a phantom connection is not.
+
 ## WebSocket bridge (NBP_WS_PROXY)
 
 - Gated off by default. When on, `GET ws://<host>/api` tunnels the plaintext

@@ -140,11 +140,31 @@ const char *handle_hostname_set(const char *query);
 #ifdef CONFIG_NBP_SMP
 // Persist + apply the static SMP passkey used by the proxy when an
 // upstream peer (BMS, cloned device) demands pairing. Single entry
-// point for both HTTP routes: /clone?passkey= in clone builds (the
-// dashboard collects target MAC + passkey in one POST) and
+// point for every HTTP route: /bond?passkey=, /clone?passkey= in clone
+// builds (the dashboard collects target MAC + passkey in one POST) and
 // /passkey?val= when clone is compiled out. Returns nullptr on
 // success, or a short error literal.
 const char *set_passkey(uint32_t pin);
+
+// /bond — the bonding panel's backing endpoint.
+//
+// GET  → {"passkey":NNNNNN,"max":N,"auto":[MAC,…],"bonded":[MAC,…]}
+//          `auto`   addresses paired with immediately after connecting
+//          `bonded` peers whose keys are currently in the NVS bond store
+// POST takes any of:
+//          passkey=NNNNNN   set the static SMP passkey (0..999999)
+//          add=MAC          add MAC to the auto-bond list
+//          remove=MAC       drop MAC from the auto-bond list
+//          unbond=MAC|all   delete stored bond keys
+// handle_bond_set returns nullptr on success or a short error literal.
+size_t build_bond_json(char *buf, size_t cap);
+const char *handle_bond_set(const char *query);
+
+// Load the persisted auto-bond list into ble_backend. Must run AFTER
+// ble_backend::start() — connection::init() creates the mutex the list
+// is guarded by. (The passkey has no such constraint and is replayed
+// from apply_log_overrides_from_nvs instead.)
+void apply_auto_bond_from_nvs();
 #endif
 
 #if CONFIG_NBP_DEVICES_PANEL
@@ -215,9 +235,9 @@ void apply_hostname_from_nvs();
 
 // Registers all dashboard URIs on the OTA httpd: /, /favicon.svg,
 // /stats.json, /log, /level, /trace, /reboot, /txpower, /cpufreq,
-// /scan, /advitvl, /wifips, /hostname, /devices. SMP passkey: via
-// /clone?passkey= in clone builds (see ble_clone/clone.cpp), via
-// POST /passkey?val= when NBP_SMP is on and NBP_CLONE is off. Only defined when WiFi (and therefore the
+// /scan, /advitvl, /wifips, /hostname, /devices, /bond. SMP passkey: via
+// /bond?passkey=, /clone?passkey= in clone builds (see ble_clone/clone.cpp),
+// or POST /passkey?val= when NBP_SMP is on and NBP_CLONE is off. Only defined when WiFi (and therefore the
 // HTTP server) is in the build.
 #if CONFIG_NBP_WIFI
 void register_endpoints(httpd_handle_t srv);

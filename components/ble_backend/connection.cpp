@@ -1,13 +1,16 @@
 #include "connection.h"
 
 #include "address.h"
+#include "ble_backend.h"
 #include "proxy_config.h"
 #include "scanner.h"
 
 #include "NimBLEDevice.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include <array>
 #include <atomic>
@@ -47,6 +50,16 @@ struct Slot {
   // we cancel, so onConnect checks this and terminates instead of
   // reporting success.
   bool abort = false;
+#ifdef CONFIG_NBP_SMP
+  // Bumped on every allocation. A queued bonding job carries the value
+  // it was created with, so a job that finishes after the slot has been
+  // recycled (peer dropped mid-SMP, HA reconnected to someone else) is
+  // recognised as stale instead of reporting against the new peer.
+  // Neither gen nor bond_busy is reset by clear_locked().
+  uint32_t gen = 0;
+  bool bond_busy = false;           // a bonding job is queued/running
+  bool bond_holds_connect = false;  // ConnectCallback deferred until it ends
+#endif
 };
 
 std::array<Slot, proxy::MAX_CONNECTIONS> g_slots;
@@ -57,11 +70,37 @@ FreeChangeCallback g_free_cb = nullptr;
 // Static passkey used when a peer requests pairing with KEYBOARD_ONLY
 // I/O (we type, they display). Atomically updatable at runtime via
 // connection::set_passkey() — funnelled through
-// api_server::stats::set_passkey(), reached via POST /clone?passkey=
-// in clone builds or POST /passkey?val= without clone. Default 123456 matches most
-// Victron SmartShunts and many ESP32-based peripherals; fallback
-// "000000" is the other common Victron PIN.
+// api_server::stats::set_passkey(), reached via POST /bond?passkey=,
+// POST /clone?passkey= in clone builds or POST /passkey?val= without
+// clone. Default 123456 matches most Victron SmartShunts and many
+// ESP32-based peripherals; fallback "000000" is the other common
+// Victron PIN.
 std::atomic<uint32_t> g_passkey{123456};
+
+// ---- auto-bond list ----
+//
+// Addresses the proxy pairs with as soon as the GAP connect completes,
+// before the ConnectionResponse goes out to the owning API client.
+// Needed for peers that refuse *service discovery* on an unauthenticated
+// link and simply drop the connection — the ESPHome protocol's PAIR
+// request arrives far too late for those, because HA only sends it after
+// a successful connect+discover.
+//
+// Guarded by g_mutex like the slots. Kept at AUTO_BOND_MAX entries: a
+// longer list could not be honoured anyway, the bond store holds
+// CONFIG_BT_NIMBLE_MAX_BONDS peers.
+static_assert(AUTO_BOND_MAX <= CONFIG_BT_NIMBLE_MAX_BONDS,
+              "AUTO_BOND_MAX exceeds the NimBLE bond store — raise "
+              "CONFIG_BT_NIMBLE_MAX_BONDS in sdkconfig.defaults");
+std::array<uint64_t, AUTO_BOND_MAX> g_auto_bond{};
+uint8_t g_auto_bond_count = 0;
+
+bool auto_bond_listed_locked(uint64_t address) {
+  for (uint8_t i = 0; i < g_auto_bond_count; ++i) {
+    if (g_auto_bond[i] == address) return true;
+  }
+  return false;
+}
 #endif
 
 Slot *find_by_addr_locked(uint64_t address) {
@@ -78,9 +117,29 @@ Slot *find_by_client_locked(const NimBLEClient *c) {
   return nullptr;
 }
 
+#ifdef CONFIG_NBP_SMP
+// A slot whose bonding job is still in flight is NOT available, even once
+// the link is gone: the worker is holding this slot's NimBLEClient* and is
+// about to call (or is inside) secureConnection() on it. Handing the slot
+// — and therefore that same client object, which slots keep and reuse — to
+// a new peer would run SMP against the wrong device. bond_finish() clears
+// the flag once the worker is done with the pointer, which a disconnect
+// makes happen promptly (it releases secureConnection's wait).
+bool slot_available_locked(const Slot &s) {
+  return s.state == State::Free && !s.bond_busy;
+}
+#else
+bool slot_available_locked(const Slot &s) { return s.state == State::Free; }
+#endif
+
 Slot *alloc_locked() {
   for (auto &s : g_slots) {
-    if (s.state == State::Free) return &s;
+    if (slot_available_locked(s)) {
+#ifdef CONFIG_NBP_SMP
+      ++s.gen;
+#endif
+      return &s;
+    }
   }
   return nullptr;
 }
@@ -93,6 +152,16 @@ void clear_locked(Slot *s) {
   s->owner = kNoOwner;
   s->mtu = 0;
   s->abort = false;
+#ifdef CONFIG_NBP_SMP
+  // A bonding job may still be blocked in secureConnection(); it detects
+  // the freed slot and drops its result. If it was withholding the
+  // connect result, the caller's cb snapshot IS that result (one
+  // connected=false; the job stays silent because bond_finish() sees
+  // state != Connected). bond_busy is deliberately NOT cleared here — it
+  // pins the slot until the worker is finished with this client pointer
+  // (see slot_available_locked); only bond_finish() clears it.
+  s->bond_holds_connect = false;
+#endif
 }
 
 // What the caller must do (after dropping g_mutex) to tear a slot down.
@@ -142,6 +211,185 @@ void notify_free_change() {
   if (g_free_cb) g_free_cb();
 }
 
+#ifdef CONFIG_NBP_SMP
+// ---- bonding worker ----
+//
+// NimBLEClient::secureConnection() blocks the calling task until the
+// controller reports BLE_GAP_EVENT_ENC_CHANGE or the link drops — up to
+// the 30 s SMP timeout. That must not happen on the api_server client
+// task (HA's pings would stall and the connection would be dropped) nor
+// on the NimBLE host task (which is what would deliver the event), so
+// pairing runs on a dedicated worker.
+//
+// The worker is created on the first bonding request and deletes itself
+// after BOND_IDLE_EXIT_MS without a job, so its stack is heap only while
+// bonding is actually happening (no PSRAM on the S3; see CLAUDE.md "Heap
+// budget"). A failed xTaskCreate is not fatal: the caller falls back to
+// reporting the link unauthenticated / answering PAIR with an error.
+constexpr uint32_t BOND_TASK_STACK = 3072;
+constexpr uint32_t BOND_IDLE_EXIT_MS = 30000;
+
+enum class BondKind : uint8_t {
+  AutoBond,  // deferred connect result; delivered via Slot::cb
+  Explicit,  // a client asked for it; delivered via PairCallback
+};
+
+struct BondJob {
+  uint8_t slot;
+  uint32_t gen;
+  uint64_t address;
+  OwnerId owner;  // Explicit: the requester (the link's owner)
+  uint16_t mtu;   // AutoBond: MTU to report with the deferred connect result
+  BondKind kind;
+  PairCallback cb;  // Explicit only
+};
+
+// The queue is created in init() (a handful of bytes). g_bond_start
+// serialises task creation, enqueueing and the worker's idle exit, so a
+// job can never be queued just as the worker decides to quit. It is a
+// dedicated mutex — taking g_mutex around xTaskCreate would hold it across
+// an allocation that the NimBLE host task may be waiting on.
+QueueHandle_t g_bond_q = nullptr;
+SemaphoreHandle_t g_bond_start = nullptr;
+TaskHandle_t g_bond_task = nullptr;
+
+void bond_task(void *);
+
+// Caller must NOT hold g_mutex (task creation allocates).
+bool bond_enqueue(const BondJob &job) {
+  if (g_bond_q == nullptr || g_bond_start == nullptr) return false;
+  xSemaphoreTake(g_bond_start, portMAX_DELAY);
+  if (g_bond_task == nullptr &&
+      xTaskCreate(&bond_task, "ble_bond", BOND_TASK_STACK, nullptr, 5,
+                  &g_bond_task) != pdPASS) {
+    g_bond_task = nullptr;
+    xSemaphoreGive(g_bond_start);
+    ESP_LOGE(TAG, "bond task create failed (heap)");
+    return false;
+  }
+  bool ok = xQueueSend(g_bond_q, &job, 0) == pdTRUE;
+  xSemaphoreGive(g_bond_start);
+  return ok;
+}
+
+// Is the link this job was started for still up? Used after sending a
+// deferred connect result to detect the case where the peer dropped
+// between the decision and the send.
+bool job_link_live(const BondJob &job) {
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  const Slot &s = g_slots[job.slot];
+  bool live = (s.gen == job.gen && s.state == State::Connected);
+  xSemaphoreGive(g_mutex);
+  return live;
+}
+
+// Clear the slot's bonding flags if the job still matches, and hand back
+// the deferred ConnectCallback (with its owner) when this job owns it.
+ConnectCallback bond_finish(const BondJob &job, uint64_t *addr_out,
+                            OwnerId *owner_out) {
+  ConnectCallback cb = nullptr;
+  bool freed = false;
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  Slot &s = g_slots[job.slot];
+  if (s.gen == job.gen) {
+    s.bond_busy = false;
+    // The link went away while we were pairing: the slot only becomes
+    // allocatable now, so announce it (free_slots() counted it as taken).
+    freed = (s.state == State::Free);
+    if (s.bond_holds_connect) {
+      s.bond_holds_connect = false;
+      if (s.state == State::Connected) {
+        cb = s.cb;
+        *addr_out = s.address;
+        *owner_out = s.owner;
+      }
+    }
+  }
+  xSemaphoreGive(g_mutex);
+  if (freed) notify_free_change();
+  return cb;
+}
+
+void bond_run(const BondJob &job) {
+  NimBLEClient *client = nullptr;
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  Slot &s = g_slots[job.slot];
+  if (s.gen == job.gen && s.state == State::Connected) client = s.client;
+  xSemaphoreGive(g_mutex);
+
+  bool ok = false;
+  int32_t err = -1;  // sentinel: link went away before SMP could start
+  if (client != nullptr) {
+    // Released before the call: secureConnection() blocks, and the
+    // NimBLE host task takes g_mutex from its own callbacks.
+    ok = client->secureConnection();
+    err = ok ? 0 : client->getLastError();
+    ESP_LOGI(TAG, "bond %012llx -> %s (err=%ld)",
+             static_cast<unsigned long long>(job.address),
+             ok ? "paired" : "failed", static_cast<long>(err));
+  }
+
+  uint64_t addr = 0;
+  OwnerId owner = kNoOwner;
+  ConnectCallback connect_cb = bond_finish(job, &addr, &owner);
+  if (job.kind == BondKind::AutoBond) {
+    if (connect_cb != nullptr) {
+      // Report the link either way: a failed bond leaves a usable but
+      // unauthenticated connection, which is exactly what the client
+      // would have got without the auto-bond list. Discovery will then
+      // fail the same way it does today and HA retries on its own terms.
+      if (!ok) {
+        ESP_LOGW(TAG, "auto-bond %012llx failed (err=%ld); reporting the "
+                      "link unauthenticated",
+                 static_cast<unsigned long long>(addr),
+                 static_cast<long>(err));
+      }
+      ConnectionResult r{true, job.mtu, 0};
+      connect_cb(owner, addr, r);
+      // bond_finish() checked the link was up, but the peer can drop in
+      // the gap between that check and the send above — and onDisconnect
+      // would then have pushed its connected=false FIRST, leaving the
+      // owner holding a link that no longer exists. Re-check and correct.
+      // A duplicate connected=false is harmless; a phantom connection
+      // is not.
+      if (!job_link_live(job)) {
+        ESP_LOGW(TAG, "auto-bond %012llx: link dropped while reporting it; "
+                      "sending a corrective disconnect",
+                 static_cast<unsigned long long>(addr));
+        ConnectionResult down{false, 0, 0};
+        connect_cb(owner, addr, down);
+      }
+    }
+    // connect_cb == nullptr: the peer dropped (or its owner left) while
+    // we were pairing and the teardown callback already reported it.
+  } else if (job.cb != nullptr) {
+    PairResult pr{ok, err};
+    job.cb(job.owner, job.address, pr);
+  }
+}
+
+void bond_task(void *) {
+  BondJob job;
+  for (;;) {
+    if (xQueueReceive(g_bond_q, &job, pdMS_TO_TICKS(BOND_IDLE_EXIT_MS)) ==
+        pdTRUE) {
+      bond_run(job);
+      continue;
+    }
+    // Idle: give the stack back. Under g_bond_start no job can be queued
+    // between the emptiness check and clearing the handle, and the next
+    // bond_enqueue() starts a fresh worker.
+    xSemaphoreTake(g_bond_start, portMAX_DELAY);
+    if (uxQueueMessagesWaiting(g_bond_q) == 0) {
+      g_bond_task = nullptr;
+      xSemaphoreGive(g_bond_start);
+      vTaskDelete(nullptr);
+    }
+    xSemaphoreGive(g_bond_start);
+  }
+}
+#endif  // CONFIG_NBP_SMP
+
 // NimBLEClientCallbacks: shared callback object; we map back to the
 // slot via NimBLEClient*. Connect is now async (asyncConnect=true in
 // connect()), so onConnect / onConnectFail drive the success/failure
@@ -178,6 +426,15 @@ class ClientCb : public NimBLEClientCallbacks {
     OwnerId owner_snapshot = kNoOwner;
     bool orphan = false;
     uint16_t mtu = c->getMTU();
+#ifdef CONFIG_NBP_SMP
+    // Read the link's security state BEFORE taking g_mutex: getConnInfo
+    // goes into the host (ble_hs lock), and the reverse order — our
+    // mutex then the host lock — would invert against the host task,
+    // which reaches this callback holding its own locks.
+    bool encrypted = c->getConnInfo().isEncrypted();
+    BondJob job{};
+    bool defer = false;
+#endif
     xSemaphoreTake(g_mutex, portMAX_DELAY);
     Slot *s = find_by_client_locked(c);
     if (s != nullptr && s->state == State::Connecting) {
@@ -192,8 +449,26 @@ class ClientCb : public NimBLEClientCallbacks {
       } else {
         s->state = State::Connected;
         s->mtu = mtu;
-        cb_snapshot = s->cb;
         owner_snapshot = s->owner;
+#ifdef CONFIG_NBP_SMP
+        if (!encrypted && auto_bond_listed_locked(s->address)) {
+          // Withhold the connect result until SMP has resolved, so the
+          // owner's service discovery runs over an encrypted link.
+          s->bond_busy = true;
+          s->bond_holds_connect = true;
+          job.slot = static_cast<uint8_t>(s - g_slots.data());
+          job.gen = s->gen;
+          job.address = s->address;
+          job.owner = s->owner;
+          job.mtu = mtu;
+          job.kind = BondKind::AutoBond;
+          job.cb = nullptr;
+          defer = true;
+        } else
+#endif
+        {
+          cb_snapshot = s->cb;
+        }
       }
     }
     xSemaphoreGive(g_mutex);
@@ -207,6 +482,25 @@ class ClientCb : public NimBLEClientCallbacks {
     ESP_LOGI(TAG, "onConnect %012llx mtu=%u owner=%lu",
              static_cast<unsigned long long>(addr_snapshot), mtu,
              static_cast<unsigned long>(owner_snapshot));
+#ifdef CONFIG_NBP_SMP
+    if (defer) {
+      ESP_LOGI(TAG, "auto-bond %012llx: pairing before reporting the link",
+               static_cast<unsigned long long>(job.address));
+      if (!bond_enqueue(job)) {
+        // Couldn't start the worker — fall back to reporting the
+        // (unauthenticated) link straight away.
+        ESP_LOGW(TAG, "auto-bond %012llx: enqueue failed",
+                 static_cast<unsigned long long>(job.address));
+        uint64_t addr = 0;
+        OwnerId owner = kNoOwner;
+        cb_snapshot = bond_finish(job, &addr, &owner);
+        if (cb_snapshot != nullptr) {
+          addr_snapshot = addr;
+          owner_snapshot = owner;
+        }
+      }
+    }
+#endif
     if (cb_snapshot) {
       ConnectionResult r{true, mtu, 0};
       cb_snapshot(owner_snapshot, addr_snapshot, r);
@@ -282,6 +576,12 @@ ClientCb g_client_cb;
 // no mutex there are no links, so each answers "nothing here".
 void init() {
   if (g_mutex == nullptr) g_mutex = xSemaphoreCreateMutex();
+#ifdef CONFIG_NBP_SMP
+  if (g_bond_q == nullptr) {
+    g_bond_q = xQueueCreate(proxy::MAX_CONNECTIONS, sizeof(BondJob));
+  }
+  if (g_bond_start == nullptr) g_bond_start = xSemaphoreCreateMutex();
+#endif
 }
 
 #ifdef CONFIG_NBP_SMP
@@ -291,6 +591,129 @@ void set_passkey(uint32_t pin) {
 
 uint32_t get_passkey() {
   return g_passkey.load(std::memory_order_relaxed);
+}
+
+bool pair(uint64_t address, OwnerId owner, PairCallback cb) {
+  BondJob job{};
+  NimBLEClient *client = nullptr;
+
+  // POST /txpower?ble=off deinits host + controller; the slots and their
+  // clients are gone with it. Bail before touching any of them.
+  if (ble_backend::powered_off()) return false;
+  if (g_mutex == nullptr || owner == kNoOwner) return false;
+
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  Slot *s = find_by_addr_locked(address);
+  // Owner-only, like every other per-link request: another client's link
+  // is not ours to pair (or to stall behind SMP for 30 s).
+  if (s == nullptr || s->state != State::Connected || s->owner != owner ||
+      s->bond_busy) {
+    xSemaphoreGive(g_mutex);
+    return false;
+  }
+  client = s->client;
+  job.slot = static_cast<uint8_t>(s - g_slots.data());
+  job.gen = s->gen;
+  job.address = address;
+  job.owner = owner;
+  job.kind = BondKind::Explicit;
+  job.cb = cb;
+  xSemaphoreGive(g_mutex);
+
+  // Outside the mutex — see the ordering note in onConnect.
+  if (client->getConnInfo().isEncrypted()) {
+    if (cb != nullptr) {
+      PairResult r{true, 0};
+      cb(owner, address, r);
+    }
+    return true;
+  }
+
+  // Re-check under the lock and claim the slot: the link could have gone
+  // away (or an auto-bond could have claimed it) while we were asking
+  // the host about encryption.
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  Slot &slot = g_slots[job.slot];
+  if (slot.gen != job.gen || slot.state != State::Connected ||
+      slot.owner != owner || slot.bond_busy) {
+    xSemaphoreGive(g_mutex);
+    return false;
+  }
+  slot.bond_busy = true;
+  xSemaphoreGive(g_mutex);
+
+  if (!bond_enqueue(job)) {
+    uint64_t discard_addr = 0;
+    OwnerId discard_owner = kNoOwner;
+    bond_finish(job, &discard_addr, &discard_owner);  // clears bond_busy
+    return false;
+  }
+  return true;
+}
+
+namespace {
+// NimBLEDevice::isBonded()/deleteBond() match on the full NimBLEAddress
+// including its type, but HA only ever hands us the 48-bit value (the
+// address type it sends is the one from the advertisement, which is not
+// necessarily the peer's *identity* address type in the bond store).
+// Enumerate the store and compare the 48 bits instead.
+bool find_bond(uint64_t address, NimBLEAddress *out) {
+  // The bond store is a host facility; after power_off()'s
+  // NimBLEDevice::deinit(true) there is no host to ask. Before
+  // ble_backend::start() (g_mutex still null) the host is not up yet.
+  if (ble_backend::powered_off() || g_mutex == nullptr) return false;
+  int n = NimBLEDevice::getNumBonds();
+  for (int i = 0; i < n; ++i) {
+    NimBLEAddress a = NimBLEDevice::getBondedAddress(i);
+    if (static_cast<uint64_t>(a) == address) {
+      if (out != nullptr) *out = a;
+      return true;
+    }
+  }
+  return false;
+}
+}  // namespace
+
+bool has_bond(uint64_t address) {
+  return find_bond(address, nullptr);
+}
+
+bool unpair(uint64_t address) {
+  NimBLEAddress a{};
+  if (!find_bond(address, &a)) return false;
+  bool ok = NimBLEDevice::deleteBond(a);
+  ESP_LOGI(TAG, "unpair %012llx -> %s",
+           static_cast<unsigned long long>(address), ok ? "ok" : "failed");
+  return ok;
+}
+
+uint8_t bonded_addresses(uint64_t *out, uint8_t cap) {
+  uint8_t n = 0;
+  if (ble_backend::powered_off() || g_mutex == nullptr) return 0;
+  int total = NimBLEDevice::getNumBonds();
+  for (int i = 0; i < total && n < cap; ++i) {
+    out[n++] = static_cast<uint64_t>(NimBLEDevice::getBondedAddress(i));
+  }
+  return n;
+}
+
+void set_auto_bond_list(const uint64_t *addrs, uint8_t n) {
+  if (g_mutex == nullptr) return;
+  if (n > AUTO_BOND_MAX) n = AUTO_BOND_MAX;
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  for (uint8_t i = 0; i < n; ++i) g_auto_bond[i] = addrs[i];
+  g_auto_bond_count = n;
+  xSemaphoreGive(g_mutex);
+}
+
+uint8_t get_auto_bond_list(uint64_t *out, uint8_t cap) {
+  if (g_mutex == nullptr) return 0;
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  uint8_t n = g_auto_bond_count;
+  if (n > cap) n = cap;
+  for (uint8_t i = 0; i < n; ++i) out[i] = g_auto_bond[i];
+  xSemaphoreGive(g_mutex);
+  return n;
 }
 #endif
 
@@ -325,6 +748,13 @@ ConnectStatus connect(uint64_t address, uint8_t address_type, OwnerId owner,
     State st = held->state;
     bool aborting = held->abort;
     uint16_t mtu = held->mtu;
+#ifdef CONFIG_NBP_SMP
+    // An auto-bond is withholding this link's connect result: to its
+    // owner the connect is still in progress, the result follows from
+    // the bonding worker. Answering connected=true now would let it start
+    // discovery on the unauthenticated link the deferral exists to avoid.
+    if (held->bond_holds_connect) st = State::Connecting;
+#endif
     xSemaphoreGive(g_mutex);
     if (holder == owner && st == State::Connected) {
       ESP_LOGI(TAG, "%012llx already connected for owner=%lu — re-confirming",
@@ -506,7 +936,10 @@ uint8_t free_slots() {
   uint8_t n = 0;
   xSemaphoreTake(g_mutex, portMAX_DELAY);
   for (auto &s : g_slots) {
-    if (s.state == State::Free) ++n;
+    // Same predicate alloc_locked() uses — a slot still pinned by a
+    // bonding job would otherwise be advertised to HA as free and then
+    // refused on the connect that follows.
+    if (slot_available_locked(s)) ++n;
   }
   xSemaphoreGive(g_mutex);
   return n;

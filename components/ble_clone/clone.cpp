@@ -100,7 +100,9 @@ size_t build_clone_json(char *buf, size_t cap) {
       "\"type\":%u,"
       "\"name_suffix\":\"%s\","
 #ifdef CONFIG_NBP_SMP
-      "\"passkey\":%06lu,"
+      // %lu, not %06lu: a zero-padded number ("000042") is not valid
+      // JSON, and the dashboard pads for display anyway.
+      "\"passkey\":%lu,"
 #endif
       "\"state\":\"%s\","
       "\"mtu\":%u,"

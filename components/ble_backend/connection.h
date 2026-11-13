@@ -90,11 +90,61 @@ OwnerId owner_of_client(const void *client);
 
 #ifdef CONFIG_NBP_SMP
 // SMP passkey used when a peer requests KEYBOARD_ONLY pairing.
-// Runtime-mutable via POST /clone?passkey=NNNNNN, or POST
-// /passkey?val=NNNNNN in builds without clone. Default 123456 covers most Victron
-// SmartShunts and many ESP32-based peripherals.
+// Runtime-mutable via POST /bond?passkey=NNNNNN, POST /clone?passkey=NNNNNN,
+// or POST /passkey?val=NNNNNN in builds without clone (all funnel into the
+// same setter). Default 123456 covers most Victron SmartShunts and many
+// ESP32-based peripherals.
 void set_passkey(uint32_t pin);
 uint32_t get_passkey();
+
+// ---- bonding (SMP pairing) ----
+//
+// Two entry points, because they answer two different needs:
+//
+//   * pair() is the on-demand path driven by HA/bleak-esphome's
+//     BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR. It runs on an already
+//     established link.
+//   * the auto-bond list is for peers that refuse *service discovery*
+//     on an unauthenticated link (Felicity/SolarB packs are the
+//     motivating case). Those drop the connection before HA ever gets
+//     the chance to ask for a pairing, so for a listed address we bond
+//     right after the GAP connect completes and only report the
+//     connection to HA once SMP has resolved.
+
+struct PairResult {
+  bool paired;    // link encrypted and (if the peer agreed) bonded
+  int32_t error;  // 0 on success, else a NimBLE host code / sentinel
+};
+
+// `owner` is the API client that asked (the link's owner); the callee
+// reports to it alone.
+using PairCallback = void (*)(OwnerId owner, uint64_t address,
+                              const PairResult &);
+
+// Start SMP on an established link owned by `owner`. Returns false when
+// the address is not connected, is held by another client, its connect
+// result is still being withheld by an auto-bond, or a bonding attempt
+// is already in flight for it — the caller then answers its requester
+// itself. On true, `cb` fires exactly once; for an already-encrypted
+// link that happens synchronously, otherwise from the bonding worker
+// task.
+bool pair(uint64_t address, OwnerId owner, PairCallback cb);
+
+// True when the bond store holds keys for this peer, connected or not.
+// False after a runtime BLE power-off — there is no host left to ask.
+bool has_bond(uint64_t address);
+
+// Delete the stored bond. Returns false when no bond was held.
+bool unpair(uint64_t address);
+
+// Copy stored bond addresses into `out`. Returns the number written.
+uint8_t bonded_addresses(uint64_t *out, uint8_t cap);
+
+// Auto-bond list. Capped at the NimBLE bond-store size so the list can
+// never describe more peers than the device can actually remember.
+inline constexpr uint8_t AUTO_BOND_MAX = 4;
+void set_auto_bond_list(const uint64_t *addrs, uint8_t n);
+uint8_t get_auto_bond_list(uint64_t *out, uint8_t cap);
 #endif
 
 }  // namespace ble_backend::connection
