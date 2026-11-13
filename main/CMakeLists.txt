@@ -16,4 +16,5 @@ idf_component_register(
         crash_capture
         esp_app_format
         oom_guard
+        bench
 )

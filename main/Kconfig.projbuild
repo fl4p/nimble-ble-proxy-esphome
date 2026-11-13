@@ -606,6 +606,30 @@ config NBP_CRASH_TEST
         firmware for deployed devices; turn it on for a test build with
         -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.crashtest".
 
+config NBP_BENCH
+    bool "Network/heap benchmark server (test builds only)"
+    depends on NBP_WIFI
+    default n
+    help
+        Own task and listener on NBP_BENCH_PORT: GET /bench?bytes=N
+        streams N bytes, POST /bench drains the body, GET /benchmin
+        reports heap, a resettable heap low-water mark (?reset=1) and
+        the counters of a UDP sink on NBP_BENCH_UDP_PORT. Anyone on the
+        LAN can drive it at line rate, and while it runs /stats.json
+        heap_min is the minimum since the last reset, not since boot.
+        Never in firmware for deployed devices. Used for
+        docs/wifi-buffer-throughput.md.
+
+config NBP_BENCH_PORT
+    int "Benchmark TCP port"
+    depends on NBP_BENCH
+    default 8081
+
+config NBP_BENCH_UDP_PORT
+    int "Benchmark UDP sink port"
+    depends on NBP_BENCH
+    default 5009
+
 config NBP_OOM_NEW_WAIT_MS
     int "Throwing operator new: wait this long for heap before aborting (ms)"
     default 2000

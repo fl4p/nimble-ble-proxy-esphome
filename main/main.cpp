@@ -44,6 +44,8 @@
 #include "nat_router.h"
 #endif
 
+#include "bench.h"
+
 #include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
@@ -266,6 +268,8 @@ extern "C" void app_main() {
   // other BLE singletons.
   api_server::stats::register_endpoints(ota::handle());
   api_server::start();
+  // Test builds only (CONFIG_NBP_BENCH, default n); a no-op otherwise.
+  bench::start();
 #if CONFIG_NBP_WS_PROXY
   // Browser bridge: tunnel the aioesphomeapi TCP protocol over a WebSocket
   // on the shared dashboard httpd. Registered after api_server::start() so
