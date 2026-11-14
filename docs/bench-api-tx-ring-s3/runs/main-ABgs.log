@@ -1,0 +1,69 @@
+[0;33mW (151708) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151708) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151808) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151808) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151908) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151908) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152008) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152008) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152108) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152108) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152208) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152308) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152308) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152408) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152408) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152508) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152508) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152608) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152608) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152608) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152708) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152708) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152808) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152808) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152908) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152908) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153008) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153008) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153108) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153108) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153208) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153208) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153308) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153308) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153408) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153408) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153508) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153508) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153608) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153758) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153758) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153858) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153858) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153858) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153858) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153958) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153958) NimBLEClient: unknown handle: 27[0m
+[0;33mW (154058) NimBLEClient: unknown handle: 27[0m
+[0;33mW (154058) NimBLEClient: unknown handle: 27[0m
+[0;33mW (154158) NimBLEClient: unknown handle: 27[0m
+[0;33mW (154158) NimBLEClient: unknown handle: 27[0m
+[0;33mW (154228) api_server: send fd=53 failed: errno=104[0m
+[0;32mI (154228) api_server: client disconnected (fd=53, id=2, peer=192.168.1.204, reason=send failed, remaining=1); releasing its BLE links[0m
+[0;33mW (154258) NimBLEClient: unknown handle: 27[0m
+[0;33mW (154258) NimBLEClient: unknown handle: 27[0m
+[0;33mW (154358) NimBLEClient: unknown handle: 27[0m
+[0;33mW (154358) NimBLEClient: unknown handle: 27[0m
+[0;33mW (154458) NimBLEClient: unknown handle: 27[0m
+[0;33mW (154858) api_server: send fd=52 failed: errno=104[0m
+[0;33mW (154858) api_server: send failed on fd=52 — abort to reap[0m
+[0;33mW (154858) ble.gatt.disc: send services failed[0m
+[0;33mW (155058) api_server: send fd=52 failed: errno=128[0m
+[0;33mW (155058) api_server: send failed on fd=52 — abort to reap[0m
+[0;33mW (155058) api_server: send fd=52 failed: errno=128[0m
+[0;32mI (155068) ble.scan: forwarding OFF[0m
+[0;32mI (155068) api_server: client disconnected (fd=52, id=1, peer=192.168.1.204, reason=send failed or stalled (reaped), remaining=0); releasing its BLE links[0m
+[0;32mI (155078) ble.conn: release 80a9971de2c9 (owner=1 gone, state=3)[0m
+[0;32mI (155088) ble.scan: forwarding OFF[0m
+[0;32mI (155158) ble.conn: onDisconnect 80a9971de2c9 reason=534 owner=0[0m

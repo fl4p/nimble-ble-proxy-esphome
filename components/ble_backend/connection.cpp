@@ -385,9 +385,10 @@ ConnectStatus connect(uint64_t address, uint8_t address_type, OwnerId owner,
   // reconnect that reuses this slot's NimBLEClient in that window gets
   // BLE_HS_EREJECT from connect(). The slot is ours (Connecting), so wait
   // here — on the api_client task, never the host task — for NimBLE to
-  // finish. Normally that's microseconds; the bound covers the callback
-  // being held up by a slow send (SO_SNDTIMEO) and keeps the old
-  // fail-with--1 behaviour if it never settles.
+  // finish. Normally that's microseconds; the bound covers a callback
+  // held up some other way (sends only queue into the API TX ring and
+  // never block it) and keeps the old fail-with--1 behaviour if it never
+  // settles.
   for (int i = 0; i < CLIENT_SETTLE_POLLS &&
                   client->getConnHandle() != BLE_HS_CONN_HANDLE_NONE;
        ++i) {

@@ -1,4 +1,5 @@
 #include "stats.h"
+#include "http_guard.h"
 #include "api_server.h"
 
 #include "ble_backend.h"
@@ -51,6 +52,7 @@ constexpr const char *TAG = "stats";
 std::atomic<uint32_t> g_reads{0};
 std::atomic<uint32_t> g_writes{0};
 std::atomic<uint32_t> g_notifies{0};
+std::atomic<uint32_t> g_notify_unowned{0};
 
 // Optional clone-side counter source. Set once at boot from main when
 // CONFIG_NBP_CLONE is on; never touched otherwise. Plain pointer rather
@@ -791,9 +793,9 @@ void sample_cpu_pct(int *cpu0, int *cpu1) {
 esp_err_t stats_get(httpd_req_t *req) {
   // The base object is ~280 chars worst case (with heap_largest/heap_min
   // and the capability flags); the optional ap_rx/ap_tx 64-bit byte
-  // counters (NAT builds) add ~60 more, the oom counters ~70, the API
-  // send-queue figures ~100 + ~40 per client.
-  char buf[768];
+  // counters (NAT builds) add ~60 more, the oom counters ~70, the notify
+  // breakdown ~75, the API transmit figures ~260 + ~70 per client.
+  char buf[1024];
   size_t n = build_stats_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
@@ -824,6 +826,7 @@ esp_err_t devices_get(httpd_req_t *req) {
   // httpd serializes requests on a single worker, so a static buffer
   // is safe and avoids putting 6 KiB on the worker stack.
   static char out[6144];
+  if (!http_guard::bulk_ok(req)) return ESP_OK;
   size_t n = build_devices_json(out, sizeof(out));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, out, n);
@@ -842,6 +845,7 @@ extern const uint8_t favicon_svg_start[] asm("_binary_favicon_svg_start");
 extern const uint8_t favicon_svg_end[]   asm("_binary_favicon_svg_end");
 
 esp_err_t root_get(httpd_req_t *req) {
+  if (!http_guard::bulk_ok(req)) return ESP_OK;
   const size_t n = static_cast<size_t>(index_html_end - index_html_start);
   httpd_resp_set_type(req, "text/html");
   return httpd_resp_send(
@@ -862,6 +866,9 @@ esp_err_t favicon_get(httpd_req_t *req) {
 void record_read() { g_reads.fetch_add(1, std::memory_order_relaxed); }
 void record_write() { g_writes.fetch_add(1, std::memory_order_relaxed); }
 void record_notify() { g_notifies.fetch_add(1, std::memory_order_relaxed); }
+void record_notify_unowned() {
+  g_notify_unowned.fetch_add(1, std::memory_order_relaxed);
+}
 void set_clone_stats_provider(CloneStatsProvider fn) {
   g_clone_stats_provider = fn;
 }
@@ -879,12 +886,22 @@ size_t build_stats_json(char *buf, size_t cap) {
                     ble_backend::connection::free_slots();
   unsigned long adverts = ble_backend::scanner::adv_count();
   unsigned long notify_rx = ble_backend::notify_rx_total();
+  unsigned long notify_unknown = ble_backend::notify_unknown_total();
   unsigned notify_handle = ble_backend::last_notify_handle();
 #else
   unsigned in_use = 0;
-  unsigned long adverts = 0, notify_rx = 0;
+  unsigned long adverts = 0, notify_rx = 0, notify_unknown = 0;
   unsigned notify_handle = 0;
 #endif
+  // Where the proxy's notify_rx went (issue #2): forwarded (the proxy-link
+  // part of `notifies`, without the clone image), unknown handle, no owning
+  // API client, and the rest: a known characteristic with no notify
+  // callback (not subscribed yet, or a clone upstream link). Read without a
+  // common lock, so one event in flight can skew the rest by one.
+  const unsigned long fwd = g_notifies.load(std::memory_order_relaxed);
+  const unsigned long unowned = g_notify_unowned.load(std::memory_order_relaxed);
+  const long no_cb = static_cast<long>(notify_rx) -
+                     static_cast<long>(fwd + notify_unknown + unowned);
   // Fold the clone GATT image's activity into the same counters so the
   // dashboard chart reflects both transports. Provider is null until
   // main installs one (under CONFIG_NBP_CLONE).
@@ -934,6 +951,8 @@ size_t build_stats_json(char *buf, size_t cap) {
       "\"connections\":%u,\"heap\":%lu,\"heap_largest\":%lu,"
       "\"heap_min\":%lu,"
       "\"notify_rx\":%lu,\"last_notify_handle\":%u,"
+      "\"notify_unknown\":%lu,\"notify_unowned\":%lu,"
+      "\"notify_no_callback\":%ld,"
       "\"cpu0\":%d,\"cpu1\":%s,\"temp_c\":%.1f,\"ble\":%s,"
       "\"clone\":%s,\"nat\":%s,\"smp\":%s",
       static_cast<unsigned long>(
@@ -953,6 +972,7 @@ size_t build_stats_json(char *buf, size_t cap) {
       static_cast<unsigned long>(esp_get_minimum_free_heap_size()),
       notify_rx,
       notify_handle,
+      notify_unknown, unowned, no_cb,
       cpu0, cpu1_s, static_cast<double>(temp_c), ble_cap, clone_cap, nat_cap,
       smp_cap);
   if (n < 0) return 0;
@@ -980,29 +1000,51 @@ size_t build_stats_json(char *buf, size_t cap) {
         static_cast<unsigned long>(oom_guard::new_recovered()));
     if (m > 0) n += m;
   }
-  // API clients and their send queues (heap lwIP holds for unsent +
-  // unacked data; NBP_API_CLIENT_TXQ_CAP). api_txq: [id, at last send,
-  // high-water] per connected client; omitted while a stalled send holds
-  // the TX lock (api_txq_busy).
+  // API clients and their transmit path. api_txq: [id, lwIP queue heap at
+  // the last look, its high-water] per connected client
+  // (NBP_API_CLIENT_TXQ_CAP); api_ring: [id, bytes waiting in the client's
+  // TX ring, ring high-water] (NBP_API_CLIENT_TX_RING). Reaps by reason:
+  // api_txq_reaps = nothing sent for 20 s, api_ring_reaps = a frame that
+  // must not be lost did not fit. api_txq_drops = advert batches dropped
+  // (ring half full). api_tx_frames / api_tx_sends = frames per send() (the
+  // coalescing); api_enq_us_max = longest send call that did not wait;
+  // api_tx_stack_free = the api_tx task's stack high-water (bytes unused).
   if (static_cast<size_t>(n) < cap) {
     const api_server::TxqStats t = api_server::txq_stats();
     int m = std::snprintf(
         buf + n, cap - n,
         ",\"api_clients\":%u,\"api_max_clients\":%u,\"api_refused\":%lu,"
         "\"api_txq_cap\":%lu,\"api_txq_max\":%lu,\"api_txq_drops\":%lu,"
-        "\"api_txq_reaps\":%lu,\"api_txq_busy\":%s,\"api_txq\":[",
+        "\"api_txq_reaps\":%lu,\"api_txq_busy\":%s,"
+        "\"api_ring_size\":%lu,\"api_ring_reaps\":%lu,\"api_tx_frames\":%lu,"
+        "\"api_tx_sends\":%lu,\"api_enq_us_max\":%lu,\"api_tx_stack_free\":%lu,"
+        "\"api_txq\":[",
         t.n_clients, proxy::MAX_API_CLIENTS,
         static_cast<unsigned long>(t.refused),
         static_cast<unsigned long>(t.cap), static_cast<unsigned long>(t.max_all),
         static_cast<unsigned long>(t.drops), static_cast<unsigned long>(t.reaps),
-        t.busy ? "true" : "false");
+        t.busy ? "true" : "false", static_cast<unsigned long>(t.ring_size),
+        static_cast<unsigned long>(t.ring_reaps),
+        static_cast<unsigned long>(t.frames), static_cast<unsigned long>(t.sends),
+        static_cast<unsigned long>(t.enq_us_max),
+        static_cast<unsigned long>(t.tx_stack_free));
     if (m > 0) n += m;
-    for (uint8_t i = 0; !t.busy && i < t.n_clients &&
-                        static_cast<size_t>(n) < cap; ++i) {
+    for (uint8_t i = 0; i < t.n_clients && static_cast<size_t>(n) < cap; ++i) {
       m = std::snprintf(buf + n, cap - n, "%s[%lu,%lu,%lu]", i ? "," : "",
                         static_cast<unsigned long>(t.clients[i].id),
                         static_cast<unsigned long>(t.clients[i].last),
                         static_cast<unsigned long>(t.clients[i].max));
+      if (m > 0) n += m;
+    }
+    if (static_cast<size_t>(n) < cap) {
+      m = std::snprintf(buf + n, cap - n, "],\"api_ring\":[");
+      if (m > 0) n += m;
+    }
+    for (uint8_t i = 0; i < t.n_clients && static_cast<size_t>(n) < cap; ++i) {
+      m = std::snprintf(buf + n, cap - n, "%s[%lu,%lu,%lu]", i ? "," : "",
+                        static_cast<unsigned long>(t.clients[i].id),
+                        static_cast<unsigned long>(t.clients[i].ring),
+                        static_cast<unsigned long>(t.clients[i].ring_max));
       if (m > 0) n += m;
     }
     if (static_cast<size_t>(n) < cap) {

@@ -1,0 +1,7 @@
+{"who": "A", "what": "dev", "mac": "9C:13:9E:F4:04:98", "compile": "Nov 13 2026 20:59:08", "name": "nimble-proxy", "t": 0.044}
+{"who": "A", "what": "connect_req", "at": 0, "t": 0.949}
+{"who": "A", "what": "conn_state", "connected": 1, "mtu": 23, "err": 0, "t": 1.636}
+{"who": "A", "what": "discovered", "notify": [[27, 28, 18]], "read": 30, "services": 6, "t": 6.252}
+{"who": "A", "what": "conn_state", "connected": 0, "mtu": 0, "err": 534, "t": 56.168}
+{"who": "A", "what": "connect_req", "at": 0, "t": 56.346}
+{"who": "A", "what": "conn_state", "connected": 1, "mtu": 23, "err": 0, "t": 57.034}

@@ -16,6 +16,7 @@
 //     esp_core_dump_init() so the panic path picks it up.
 
 #include "crash_capture.h"
+#include "http_guard.h"
 
 #include "sdkconfig.h"
 
@@ -780,6 +781,9 @@ esp_err_t coredump_get(httpd_req_t *req) {
     httpd_resp_sendstr(req, out);
     return ESP_OK;
   }
+  // Up to the whole 128 KiB region: refuse while the heap is low, and keep
+  // at most two segments queued in lwIP while it streams.
+  if (!http_guard::bulk_ok(req)) return ESP_OK;
   constexpr size_t kChunk = 2048;
   char *chunk = static_cast<char *>(std::malloc(kChunk));
   if (chunk == nullptr) {
@@ -795,7 +799,7 @@ esp_err_t coredump_get(httpd_req_t *req) {
   for (size_t off = 0; off < size && err == ESP_OK; off += kChunk) {
     const size_t n = std::min(kChunk, size - off);
     err = esp_partition_read(g_cd_part, off, chunk, n);
-    if (err == ESP_OK) err = httpd_resp_send_chunk(req, chunk, static_cast<ssize_t>(n));
+    if (err == ESP_OK) err = http_guard::send_chunk_paced(req, chunk, n);
   }
   std::free(chunk);
   if (err != ESP_OK) {
@@ -993,9 +997,18 @@ void init() {
   if (cd != 0) {
     ESP_LOGW(TAG, "core dump in flash: %u bytes (GET /coredump, POST /crash?erase=1)",
              static_cast<unsigned>(cd));
-  } else if (std::strcmp(state, "none") != 0) {
-    ESP_LOGW(TAG, "core dump in flash is unreadable (%s: %s); GET /coredump?raw=1", state,
+  } else if (std::strcmp(state, "invalid") == 0) {
+    // Usually leftover data from an older image in the region (a fresh
+    // flash does not erase it), not a crash: then crash_without_record is
+    // false in GET /crash. Only the raw region would tell, and it is the
+    // whole partition, so it is not offered here as a first step.
+    ESP_LOGI(TAG, "core dump region holds no readable core (%s); likely "
+             "old flash content, not a crash. POST /crash?erase=1 clears it",
              esp_err_to_name(err));
+  } else if (std::strcmp(state, "none") != 0) {
+    ESP_LOGW(TAG, "core dump in flash fails its checksum (%s); GET "
+             "/coredump?raw=1 serves the region (%u KiB)", state,
+             static_cast<unsigned>(g_cd_part != nullptr ? g_cd_part->size / 1024 : 0));
   }
 #endif
 #if NBP_CRASH_SELFTEST

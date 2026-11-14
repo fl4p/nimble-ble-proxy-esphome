@@ -1,0 +1,59 @@
+interval (NVS): 0[0m
+[0;32mI (10848) pp: pp rom version: e7ae62f[0m
+[0;32mI (10848) net80211: net80211 rom version: e7ae62f[0m
+[0;32mI (10878) wifi_init: rx ba win: 6[0m
+[0;32mI (10878) wifi_init: accept mbox: 6[0m
+[0;32mI (10878) wifi_init: tcpip mbox: 32[0m
+[0;32mI (10878) wifi_init: udp mbox: 6[0m
+[0;32mI (10878) wifi_init: tcp mbox: 6[0m
+[0;32mI (10888) wifi_init: tcp tx win: 5760[0m
+[0;32mI (10888) wifi_init: tcp rx win: 5760[0m
+[0;32mI (10898) wifi_init: tcp mss: 1440[0m
+[0;32mI (10898) wifi_init: WiFi IRAM OP enabled[0m
+[0;32mI (10898) wifi_init: WiFi RX IRAM OP enabled[0m
+[0;32mI (10918) phy_init: phy_version 712,87e8c20e,Apr 13 2026,18:51:10[0m
+[0;32mI (12378) esp_netif_handlers: sta ip: 192.168.1.125, mask: 255.255.255.0, gw: 192.168.1.1[0m
+[0;32mI (12378) mdns_mem: mDNS task will be created from internal RAM[0m
+[0;32mI (12378) mdns: _esphomelib._tcp on nimble-proxy:6053 announced[0m
+[0;32mI (12388) ota: OTA endpoint at http://nimble-proxy.local/update[0m
+[0;32mI (12388) liveness: started: interval=30s threshold=6 enabled=1[0m
+[0;32mI (12398) BLE_INIT: BT controller compile version [51d9dfd][0m
+[0;32mI (12408) BLE_INIT: Using main XTAL as clock source[0m
+[0;33mW (12408) BLE_INIT: light sleep mode will not be able to apply when bluetooth is enabled.[0m
+[0;32mI (12418) BLE_INIT: Feature Config, ADV:1, BLE_50:1, DTM:1, SCAN:1, CCA:0, SMP:1, CONNECT:1[0m
+[0;32mI (12428) BLE_INIT: Bluetooth MAC: 9c:13:9e:f4:04:9a[0m
+[0;32mI (12448) ble.scan: scanning (interval=60ms window=30ms passive)[0m
+[0;32mI (12448) ble: NimBLE ready (max_conn=2, scan=30ms/60ms)[0m
+[0;32mI (12458) stats: adv interval: host default (~30..60 ms)[0m
+[0;32mI (12458) stats: stats UI at /[0m
+[0;32mI (12468) api_server: listening on :6053 (max_clients=2)[0m
+[0;32mI (12468) ws_proxy: esphome-over-websocket bridge at ws:///api (-> :6053)[0m
+[0;32mI (12498) nat: NAT SoftAP up: 'nimble-nat' (wpa2) 192.168.4.1 -> STA 192.168.1.125, 0 port mapping(s)[0m
+[0;32mI (12498) nat: NAT config at /nat, port-forwarding at /portmap[0m
+[0;32mI (12508) clone.cfg: loaded addr=000000000000 type=0 enabled=0 suffix='_cloned'[0m
+[0;32mI (12508) clone: init done; no enabled target, supervisor not started[0m
+[0;32mI (12518) clone: /clone endpoints registered[0m
+[0;32mI (12528) stats: TX power applied: wifi=20 dBm, ble=9 dBm[0m
+[0;32mI (12528) ble.pwr: BLE auto-off supervisor started (idle grace 30s)[0m
+[0;32mI (12538) main: boot complete; heap free=81428 largest=40960 min=81428; main task exiting[0m
+[0;32mI (12548) main_task: Returned from app_main()[0m
+[0;32mI (12588) temperature_sensor: Range [-10°C ~ 80°C], error < 1°C[0m
+[0;32mI (32748) api_server: accepted fd=52 peer=192.168.1.204:51548[0m
+[0;32mI (32748) api_server: client connected (fd=52, id=1, total=1)[0m
+[0;32mI (32768) ble.scan: forwarding ON[0m
+[0;32mI (33358) ble.conn: connect 80a9971de2c9 type=0 owner=1 (async)[0m
+[0;32mI (34758) ble.conn: onConnect 80a9971de2c9 mtu=23 owner=1[0m
+[0;32mI (34758) ble.scan: scan resumed[0m
+[0;32mI (34798) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (42528) ble.pwr: peripheral idle 30s (WiFi up) → advertising suspended[0m
+[0;32mI (47788) api_server: accepted fd=53 peer=192.168.1.204:51714[0m
+[0;32mI (47788) api_server: client connected (fd=53, id=2, total=2)[0m
+[0;32mI (72548) main: boot stable for 60 s; cleared boot-guard flag[0m
+[0;32mI (92438) liveness: probe target answered; armed[0m
+[0;32mI (212908) ble.conn: onDisconnect 80a9971de2c9 reason=534 owner=1[0m
+[0;33mW (213268) api_server: send fd=52 failed: errno=104[0m
+[0;32mI (213268) api_server: client disconnected (fd=52, id=1, peer=192.168.1.204, reason=closed by protocol, remaining=1); releasing its BLE links[0m
+[0;33mW (214288) api_server: send fd=53 failed: errno=104[0m
+[0;32mI (214288) ble.scan: forwarding OFF[0m
+[0;32mI (214288) api_server: client disconnected (fd=53, id=2, peer=192.168.1.204, reason=send failed, remaining=0); releasing its BLE links[0m
+[0;32mI (214298) ble.scan: forwarding OFF[0m

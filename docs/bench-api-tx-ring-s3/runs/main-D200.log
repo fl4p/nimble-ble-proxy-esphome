@@ -1,0 +1,61 @@
+e62f[0m
+[0;32mI (10858) net80211: net80211 rom version: e7ae62f[0m
+[0;32mI (10888) wifi_init: rx ba win: 6[0m
+[0;32mI (10888) wifi_init: accept mbox: 6[0m
+[0;32mI (10888) wifi_init: tcpip mbox: 32[0m
+[0;32mI (10888) wifi_init: udp mbox: 6[0m
+[0;32mI (10888) wifi_init: tcp mbox: 6[0m
+[0;32mI (10898) wifi_init: tcp tx win: 5760[0m
+[0;32mI (10898) wifi_init: tcp rx win: 5760[0m
+[0;32mI (10908) wifi_init: tcp mss: 1440[0m
+[0;32mI (10908) wifi_init: WiFi IRAM OP enabled[0m
+[0;32mI (10908) wifi_init: WiFi RX IRAM OP enabled[0m
+[0;32mI (10928) phy_init: phy_version 712,87e8c20e,Apr 13 2026,18:51:10[0m
+[0;32mI (12388) esp_netif_handlers: sta ip: 192.168.1.125, mask: 255.255.255.0, gw: 192.168.1.1[0m
+[0;32mI (12388) mdns_mem: mDNS task will be created from internal RAM[0m
+[0;32mI (12388) mdns: _esphomelib._tcp on nimble-proxy:6053 announced[0m
+[0;32mI (12398) ota: OTA endpoint at http://nimble-proxy.local/update[0m
+[0;32mI (12398) liveness: started: interval=30s threshold=6 enabled=1[0m
+[0;32mI (12408) BLE_INIT: BT controller compile version [51d9dfd][0m
+[0;32mI (12418) BLE_INIT: Using main XTAL as clock source[0m
+[0;33mW (12418) BLE_INIT: light sleep mode will not be able to apply when bluetooth is enabled.[0m
+[0;32mI (12428) BLE_INIT: Feature Config, ADV:1, BLE_50:1, DTM:1, SCAN:1, CCA:0, SMP:1, CONNECT:1[0m
+[0;32mI (12438) BLE_INIT: Bluetooth MAC: 9c:13:9e:f4:04:9a[0m
+[0;32mI (12458) ble.scan: scanning (interval=60ms window=30ms passive)[0m
+[0;32mI (12458) ble: NimBLE ready (max_conn=2, scan=30ms/60ms)[0m
+[0;32mI (12458) stats: adv interval: host default (~30..60 ms)[0m
+[0;32mI (12468) stats: stats UI at /[0m
+[0;32mI (12478) api_server: listening on :6053 (max_clients=2)[0m
+[0;32mI (12478) ws_proxy: esphome-over-websocket bridge at ws:///api (-> :6053)[0m
+[0;32mI (12508) nat: NAT SoftAP up: 'nimble-nat' (wpa2) 192.168.4.1 -> STA 192.168.1.125, 0 port mapping(s)[0m
+[0;32mI (12508) nat: NAT config at /nat, port-forwarding at /portmap[0m
+[0;32mI (12518) clone.cfg: loaded addr=000000000000 type=0 enabled=0 suffix='_cloned'[0m
+[0;32mI (12518) clone: init done; no enabled target, supervisor not started[0m
+[0;32mI (12528) clone: /clone endpoints registered[0m
+[0;32mI (12538) stats: TX power applied: wifi=20 dBm, ble=9 dBm[0m
+[0;32mI (12538) ble.pwr: BLE auto-off supervisor started (idle grace 30s)[0m
+[0;32mI (12548) main: boot complete; heap free=81296 largest=38912 min=81296; main task exiting[0m
+[0;32mI (12558) main_task: Returned from app_main()[0m
+[0;32mI (12638) temperature_sensor: Range [-10°C ~ 80°C], error < 1°C[0m
+[0;32mI (32908) api_server: accepted fd=52 peer=192.168.1.204:52137[0m
+[0;32mI (32908) api_server: client connected (fd=52, id=1, total=1)[0m
+[0;32mI (32988) ble.scan: forwarding ON[0m
+[0;32mI (33198) ble.conn: connect 80a9971de2c9 type=0 owner=1 (async)[0m
+[0;32mI (34018) ble.conn: onConnect 80a9971de2c9 mtu=23 owner=1[0m
+[0;32mI (34018) ble.scan: scan resumed[0m
+[0;32mI (34028) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (42538) ble.pwr: peripheral idle 30s (WiFi up) → advertising suspended[0m
+[0;32mI (72558) main: boot stable for 60 s; cleared boot-guard flag[0m
+[0;32mI (92398) liveness: probe target answered; armed[0m
+[0;33mW (93618) api_server: send fd=52 failed: errno=104[0m
+[0;33mW (93618) api_server: send failed on fd=52 — abort to reap[0m
+[0;33mW (93818) api_server: send fd=52 failed: errno=128[0m
+[0;33mW (93818) api_server: send failed on fd=52 — abort to reap[0m
+[0;33mW (94018) api_server: send fd=52 failed: errno=128[0m
+[0;33mW (94018) api_server: send failed on fd=52 — abort to reap[0m
+[0;33mW (94218) api_server: send fd=52 failed: errno=128[0m
+[0;33mW (94218) api_server: send failed on fd=52 — abort to reap[0m
+[0;33mW (94418) api_server: send fd=52 failed: errno=128[0m
+[0;33mW (94418) api_server: send failed on fd=52 — abort to reap[0m
+[0;33mW (94618) api_server: send fd=52 failed: errno=128[0m
+[0;33mW (94618) api_server: send failed on fd=52 — abort to reap[0m

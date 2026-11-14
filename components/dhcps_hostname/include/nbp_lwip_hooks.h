@@ -50,8 +50,12 @@ int nbp_ip4_canforward(struct pbuf *p, u32_t dest);
 }
 #endif
 
+// NAT builds only: a heap self-test build without the NAT router also
+// includes this header (for the input hook below) but links no dhcps_hostname.
+#if CONFIG_NBP_NAT_ROUTER
 #define LWIP_HOOK_DHCPS_POST_STATE(msg, len, state) \
   nbp_dhcps_post_state((msg), (len), (state))
+#endif
 
 #if CONFIG_NBP_NAT_THROUGHPUT
 #define LWIP_HOOK_IP4_CANFORWARD(p, dest) \

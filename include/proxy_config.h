@@ -112,20 +112,28 @@ inline constexpr size_t MAX_MESSAGE_SIZE = 2048;
 
 // Concurrent API clients (Kconfig NBP_API_MAX_CLIENTS, default 2: HA plus
 // one more). A further client is accepted and reset at once. Each slot costs
-// an 8 KiB task stack, a socket and up to NBP_API_CLIENT_TXQ_CAP of send
-// queue.
+// an 8 KiB task stack, a socket, a static NBP_API_CLIENT_TX_RING and up to
+// NBP_API_CLIENT_TXQ_CAP of lwIP send queue.
 #ifdef CONFIG_NBP_API_MAX_CLIENTS
 inline constexpr uint8_t MAX_API_CLIENTS = CONFIG_NBP_API_MAX_CLIENTS;
 #else
 inline constexpr uint8_t MAX_API_CLIENTS = 2;
 #endif
 
-// Heap one client's TCP send queue may hold before its advert batches are
-// dropped and other frames wait (then reap). 0 = no cap.
+// Heap one client's TCP send queue may hold before api_tx stops moving its
+// ring into lwIP. 0 = no cap.
 #ifdef CONFIG_NBP_API_CLIENT_TXQ_CAP
 inline constexpr size_t API_CLIENT_TXQ_CAP = CONFIG_NBP_API_CLIENT_TXQ_CAP;
 #else
 inline constexpr size_t API_CLIENT_TXQ_CAP = 0;
+#endif
+
+// Per-client TX ring (static). Producers copy whole frames in; one sender
+// task drains it into the socket.
+#ifdef CONFIG_NBP_API_CLIENT_TX_RING
+inline constexpr size_t API_CLIENT_TX_RING = CONFIG_NBP_API_CLIENT_TX_RING;
+#else
+inline constexpr size_t API_CLIENT_TX_RING = 4096;
 #endif
 
 }  // namespace proxy

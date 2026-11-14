@@ -28,6 +28,7 @@ idf_component_register(
         esp_driver_tsens
         esp_event
         esp_http_server
+        http_guard
         esp_netif
         esp_pm
         esp_wifi

@@ -370,17 +370,49 @@
   is still queued, so quiet disconnects still close normally. **Requires `CONFIG_LWIP_SO_LINGER=y`** (pinned in
   `sdkconfig.defaults`; default n, and lwIP silently ignores SO_LINGER
   without it).
-- **`CLIENT_SEND_DEADLINE_MS` is 20 s, not 5 s.** Each reap drops HA *and*
-  releases that client's BLE links (`connection::release_owner`), so a 5 s
-  WiFi stall became a BMS disconnect/reconnect loop (batmon-ha #391). The
-  cost: a stalled client can hold `g_tx_mutex`, and so the NimBLE host task,
-  for up to 20 s. A broadcast shares one 20 s budget across clients (each
-  later client gets at least `CLIENT_SEND_MIN_SHARE_MS`), because a WiFi
-  stall stalls every client at once and N × 20 s would exceed peers' 30 s
-  ATT timeout. The real fix would be no blocking socket I/O on the host
-  task (per-client queue).
+- **No socket I/O on the NimBLE host task (TX ring + `api_tx`).** Every
+  frame to a client is encoded once into `g_tx_buf` (`g_tx_mutex`) and copied
+  whole into that client's static ring (`NBP_API_CLIENT_TX_RING`, 4096; 3136
+  on the C3, the minimum). The `api_tx` task (prio 6, 2.5 KiB stack; QEMU
+  high-water ~1.7 KiB incl. the no-memory log) drains every ring with
+  `MSG_DONTWAIT` `sendmsg()`, many frames per call, gated by the heap cap
+  below. Ring admission has three levels: advert batches up to half the
+  ring (dropped beyond); frames from the client's **own** connection task
+  (handshake, GetServices, GATT replies) up to `RING - RING_RESERVE` (two
+  max-size notifies, 1076 B) and otherwise they wait; everything else
+  (host-task notifies, connection states, other clients' broadcasts) up to
+  the whole ring, else the client is marked reaped (`TX ring full`). The
+  reserve is what keeps a GetServices burst on link 2 from reaping the
+  client over link 1's notifies (batmon #391); it holds two notifies, so it
+  assumes `api_tx` gets data into lwIP at least every ~100 ms while notifies
+  run at max size. A waiting producer holds no lock and no copy: it releases
+  `g_tx_mutex`, waits for room (≤ 20 s), then **calls the encoder again**,
+  so every `EncodeFn` must be a pure function of its ctx. While it waits,
+  the slot is marked `bulk_waiting`: advert batches for that client are
+  refused (counted in `api_txq_drops`) and `api_tx` skips its coalescing
+  hold, so the ring actually empties. On the C3 a 2054 B frame fits only
+  an (almost) empty ring (bulk limit 3136 − 1076 = 2060 B); without the mark,
+  adverts kept it non-empty and the waiter reaped a healthy client at the
+  20 s deadline. A connection task never waits on another client's ring. Producers never `shutdown()`: they
+  mark the slot and `api_tx` does the abortive shutdown and discards the
+  ring. A ring that holds data and moves nothing for `CLIENT_SEND_DEADLINE_MS`
+  (20 s; 5 s caused the batmon-ha #391 reconnect loop) is reaped by
+  `api_tx`; the clock starts when data arrives after an idle spell (it once
+  started at the last progress before the idle, which reaped at once). With
+  `MSG_DONTWAIT` lwIP reports a failed pbuf allocation as `EWOULDBLOCK`; the
+  `no memory` log fires when the queue query showed room and slots but the
+  send still would-block (once per episode, ≤ 1 per 5 s). Teardown:
+  `unregister_client` marks the slot retired and waits for `api_tx`'s
+  per-slot `io_busy`, so a reissued fd never gets the old client's bytes
+  (QEMU `fd_reuse`; the ring is reset at reap, unregister and register, and
+  any one of the three alone passes it). Coalescing: with segments in
+  flight and < 1 MSS queued, `api_tx` holds data up to 20 ms
+  (`TX_COALESCE_MS`); lwIP's Nagle stays off.
 - **The disconnect log line says why** (`reason=peer closed | read error |
-  send failed | send failed or stalled (reaped) | closed by protocol`, plus peer IP).
+  send failed | TX ring full (reaped) | send stalled 20 s (reaped) | send
+  failed (reaped) | closed by protocol`, plus peer IP). A protocol close
+  waits up to 2 s for its last frame to leave the ring, then closes
+  gracefully (abortively if it did not).
   Compare it with the `connection: release …` lines to see which side
   dropped first.
 - **The `/log` ring is `__NOINIT_ATTR`** (with a magic word). After any
@@ -389,6 +421,27 @@
   an unexplained reboot, read `/log` after it comes back. Panic/WDT
   backtraces go through `esp_rom_printf`, not the hook, so the ring does
   not hold them; `crash_capture` (next section) records them instead.
+- **Where `notify_rx` goes** (`/stats.json`, 2026-11-14): `notifies`
+  (forwarded; includes the clone image's), `notify_unknown` (handle not in
+  the link's NimBLE-cpp attribute cache, counted in the GAP listener with
+  the same lookup NimBLE-cpp does), `notify_unowned` (link has no owning
+  API client) and `notify_no_callback` (the rest: a known characteristic
+  with no notify callback, i.e. not subscribed yet, or a clone upstream
+  link). Without the clone they sum to `notify_rx` (S3 bench: 2233 =
+  2233+0+0+0). The non-zero buckets have not been provoked on hardware yet.
+- **httpd under low heap (`components/http_guard`).** `-Wl,--wrap=
+  httpd_register_uri_handler` puts a trampoline in front of every handler
+  (slot table, 56 entries; the handler's own `user_ctx` is swapped back
+  into the request): a failing handler logs `GET <uri> failed (<err>);
+  free F largest L` (httpd's own line names no URI) and gets SO_LINGER
+  {1,0}, so httpd's close is abortive. `http_guard::bulk_ok()` answers 503
+  + `Retry-After: 10` for `/`, `/devices` and `/coredump` while free heap
+  < 16 KiB or the largest block < 2 KiB; `/stats.json`, `/log`, `/crash`
+  stay served. `/coredump` streams through `send_chunk_paced()` (≤ 2
+  pbufs queued in lwIP; 128 KiB raw in 2.7 s on the S3 over WiFi).
+  Verified on the S3 2026-11-14 (aborted download logs the URI; a build
+  with the threshold at 400 KiB returned 503 on all three). A handler
+  registered past the 56 slots is registered unwrapped (logged).
 - **`NimBLEClient: unknown handle: N` is a dropped notification, not noise —
   don't mute it.** The proxy forwards notifications via
   `chr->setNotifyCallback` on NimBLEClient's own attribute cache
@@ -559,19 +612,21 @@
   `TCP_SND_QUEUELEN` (16) is the only bound: QEMU measured 16 × 60 B frames
   to a non-ACKing peer = 24 972 B of heap. `TCP_SND_BUF` (5760 B) counts
   payload only and says nothing about heap.
-- **`NBP_API_CLIENT_TXQ_CAP` (16384)** caps it. `send_capped()` in
-  `api_server.cpp` measures the heap of the pcb's unsent + unacked segments
-  (`heap_caps_get_containing_block_size` per seg/pbuf, read in the tcpip
-  thread via `tcpip_api_call`; lwIP has `MEMP_MEM_MALLOC=1`, so all of it is
-  heap). At or over the cap, advert batches for that client are dropped
-  (they never block the host/flush task any more), other frames wait for the
-  queue to drain, and a client over the cap for 20 s is reaped. On loopback a
-  client holds 1 segment, but over WiFi a healthy batmon/HA client regularly
-  holds 6 (9.3 KiB for ~200 B of notifies: ACKs ~250 ms late, measured on
-  .231 with the first 8 KiB cap, which it hit several times a second). An
-  over-cap episode is logged only after 1 s. `/stats.json`: `api_txq` ([id, last,
-  max] per client), `api_txq_max`, `api_txq_drops`, `api_txq_reaps`,
-  `api_refused`.
+- **`NBP_API_CLIENT_TXQ_CAP` (8192; was 16384 on the S3 until the 2026-11-13 ring bench, `docs/bench-api-tx-ring-s3.md`)** caps it. `api_tx` measures the heap
+  of the pcb's unsent + unacked segments (`heap_caps_get_containing_block_size`
+  per seg/pbuf, read in the tcpip thread via `tcpip_api_call`; lwIP has
+  `MEMP_MEM_MALLOC=1`, so all of it is heap) and moves nothing from the
+  client's ring into lwIP while it is at the cap (or lwIP has no payload room
+  or pbuf slots). Over WiFi a healthy batmon/HA client held 6 one-frame
+  segments (9.3 KiB for ~200 B of notifies: ACKs ~250 ms late, .231, before
+  the ring); `api_tx` now packs queued frames into one segment. An over-cap
+  episode is logged only after 1 s. `/stats.json`: `api_txq` ([id, last,
+  max] per client), `api_txq_max`, `api_txq_drops` (advert batches dropped,
+  ring half full), `api_txq_reaps` (20 s stall), `api_ring_reaps` (a frame
+  that must not be lost did not fit), `api_ring` ([id, fill, high-water]),
+  `api_ring_size`, `api_tx_frames`/`api_tx_sends` (frames per send),
+  `api_enq_us_max` (longest send call that did not wait), `api_refused`.
+  `api_txq_busy` is always false now.
 - **`NBP_API_MAX_CLIENTS` (2)**: each client is ~9.3 KiB at rest (8 KiB task
   stack, TCB, socket; QEMU). A further client is accepted and reset at once
   (`no client slot … refusing`).
@@ -597,8 +652,35 @@
 - **QEMU:** `idf.py -B build_qemu_heap -DIDF_TARGET=esp32s3
   -DNBP_HEAP_SELFTEST=1 build`, then `… qemu` (IDF 6.0.3). Prints
   `HEAP-SELFTEST <step>: PASS|FAIL` for the boot race, the 3rd-client
-  refusal, a stalled client under lossy and non-lossy traffic, and
-  `HEAP-MEASURE` numbers. The stall is real: a test-only `LWIP_HOOK_IP4_INPUT`
+  refusal, a stalled client under lossy and non-lossy traffic, stall
+  isolation (host-priority send calls stay short, only the stalled client
+  goes), `fd_reuse` (a reissued fd gets no stale bytes), `bulk_wait` (a
+  GetServices-sized burst from the client's own connection task, via a
+  test-only GetServices address in `bt_handlers`, next to max-size notifies:
+  nobody reaped), `bulk_reserve` (the same with W stalled: the waiting burst
+  leaves room for exactly two max-size notifies; deterministic),
+  `bulk_adverts` (the burst to a slow reader while advert batches are
+  broadcast every tick at priority 7; a soak, it also passes without the
+  `bulk_waiting` mark on loopback, only slower), `bulk_gate` (deterministic:
+  W stalled with a few notifies in its ring and the burst waiting; adverts
+  broadcast then must leave W's ring unchanged and still reach B; fails with
+  the mark disabled on S3 and C3), coalescing,
+  and `HEAP-MEASURE` numbers. Known-bad calibrations (2026-11-13):
+  `RING_RESERVE = 0` fails `bulk_reserve` on S3 and C3 (`bulk_wait` is
+  timing-dependent: with the reserve at 0 it failed in 3 of 4 runs and passed
+  once, on the C3); no ring reset
+  fails `fd_reuse`; the old stall clock fails the OOM self-test's
+  `send_heap_exhausted` (it idles 21 s first).
+- **QEMU on the C3** (`-DIDF_TARGET=esp32c3`, build dir of its own) runs the
+  heap self-test too. Needs `qemu-riscv32` (`idf_tools.py install
+  qemu-riscv32`; IDF's Python 3.14 failed TLS verification, so the archive
+  was fetched with curl into `~/.espressif/dist` first) and its `bin` on
+  `PATH` by hand (`export.sh` did not add it). Two self-test-only shims in
+  the root `CMakeLists.txt`: QEMU models no ADC, so IDF's boot-time ADC
+  self-calibration (a constructor) spins forever in `read_cal_channel`
+  before app_main; it is `--wrap`ped to a no-op. And the lwIP input hook is
+  wired without the NAT router (the C3 profile has none), with the dhcps
+  hook macro gated on `CONFIG_NBP_NAT_ROUTER` in `nbp_lwip_hooks.h`. The stall is real: a test-only `LWIP_HOOK_IP4_INPUT`
   (`nbp_lwip_hooks.h`) drops every segment to the stalled client's port, so
   data is sent and never ACKed. Add `CONFIG_NBP_API_CLIENT_TXQ_CAP=0` via an
   extra defaults file to measure the uncapped case.
@@ -637,8 +719,17 @@
   `:80` backs off instead of looping.
 - Panic records already survive the reset: `GET /crash` (crash_capture).
   Ask for it before guessing at a `panic` reset reason.
-- On-demand GATT discovery (`ensure_discovered`, bt_handlers.cpp) retries
-  while a link's last discovery failed part-way (`g_partial`). Known
-  pre-existing risk: any `discoverAttributes()` after notifications are on
-  (GetServices, or that retry) deletes the service list on the connection
-  task while the host task may walk it for a notification.
+- **The peer is walked over the air only when the attribute cache is
+  empty** (`gatt_discovery.cpp`: `walk_empty`, `ensure_discovered`,
+  `fill_gaps`, `g_partial`; bt_handlers uses the same helpers). Every
+  connect clears the cache, so a non-empty one belongs to this connection:
+  a repeat GetServices answers from it (`services from cache`), and after a
+  walk that failed part-way only the gaps are filled. Before (2026-11-14),
+  every GetServices ran `discoverAttributes()`, whose `deleteServices()`
+  freed the characteristics, and their notify callbacks, under the host
+  task: during the ~4.5 s walk notifications were `unknown handle`, after
+  it they were dropped silently (new objects, no callback), and HA never
+  re-subscribes. S3 bench `ABgs` (GetServices every 10 s, 20 notifies/s):
+  before, A got 5 notifies in 120 s; after, 2240/2246 sent, no sequence
+  gap, repeat GetServices 20–400 ms. A Service Changed indication is not
+  handled (the cache is not invalidated by it).

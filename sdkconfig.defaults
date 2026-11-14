@@ -111,6 +111,11 @@ CONFIG_LWIP_SO_REUSE=y
 # aborted (RST) instead of lingering in FIN-WAIT with its unsent data
 # (issue #2). Without this option lwIP ignores SO_LINGER.
 CONFIG_LWIP_SO_LINGER=y
+# Per-client API TX ring (static .bss): every frame is copied in and one
+# sender task drains it, so no producer (NimBLE host task) blocks on a slow
+# client. At least 3136 (one max-size frame plus two max-size notifies);
+# see NBP_API_CLIENT_TX_RING.
+CONFIG_NBP_API_CLIENT_TX_RING=4096
 
 # Task watchdog generous enough for BLE scan callbacks + GATT discovery bursts.
 # 30s gives the clone supervisor headroom for long peripheral discoveries

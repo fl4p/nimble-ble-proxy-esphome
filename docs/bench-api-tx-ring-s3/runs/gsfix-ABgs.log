@@ -1,0 +1,58 @@
+tx ring 4096 B)[0m
+[0;32mI (12449) ws_proxy: esphome-over-websocket bridge at ws:///api (-> :6053)[0m
+[0;32mI (12489) nat: NAT SoftAP up: 'nimble-nat' (wpa2) 192.168.4.1 -> STA 192.168.1.125, 0 port mapping(s)[0m
+[0;32mI (12489) nat: NAT config at /nat, port-forwarding at /portmap[0m
+[0;32mI (12499) clone.cfg: loaded addr=000000000000 type=0 enabled=0 suffix='_cloned'[0m
+[0;32mI (12509) clone: init done; no enabled target, supervisor not started[0m
+[0;32mI (12509) clone: /clone endpoints registered[0m
+[0;32mI (12519) stats: TX power applied: wifi=20 dBm, ble=9 dBm[0m
+[0;32mI (12519) ble.pwr: BLE auto-off supervisor started (idle grace 30s)[0m
+[0;32mI (12529) main: boot complete; heap free=70332 largest=31744 min=70240; main task exiting[0m
+[0;32mI (12539) main_task: Returned from app_main()[0m
+[0;32mI (12549) temperature_sensor: Range [-10°C ~ 80°C], error < 1°C[0m
+[0;32mI (32719) api_server: accepted fd=52 peer=192.168.1.204:55212[0m
+[0;32mI (32729) api_server: client connected (fd=52, id=1, total=1)[0m
+[0;32mI (32809) ble.scan: forwarding ON[0m
+[0;32mI (33739) ble.conn: connect 80a9971de2c9 type=0 owner=1 (async)[0m
+[0;32mI (35789) ble.conn: onConnect 80a9971de2c9 mtu=23 owner=1[0m
+[0;32mI (35789) ble.scan: scan resumed[0m
+[0;32mI (35799) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (40799) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (40799) ble.gatt.disc: 80a9971de2c9: services from cache[0m
+[0;32mI (42519) ble.pwr: peripheral idle 30s (WiFi up) → advertising suspended[0m
+[0;32mI (47699) api_server: accepted fd=53 peer=192.168.1.204:55381[0m
+[0;32mI (47699) api_server: client connected (fd=53, id=2, total=2)[0m
+[0;32mI (50419) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (50419) ble.gatt.disc: 80a9971de2c9: services from cache[0m
+[0;32mI (60459) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (60459) ble.gatt.disc: 80a9971de2c9: services from cache[0m
+[0;32mI (70489) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (70489) ble.gatt.disc: 80a9971de2c9: services from cache[0m
+[0;32mI (72539) main: boot stable for 60 s; cleared boot-guard flag[0m
+[0;32mI (80519) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (80519) ble.gatt.disc: 80a9971de2c9: services from cache[0m
+[0;32mI (90739) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (90739) ble.gatt.disc: 80a9971de2c9: services from cache[0m
+[0;32mI (92399) liveness: probe target answered; armed[0m
+[0;32mI (100519) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (100519) ble.gatt.disc: 80a9971de2c9: services from cache[0m
+[0;32mI (110529) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (110529) ble.gatt.disc: 80a9971de2c9: services from cache[0m
+[0;32mI (120569) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (120569) ble.gatt.disc: 80a9971de2c9: services from cache[0m
+[0;32mI (130689) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (130689) ble.gatt.disc: 80a9971de2c9: services from cache[0m
+[0;32mI (140629) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (140629) ble.gatt.disc: 80a9971de2c9: services from cache[0m
+[0;32mI (150669) ble.gatt.disc: discover 80a9971de2c9[0m
+[0;32mI (150669) ble.gatt.disc: 80a9971de2c9: services from cache[0m
+[0;32mI (152789) ble.conn: onDisconnect 80a9971de2c9 reason=534 owner=1[0m
+[0;33mW (153229) api_server: send fd=52 failed: errno=104[0m
+[0;33mW (153229) api_server: fd=52 send failed (reaped); 3 B dropped from its ring[0m
+[0;32mI (153229) api_server: client disconnected (fd=52, id=1, peer=192.168.1.204, reason=closed by protocol, remaining=1); releasing its BLE links[0m
+[0;33mW (153989) api_server: send fd=53 failed: errno=104[0m
+[0;33mW (153989) api_server: fd=53 send failed (reaped); 3 B dropped from its ring[0m
+[0;33mW (153989) api_server: fd=53 read_frame error: -2[0m
+[0;32mI (153999) ble.scan: forwarding OFF[0m
+[0;32mI (153999) api_server: client disconnected (fd=53, id=2, peer=192.168.1.204, reason=send failed (reaped), remaining=0); releasing its BLE links[0m
+[0;32mI (154009) ble.scan: forwarding OFF[0m

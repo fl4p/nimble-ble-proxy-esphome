@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "crash_capture.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES esp_http_server
+    REQUIRES esp_http_server http_guard
     PRIV_REQUIRES
         esp_app_format
         esp_hw_support

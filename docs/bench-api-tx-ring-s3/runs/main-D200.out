@@ -1,0 +1,88 @@
+{
+ "dev": {
+  "mac": "9C:13:9E:F4:04:98",
+  "compile": "Nov 13 2026 20:59:08",
+  "name": "nimble-proxy"
+ },
+ "A": {
+  "notifies": 270,
+  "notify_by_handle": {
+   "27": 270
+  },
+  "adverts": 42,
+  "reads": 1,
+  "read_err": 0,
+  "max_gap_ms": 0,
+  "disconnected": null,
+  "gs_bursts": 1,
+  "gs_frames": 6,
+  "peer_connected": true,
+  "peer_drops": 0,
+  "seq_lost": 0,
+  "seq_breaks": 0,
+  "last_seq": {
+   "27": 24698
+  },
+  "peer_seen": true,
+  "run_since": 5.7
+ },
+ "A_read_ms": {
+  "n": 1,
+  "p50": 819.4,
+  "p95": 819.4,
+  "max": 819.4
+ },
+ "A_gap_ms": {
+  "p50": 200.4,
+  "p99": 264.8,
+  "max": 333.7
+ },
+ "A_gs_ms": [
+  4597.9
+ ],
+ "B": {
+  "sessions": 0,
+  "reaps": 0,
+  "reap_after_s": [],
+  "err": []
+ },
+ "stats_first": {
+  "heap": 73680,
+  "heap_min": 70100,
+  "heap_largest": 31744,
+  "notify_rx": 0,
+  "api_txq_max": 0,
+  "api_txq_drops": 0,
+  "api_txq_reaps": 0,
+  "api_ring_reaps": null,
+  "api_tx_frames": null,
+  "api_tx_sends": null,
+  "api_enq_us_max": null,
+  "api_tx_stack_free": null,
+  "api_refused": 0,
+  "oom": 0
+ },
+ "stats_last": {
+  "heap": 70360,
+  "heap_min": 60668,
+  "heap_largest": 31744,
+  "notify_rx": 280,
+  "api_txq_max": 9324,
+  "api_txq_drops": 0,
+  "api_txq_reaps": 0,
+  "api_ring_reaps": null,
+  "api_tx_frames": null,
+  "api_tx_sends": null,
+  "api_enq_us_max": null,
+  "api_tx_stack_free": null,
+  "api_refused": 0,
+  "oom": 0
+ },
+ "heap_min_seen": 70360,
+ "heap_largest_min_seen": 31744,
+ "ring_max_seen": 0,
+ "txq_max_seen": 9324,
+ "poll_errors": 0,
+ "notify_rx_delta": 280,
+ "notify_lost": 10
+}

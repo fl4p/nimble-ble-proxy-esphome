@@ -32,3 +32,12 @@ CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
 # Next lever if this isn't enough: CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY=y frees
 # another 22.3 KB. It is left off because IDF warns BLE "may not work properly
 # during erasing flash" (NVS writes, OTA), and it is untested on C3 hardware.
+#
+# API TX ring 4096 -> 3136 per client (static .bss, 2 clients = 1.9 KiB
+# saved). 3136 is the minimum: one max-size frame (2054 B) plus two max-size
+# notifies (2 x 538 B) that the host task may queue behind it.
+CONFIG_NBP_API_CLIENT_TX_RING=3136
+# Send-queue heap cap 16 -> 8 KiB per client: api_tx packs frames into full
+# segments, so 8 KiB carries ~5 full-MSS segments, and 2 x 16 KiB would
+# exceed the C3's whole steady-state free heap.
+CONFIG_NBP_API_CLIENT_TXQ_CAP=8192

@@ -142,24 +142,48 @@ config NBP_API_CLIENT_TXQ_CAP
     int "API: per-client cap on heap held by unsent/unacked data (bytes)"
     depends on NBP_WIFI
     range 0 65536
-    default 16384
+    default 8192
     help
         Upper bound on the heap one API client's TCP send queue may hold
         (the pbufs and segments lwIP keeps until the peer ACKs them).
         lwIP's own bound is TCP_SND_QUEUELEN segments, and with
         LWIP_NETIF_TX_SINGLE_PBUF every segment is a full-MSS pbuf (~1.5
         KiB) however small the frame, so one stalled client could pin
-        ~25 KiB. Over the cap: advertisement batches for that client are
-        dropped; any other frame waits for the queue to drain, and a
-        client still over the cap after the 20 s send deadline is reaped
-        (RST). 0 disables the cap.
+        ~25 KiB. At the cap the api_tx task moves nothing more from the
+        client's TX ring into lwIP; frames wait in the ring (adverts are
+        dropped once it is half full), and a client whose ring does not
+        move for the 20 s send deadline is reaped (RST). 0 disables the
+        cap.
         Sizing (2026-11, .231): a healthy HA/batmon client over WiFi
         regularly holds 6 segments (9.3 KiB for ~200 B of notifies; the
         ACKs come back ~250 ms late), so 8 KiB was hit several times a
-        second. 16 KiB is ~10 segments; uncapped, a stalled peer pins
-        16 segments, ~25 KiB.
+        second. That was before the TX ring: api_tx now packs queued
+        frames into one segment. S3 bench (2026-11-13,
+        docs/bench-api-tx-ring-s3.md), one healthy client plus one
+        stalled: 8 KiB lost no notifies and reaped no healthy client, and
+        kept heap_min at 14.9 KB vs 11.5 KB with 16 KiB. Uncapped, a
+        stalled peer pins 16 segments, ~25 KiB.
         /stats.json reports the per-client high-water mark (api_txq_max)
         and the drops (api_txq_drops) / reaps (api_txq_reaps).
+
+config NBP_API_CLIENT_TX_RING
+    int "API: per-client TX ring (bytes, static)"
+    depends on NBP_WIFI
+    range 3136 16384
+    default 4096
+    help
+        Every frame for an API client is copied into this client's ring
+        (static .bss, one per NBP_API_MAX_CLIENTS) and a single sender task
+        moves it into the socket, many frames per send(). No producer, in
+        particular the NimBLE host task, ever blocks on the network.
+        Admission: advertisement batches may fill half the ring (dropped
+        beyond); frames from the client's own connection task (handshake,
+        GetServices, GATT replies) fill it up to two max-size notifies
+        (1076 B) short of full and otherwise wait for room, up to the 20 s
+        send deadline; any other frame (notifies, connection states) may
+        fill it and reaps the client if it does not fit. The minimum 3136
+        holds a max-size frame (2054 B) plus that reserve; half of it holds
+        a full advert batch (1430 B). Both are static_asserts.
 
 config NBP_WS_PROXY
     bool "WebSocket bridge: aioesphomeapi over ws://<host>/api (browser clients)"

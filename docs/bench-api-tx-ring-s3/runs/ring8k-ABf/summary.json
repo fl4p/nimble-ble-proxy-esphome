@@ -1,0 +1,102 @@
+{
+ "dev": {
+  "mac": "9C:13:9E:F4:04:98",
+  "compile": "Nov 13 2026 20:58:46",
+  "name": "nimble-proxy"
+ },
+ "A": {
+  "notifies": 3434,
+  "notify_by_handle": {
+   "27": 3434
+  },
+  "adverts": 880,
+  "reads": 168,
+  "read_err": 0,
+  "max_gap_ms": 0,
+  "disconnected": null,
+  "gs_bursts": 1,
+  "gs_frames": 6,
+  "peer_connected": true,
+  "peer_drops": 0,
+  "seq_lost": 0,
+  "seq_breaks": 0,
+  "last_seq": {
+   "27": 33060
+  },
+  "peer_seen": true,
+  "run_since": 8.2
+ },
+ "A_read_ms": {
+  "n": 168,
+  "p50": 212.4,
+  "p95": 354.4,
+  "max": 770.4
+ },
+ "A_gap_ms": {
+  "p50": 46.3,
+  "p99": 136.7,
+  "max": 452.9
+ },
+ "A_gs_ms": [
+  4815.9
+ ],
+ "B": {
+  "sessions": 7,
+  "reaps": 6,
+  "reap_after_s": [
+   24.0,
+   24.0,
+   24.0,
+   24.0,
+   24.0,
+   24.0
+  ],
+  "err": [
+   "[Errno 32] Broken pipe",
+   "[Errno 32] Broken pipe",
+   "[Errno 32] Broken pipe",
+   "[Errno 32] Broken pipe",
+   "[Errno 32] Broken pipe",
+   "[Errno 32] Broken pipe"
+  ]
+ },
+ "stats_first": {
+  "heap": 62720,
+  "heap_min": 58956,
+  "heap_largest": 31744,
+  "notify_rx": 0,
+  "api_txq_max": 0,
+  "api_txq_drops": 0,
+  "api_txq_reaps": 0,
+  "api_ring_reaps": 0,
+  "api_tx_frames": 0,
+  "api_tx_sends": 0,
+  "api_enq_us_max": 0,
+  "api_tx_stack_free": 1876,
+  "api_refused": 0,
+  "oom": 0
+ },
+ "stats_last": {
+  "heap": 71136,
+  "heap_min": 14928,
+  "heap_largest": 27648,
+  "notify_rx": 3436,
+  "api_txq_max": 10904,
+  "api_txq_drops": 529,
+  "api_txq_reaps": 6,
+  "api_ring_reaps": 0,
+  "api_tx_frames": 7318,
+  "api_tx_sends": 3828,
+  "api_enq_us_max": 12633,
+  "api_tx_stack_free": 820,
+  "api_refused": 0,
+  "oom": 0
+ },
+ "heap_min_seen": 27660,
+ "heap_largest_min_seen": 12800,
+ "ring_max_seen": 3001,
+ "txq_max_seen": 10904,
+ "poll_errors": 0,
+ "notify_rx_delta": 3436,
+ "notify_lost": 2
+}

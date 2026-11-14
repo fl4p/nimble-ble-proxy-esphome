@@ -1,0 +1,4 @@
+{"who": "A", "what": "dev", "mac": "9C:13:9E:F4:04:98", "compile": "Nov 13 2026 20:58:46", "name": "nimble-proxy", "t": 0.125}
+{"who": "A", "what": "connect_req", "at": 0, "t": 0.238}
+{"who": "A", "what": "conn_state", "connected": 1, "mtu": 23, "err": 0, "t": 2.604}
+{"who": "A", "what": "discovered", "notify": [[27, 28, 18]], "read": 30, "services": 6, "t": 7.496}

@@ -29,6 +29,10 @@ bool g_started = false;
 // "is the peer sending notifies at all?" via /stats.json.
 std::atomic<uint32_t> g_notify_rx_total{0};
 std::atomic<uint16_t> g_last_notify_handle{0};
+// Of those, notifications on a NimBLEClient link whose handle is not in the
+// client's attribute cache: NimBLE-cpp drops them ("unknown handle") before
+// any callback. Same lookup NimBLE-cpp's own handler does, on the host task.
+std::atomic<uint32_t> g_notify_unknown{0};
 
 // Peripheral adv interval (0.625 ms units). 0 = use NimBLE host default
 // (~30..60 ms range). Set via stats::apply_adv_interval_from_nvs at
@@ -75,6 +79,12 @@ int notify_listener_cb(struct ble_gap_event *event, void *arg) {
     g_notify_rx_total.fetch_add(1, std::memory_order_relaxed);
     g_last_notify_handle.store(event->notify_rx.attr_handle,
                                std::memory_order_relaxed);
+    NimBLEClient *c =
+        NimBLEDevice::getClientByHandle(event->notify_rx.conn_handle);
+    if (c != nullptr &&
+        c->getCharacteristic(event->notify_rx.attr_handle) == nullptr) {
+      g_notify_unknown.fetch_add(1, std::memory_order_relaxed);
+    }
     // Downgraded to DEBUG once notify-RX was confirmed working end-to-end
     // (BMS bring-up, 2026-05-26). The counters above remain the ongoing
     // diagnostic surface — visible via /stats.json as notify_rx and
@@ -94,6 +104,10 @@ int notify_listener_cb(struct ble_gap_event *event, void *arg) {
 
 uint32_t notify_rx_total() {
   return g_notify_rx_total.load(std::memory_order_relaxed);
+}
+
+uint32_t notify_unknown_total() {
+  return g_notify_unknown.load(std::memory_order_relaxed);
 }
 
 uint16_t last_notify_handle() {

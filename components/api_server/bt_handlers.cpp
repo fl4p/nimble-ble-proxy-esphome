@@ -8,6 +8,9 @@
 #include "api_server.h"
 #include "ble_backend.h"
 #include "stats.h"
+#if NBP_HEAP_SELFTEST
+#include "heap_selftest.h"
+#endif
 
 // ble_backend internal modules — bt_handlers is the bridge layer so
 // pulling them in is intentional. Keeping the dispatch in api_server
@@ -193,7 +196,10 @@ void notify_cb(NimBLERemoteCharacteristic *chr, uint8_t *data, size_t len,
   // Only the client that owns this link gets its notify data. No owner
   // (its client left; teardown in progress) → drop.
   auto owner = ble_backend::connection::owner_of_client(client);
-  if (owner == ble_backend::connection::kNoOwner) return;
+  if (owner == ble_backend::connection::kNoOwner) {
+    api_server::stats::record_notify_unowned();
+    return;
+  }
   api_server::stats::record_notify();
   api_server::send_to(owner, proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE,
                       &encode_notify_data, &msg);
@@ -313,43 +319,6 @@ bool handle_device_request(const uint8_t *payload, size_t payload_len,
   return true;
 }
 
-// Links whose on-demand discovery failed part-way. discoverAttributes()
-// fills the service list before it walks characteristics, so after such a
-// failure the list is non-empty but incomplete; without this mark the
-// "list empty" test would never look again and later handles would stay
-// unknown until the peer reconnects (fill_gaps). Touched from several
-// connection tasks.
-NimBLEClient *g_partial[proxy::MAX_CONNECTIONS] = {};
-portMUX_TYPE g_partial_mux = portMUX_INITIALIZER_UNLOCKED;
-
-bool is_partial(NimBLEClient *c) {
-  bool found = false;
-  taskENTER_CRITICAL(&g_partial_mux);
-  for (auto *p : g_partial) found = found || p == c;
-  taskEXIT_CRITICAL(&g_partial_mux);
-  return found;
-}
-
-void set_partial(NimBLEClient *c, bool partial) {
-  taskENTER_CRITICAL(&g_partial_mux);
-  bool done = false;
-  for (auto &p : g_partial) {
-    if (p == c) {
-      if (!partial) p = nullptr;
-      done = true;
-    }
-  }
-  if (partial && !done) {
-    for (auto &p : g_partial) {
-      if (p == nullptr) {
-        p = c;
-        break;
-      }
-    }
-  }
-  taskEXIT_CRITICAL(&g_partial_mux);
-}
-
 bool handle_get_services(const uint8_t *payload, size_t payload_len,
                          const Context &ctx) {
   proxyapi_BluetoothGATTGetServicesRequest req =
@@ -358,54 +327,33 @@ bool handle_get_services(const uint8_t *payload, size_t payload_len,
   if (!pb_decode(&s, proxyapi_BluetoothGATTGetServicesRequest_fields, &req)) {
     return true;
   }
-  // Owner-only (gatt_discovery::run checks), so two clients can never
-  // run discovery on one link concurrently. A full discovery supersedes a
-  // failed on-demand one: the client sees its errors itself.
-  if (auto *c = static_cast<NimBLEClient *>(
-          ble_backend::connection::client_for(req.address, ctx.client_id))) {
-    set_partial(c, false);
+#if NBP_HEAP_SELFTEST
+  // QEMU heap self-test (no BLE): a GetServices-sized burst on this
+  // connection task, the producer that waits for ring room.
+  if (req.address == heap_selftest::kBulkAddress) {
+    heap_selftest::bulk_burst(ctx.client_id);
+    return true;
   }
+#endif
+  // Owner-only (gatt_discovery::run checks), so two clients can never
+  // run discovery on one link concurrently. It walks the peer only when the
+  // cache is empty; a repeat GetServices answers from the cache.
   ble_backend::gatt_discovery::run(req.address, ctx.client_id);
   return true;
 }
 
 // Every connect clears the NimBLEClient attribute cache
-// (connection::connect, deleteAttributes=true), and discovery otherwise
-// runs only on BluetoothGATTGetServicesRequest. We advertise
-// REMOTE_CACHING, so HA (disk cache) and bleak_esphome (per-process
-// cache) skip GetServices on a reconnect. Without this, every read/write
-// and the notify registration then failed against an empty cache, and the
-// peer's notifications were dropped as "NimBLEClient: unknown handle: N"
-// (issue #2, batmon-ha #391). Stock ESPHome rediscovers on every connect
-// in its own GATT client; we do it on first use instead, here on the API
-// connection task (discoverAttributes blocks, so never on the host task).
-void ensure_discovered(NimBLEClient *client) {
-  if (!client->getServices(/*refresh=*/false).empty()) return;
-  ESP_LOGI(TAG, "%s: no GetServices since connect; discovering on demand",
-           client->getPeerAddress().toString().c_str());
-  const bool ok = client->discoverAttributes();
-  set_partial(client, !ok);
-  if (!ok) ESP_LOGW(TAG, "on-demand discovery failed part-way; will fill gaps on lookup misses");
-}
-
-// After a partial discovery, fill in only what is missing: services with no
-// characteristics, characteristics with no descriptors. Never a full
-// rediscovery, which would deleteServices() under live notify callbacks
-// (dropping them) while the host task may walk the list. Refreshing an
-// empty vector deletes nothing; new entries are appended on the host task,
-// the same task that walks them for notifications.
-void fill_gaps(NimBLEClient *client) {
-  for (auto *svc : client->getServices(/*refresh=*/false)) {
-    if (svc->getCharacteristics(/*refresh=*/false).empty()) {
-      svc->getCharacteristics(/*refresh=*/true);
-    }
-    for (auto *chr : svc->getCharacteristics(/*refresh=*/false)) {
-      if (chr->getDescriptors(/*refresh=*/false).empty()) {
-        chr->getDescriptors(/*refresh=*/true);
-      }
-    }
-  }
-}
+// (connection::connect, deleteAttributes=true), and we advertise
+// REMOTE_CACHING, so HA (disk cache) and bleak_esphome (per-process cache)
+// skip GetServices on a reconnect. Without on-demand discovery every
+// read/write and the notify registration then failed against an empty
+// cache, and the peer's notifications were dropped as "NimBLEClient:
+// unknown handle: N" (issue #2, batmon-ha #391). The helpers live in
+// gatt_discovery (shared with GetServices); they block, so they run here
+// on the API connection task, never on the host task.
+using ble_backend::gatt_discovery::ensure_discovered;
+using ble_backend::gatt_discovery::fill_gaps;
+using ble_backend::gatt_discovery::is_partial;
 
 NimBLERemoteCharacteristic *find_char(NimBLEClient *client, uint16_t handle) {
   for (auto *svc : client->getServices(/*refresh=*/false)) {

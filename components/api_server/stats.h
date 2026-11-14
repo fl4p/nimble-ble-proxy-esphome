@@ -12,6 +12,8 @@ namespace api_server::stats {
 void record_read();
 void record_write();
 void record_notify();
+// A notification reached notify_cb on a link with no owning API client.
+void record_notify_unowned();
 
 // Optional provider that lets /stats.json fold a second source of GATT
 // activity (the ble_clone GATT image) into reads/writes/notifies/conns

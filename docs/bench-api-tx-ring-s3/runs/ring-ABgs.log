@@ -1,0 +1,69 @@
+9) NimBLEClient: unknown handle: 27[0m
+[0;33mW (149809) NimBLEClient: unknown handle: 27[0m
+[0;33mW (149809) NimBLEClient: unknown handle: 27[0m
+[0;33mW (149909) NimBLEClient: unknown handle: 27[0m
+[0;33mW (149909) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150009) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150009) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150059) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150159) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150159) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150259) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150259) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150359) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150359) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150459) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150459) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150559) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150559) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150659) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150659) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150759) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150759) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150859) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150859) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150959) NimBLEClient: unknown handle: 27[0m
+[0;33mW (150959) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151059) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151059) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151209) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151209) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151259) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151259) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151359) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151359) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151459) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151459) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151559) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151559) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151659) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151659) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151759) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151759) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151859) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151859) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151959) NimBLEClient: unknown handle: 27[0m
+[0;33mW (151959) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152059) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152059) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152159) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152159) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152209) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152309) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152309) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152409) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152409) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152509) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152509) NimBLEClient: unknown handle: 27[0m
+[0;33mW (152609) NimBLEClient: unknown handle: 27[0m
+[0;33mW (153269) api_server: send fd=52 failed: errno=104[0m
+[0;33mW (153269) api_server: fd=52 send failed (reaped); 3 B dropped from its ring[0m
+[0;32mI (153279) api_server: client disconnected (fd=52, id=1, peer=192.168.1.204, reason=send failed (reaped), remaining=1); releasing its BLE links[0m
+[0;32mI (153289) ble.conn: release 80a9971de2c9 (owner=1 gone, state=3)[0m
+[0;32mI (153309) ble.conn: onDisconnect 80a9971de2c9 reason=534 owner=0[0m
+[0;33mW (154059) api_server: send fd=53 failed: errno=104[0m
+[0;33mW (154059) api_server: fd=53 send failed (reaped); 3 B dropped from its ring[0m
+[0;33mW (154059) api_server: fd=53 read_frame error: -2[0m
+[0;32mI (154059) ble.scan: forwarding OFF[0m
+[0;32mI (154069) api_server: client disconnected (fd=53, id=2, peer=192.168.1.204, reason=send failed (reaped), remaining=0); releasing its BLE links[0m
+[0;32mI (154079) ble.scan: forwarding OFF[0m

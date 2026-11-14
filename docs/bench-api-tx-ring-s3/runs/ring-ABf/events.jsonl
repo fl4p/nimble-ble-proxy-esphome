@@ -1,0 +1,17 @@
+{"who": "A", "what": "dev", "mac": "9C:13:9E:F4:04:98", "compile": "Nov 13 2026 21:20:33", "name": "nimble-proxy", "t": 0.136}
+{"who": "A", "what": "connect_req", "at": 0, "t": 1.061}
+{"who": "A", "what": "conn_state", "connected": 1, "mtu": 23, "err": 0, "t": 2.522}
+{"who": "A", "what": "discovered", "notify": [[27, 28, 18]], "read": 30, "services": 6, "t": 7.094}
+{"who": "B", "what": "stalling", "t": 15.081}
+{"who": "B", "what": "dead", "err": "[Errno 32] Broken pipe", "after": 24.0, "t": 39.127}
+{"who": "B", "what": "stalling", "t": 40.205}
+{"who": "B", "what": "dead", "err": "[Errno 32] Broken pipe", "after": 26.1, "t": 66.261}
+{"who": "B", "what": "stalling", "t": 67.342}
+{"who": "B", "what": "dead", "err": "[Errno 32] Broken pipe", "after": 26.0, "t": 93.377}
+{"who": "B", "what": "stalling", "t": 95.183}
+{"who": "B", "what": "dead", "err": "[Errno 32] Broken pipe", "after": 24.0, "t": 119.228}
+{"who": "B", "what": "stalling", "t": 120.283}
+{"who": "B", "what": "dead", "err": "[Errno 32] Broken pipe", "after": 24.0, "t": 144.322}
+{"who": "B", "what": "stalling", "t": 145.374}
+{"who": "B", "what": "dead", "err": "[Errno 32] Broken pipe", "after": 24.0, "t": 169.417}
+{"who": "B", "what": "stalling", "t": 170.543}

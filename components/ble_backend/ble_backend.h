@@ -24,6 +24,9 @@ void on_api_client_disconnect();
 // "peer never sent notifies" apart from "NimBLE-Arduino dropped them
 // at handle lookup".
 uint32_t notify_rx_total();
+// notify_rx events whose handle was not in the link's attribute cache
+// (dropped by NimBLE-cpp as "unknown handle").
+uint32_t notify_unknown_total();
 uint16_t last_notify_handle();
 
 // Configured peripheral advertising interval, in 0.625 ms units. 0

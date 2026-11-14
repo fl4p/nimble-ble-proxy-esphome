@@ -24,6 +24,15 @@ project(nimble_ble_proxy
     LANGUAGES C CXX
     VERSION 0.2.4)
 
+# QEMU heap self-test on the C3: QEMU models no ADC, so IDF's boot-time ADC
+# self-calibration (a constructor, pulled in with the PHY) spins forever in
+# read_cal_channel before app_main. The self-test stubs it out
+# (heap_selftest.cpp). Never in a firmware build.
+if(NBP_HEAP_SELFTEST AND IDF_TARGET STREQUAL "esp32c3")
+    target_link_options(${CMAKE_PROJECT_NAME}.elf PRIVATE
+        "-Wl,--wrap=adc_calc_hw_calibration_code")
+endif()
+
 # DHCP client-hostname capture (NAT/SoftAP only). IDF 5.5's DHCP server
 # discards option 12, so we inject a custom lwIP hook header to read it —
 # the sanctioned ESP_IDF_LWIP_HOOK_FILENAME mechanism (see lwipopts.h and
@@ -45,6 +54,15 @@ if(CONFIG_NBP_NAT_ROUTER)
     # pre-enable heap check reads the same CONFIG value.
     target_compile_definitions(${lwip_lib} PRIVATE
         IP_NAPT_MAX=${CONFIG_NBP_NAT_TABLE_SIZE})
+elseif(NBP_HEAP_SELFTEST)
+    # The heap self-test's input hook (stalled peer, segment counter) lives
+    # in the same header; a build without the NAT router (the C3 profile)
+    # needs it wired too. Self-test builds only.
+    idf_component_get_property(lwip_lib lwip COMPONENT_LIB)
+    target_include_directories(${lwip_lib} PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/components/dhcps_hostname/include")
+    target_compile_definitions(${lwip_lib} PRIVATE
+        ESP_IDF_LWIP_HOOK_FILENAME="nbp_lwip_hooks.h")
 endif()
 
 # IDF 6 builds with -Werror=missing-field-initializers in C++. These

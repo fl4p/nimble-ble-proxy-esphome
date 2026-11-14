@@ -1,0 +1,52 @@
+diff --git a/components/api_server/bt_handlers.cpp b/components/api_server/bt_handlers.cpp
+index 6c6ee3e..8837d8b 100644
+--- a/components/api_server/bt_handlers.cpp
++++ b/components/api_server/bt_handlers.cpp
+@@ -29,6 +29,9 @@
+ #include <atomic>
+ #include <cstring>
+ 
++// BENCH-ONLY (scratch worktree): notify_cb delay injection, set via POST /wifips?benchdelay=N
++extern "C" { volatile uint32_t g_bench_notify_delay_ms = 0; }
++
+ namespace api_server::bt_handlers {
+ 
+ namespace {
+@@ -173,6 +176,7 @@ void on_connection_state(ble_backend::connection::OwnerId owner,
+ 
+ void notify_cb(NimBLERemoteCharacteristic *chr, uint8_t *data, size_t len,
+                bool /*is_notify*/) {
++  if (g_bench_notify_delay_ms) vTaskDelay(pdMS_TO_TICKS(g_bench_notify_delay_ms));
+   // NimBLE host task. Build response on the stack — send_async will
+   // copy it into the TX buffer under the TX mutex.
+   proxyapi_BluetoothGATTNotifyDataResponse msg =
+diff --git a/components/api_server/stats.cpp b/components/api_server/stats.cpp
+index 311c476..cebf07f 100644
+--- a/components/api_server/stats.cpp
++++ b/components/api_server/stats.cpp
+@@ -42,6 +42,8 @@
+ #include <cstdlib>
+ #include <cstring>
+ 
++// BENCH-ONLY (scratch worktree, never committed): notify_cb delay injection.
++extern "C" volatile uint32_t g_bench_notify_delay_ms;
+ namespace api_server::stats {
+ 
+ namespace {
+@@ -493,6 +495,16 @@ esp_err_t wifips_get(httpd_req_t *req) {
+ }
+ 
+ esp_err_t wifips_post(httpd_req_t *req) {
++  {
++    char query[48]; char val[12];
++  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
++      httpd_query_key_value(query, "benchdelay", val, sizeof(val)) == ESP_OK) {
++    g_bench_notify_delay_ms = static_cast<uint32_t>(atoi(val));
++    httpd_resp_set_type(req, "application/json");
++    char o[48]; int n = snprintf(o, sizeof o, "{\"benchdelay\":%lu}", (unsigned long)g_bench_notify_delay_ms);
++    return httpd_resp_send(req, o, n);
++  }
++  }
+   char query[32];
+   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");

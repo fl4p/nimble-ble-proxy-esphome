@@ -1,0 +1,39 @@
+2098) api_server: client disconnected (fd=54, id=2, peer=192.168.1.204, reason=send failed, remaining=1); releasing its BLE links[0m
+[0;32mI (72538) main: boot stable for 60 s; cleared boot-guard flag[0m
+[0;32mI (76978) api_server: accepted fd=53 peer=192.168.1.204:49324[0m
+[0;32mI (76978) api_server: client connected (fd=53, id=3, total=2)[0m
+[0;33mW (80828) api_server: fd=53 send queue full: 6228 B heap (4 segs, 5720 B unacked or unsent), cap 16384, for 1000 ms; dropping its advert batches[0m
+[0;32mI (80978) api_server: fd=53 send queue drained (6164 B) after 1150 ms[0m
+[0;33mW (81988) api_server: fd=53 send queue full: 7716 B heap (5 segs, 5727 B unacked or unsent), cap 16384, for 1000 ms; dropping its advert batches[0m
+[0;32mI (92418) liveness: probe target answered; armed[0m
+[0;33mW (100988) api_server: fd=53 send queue still full (7716 B) after 20000 ms; reaping[0m
+[0;32mI (100988) api_server: client disconnected (fd=53, id=3, peer=192.168.1.204, reason=send failed, remaining=1); releasing its BLE links[0m
+[0;32mI (104108) api_server: accepted fd=53 peer=192.168.1.204:49623[0m
+[0;32mI (104108) api_server: client connected (fd=53, id=4, total=2)[0m
+[0;33mW (108178) api_server: fd=53 send queue full: 6216 B heap (4 segs, 5720 B unacked or unsent), cap 16384, for 1000 ms; dropping its advert batches[0m
+[0;33mW (127178) api_server: fd=53 send queue still full (6216 B) after 20000 ms; reaping[0m
+[0;32mI (127178) api_server: client disconnected (fd=53, id=4, peer=192.168.1.204, reason=send failed, remaining=1); releasing its BLE links[0m
+[0;32mI (129278) api_server: accepted fd=54 peer=192.168.1.204:49899[0m
+[0;32mI (129278) api_server: client connected (fd=54, id=5, total=2)[0m
+[0;33mW (135018) api_server: fd=54 send queue full: 6228 B heap (4 segs, 5687 B unacked or unsent), cap 16384, for 1000 ms; dropping its advert batches[0m
+[0;32mI (135468) api_server: fd=54 send queue drained (6164 B) after 1450 ms[0m
+[0;33mW (136468) api_server: fd=54 send queue full: 7716 B heap (5 segs, 5741 B unacked or unsent), cap 16384, for 1000 ms; dropping its advert batches[0m
+[0;33mW (155468) api_server: fd=54 send queue still full (7716 B) after 20000 ms; reaping[0m
+[0;32mI (155468) api_server: client disconnected (fd=54, id=5, peer=192.168.1.204, reason=send failed, remaining=1); releasing its BLE links[0m
+[0;32mI (160418) api_server: accepted fd=53 peer=192.168.1.204:50233[0m
+[0;32mI (160418) api_server: client connected (fd=53, id=6, total=2)[0m
+[0;33mW (165278) api_server: fd=53 send queue full: 6224 B heap (4 segs, 5720 B unacked or unsent), cap 16384, for 1000 ms; dropping its advert batches[0m
+[0;33mW (184278) api_server: fd=53 send queue still full (6220 B) after 20000 ms; reaping[0m
+[0;32mI (184278) api_server: client disconnected (fd=53, id=6, peer=192.168.1.204, reason=send failed, remaining=1); releasing its BLE links[0m
+[0;32mI (187568) api_server: accepted fd=53 peer=192.168.1.204:50515[0m
+[0;32mI (187568) api_server: client connected (fd=53, id=7, total=2)[0m
+[0;33mW (191538) api_server: fd=53 send queue full: 6220 B heap (4 segs, 5720 B unacked or unsent), cap 16384, for 1000 ms; dropping its advert batches[0m
+[0;32mI (191988) api_server: fd=53 send queue drained (6144 B) after 1450 ms[0m
+[0;33mW (192988) api_server: fd=53 send queue full: 7696 B heap (5 segs, 5739 B unacked or unsent), cap 16384, for 1000 ms; dropping its advert batches[0m
+[0;33mW (211988) api_server: fd=53 send queue still full (7696 B) after 20000 ms; reaping[0m
+[0;32mI (211988) api_server: client disconnected (fd=53, id=7, peer=192.168.1.204, reason=send failed, remaining=1); releasing its BLE links[0m
+[0;32mI (212798) ble.conn: onDisconnect 80a9971de2c9 reason=534 owner=1[0m
+[0;33mW (213238) api_server: send fd=52 failed: errno=104[0m
+[0;32mI (213238) ble.scan: forwarding OFF[0m
+[0;32mI (213238) api_server: client disconnected (fd=52, id=1, peer=192.168.1.204, reason=closed by protocol, remaining=0); releasing its BLE links[0m
+[0;32mI (213258) ble.scan: forwarding OFF[0m

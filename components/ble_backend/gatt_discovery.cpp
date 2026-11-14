@@ -11,7 +11,9 @@
 #include "NimBLEUUID.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
 #include "oom_guard.h"
+#include "proxy_config.h"
 #include "pb_encode.h"
 
 #include <cstring>
@@ -154,6 +156,44 @@ void emit_error(uint32_t owner, uint64_t address, int32_t err) {
                    &encode_error, &ctx);
 }
 
+// Links whose last walk failed part-way. discoverAttributes() fills the
+// service list before it walks characteristics, so after such a failure the
+// list is non-empty but incomplete; without this mark the "list empty" test
+// would never look again and later handles would stay unknown until the
+// peer reconnects. Touched from several connection tasks. A stale entry
+// (the slot's NimBLEClient reconnected) only causes one extra fill_gaps.
+NimBLEClient *g_partial[proxy::MAX_CONNECTIONS] = {};
+portMUX_TYPE g_partial_mux = portMUX_INITIALIZER_UNLOCKED;
+
+void set_partial(NimBLEClient *c, bool partial) {
+  taskENTER_CRITICAL(&g_partial_mux);
+  bool done = false;
+  for (auto &p : g_partial) {
+    if (p == c) {
+      if (!partial) p = nullptr;
+      done = true;
+    }
+  }
+  if (partial && !done) {
+    for (auto &p : g_partial) {
+      if (p == nullptr) {
+        p = c;
+        break;
+      }
+    }
+  }
+  taskEXIT_CRITICAL(&g_partial_mux);
+}
+
+// Walk an empty cache. discoverAttributes() starts with deleteServices(),
+// which is safe only here: an empty list has no characteristics, so no
+// notify callbacks to lose and nothing the host task can be walking.
+bool walk_empty(NimBLEClient *client) {
+  const bool ok = client->discoverAttributes();
+  set_partial(client, !ok);
+  return ok;
+}
+
 // Look up the owner's link, walk its attribute table. On failure the error
 // reply is already sent; returns nullptr.
 NimBLEClient *discover(uint64_t address, uint32_t owner, Status *st) {
@@ -188,9 +228,21 @@ NimBLEClient *discover(uint64_t address, uint32_t owner, Status *st) {
     return nullptr;
   }
 
-  // Force a fresh walk so cached state from a prior session is rebuilt.
-  // discoverAttributes() walks services → characteristics → descriptors.
-  if (!client->discoverAttributes()) {
+  // Every connect clears the cache, so a non-empty one belongs to this
+  // connection: answer from it (filling gaps after a partial walk). Never
+  // rediscover over it; see run() in the header.
+  if (!client->getServices(/*refresh=*/false).empty()) {
+    if (is_partial(client)) {
+      ESP_LOGI(TAG, "%012llx: filling gaps of a partial discovery",
+               static_cast<unsigned long long>(address));
+      fill_gaps(client);
+    } else {
+      ESP_LOGI(TAG, "%012llx: services from cache",
+               static_cast<unsigned long long>(address));
+    }
+    return client;
+  }
+  if (!walk_empty(client)) {
     ESP_LOGW(TAG, "discoverAttributes failed for %012llx",
              static_cast<unsigned long long>(address));
     emit_error(owner, address, /*err=*/-2);
@@ -306,6 +358,41 @@ Status run(uint64_t address, uint32_t owner) {
                    proxyapi::MSG_BLUETOOTH_GATT_GET_SERVICES_DONE_RESPONSE,
                    &encode_done, &d);
   return Status::Ok;
+}
+
+bool ensure_discovered(NimBLEClient *client) {
+  if (!client->getServices(/*refresh=*/false).empty()) return true;
+  ESP_LOGI(TAG, "%s: no GetServices since connect; discovering on demand",
+           client->getPeerAddress().toString().c_str());
+  const bool ok = walk_empty(client);
+  if (!ok) {
+    ESP_LOGW(TAG, "on-demand discovery failed part-way; will fill gaps on "
+             "lookup misses");
+  }
+  return ok;
+}
+
+bool is_partial(NimBLEClient *client) {
+  bool found = false;
+  taskENTER_CRITICAL(&g_partial_mux);
+  for (auto *p : g_partial) found = found || p == client;
+  taskEXIT_CRITICAL(&g_partial_mux);
+  return found;
+}
+
+// Refreshing an empty vector deletes nothing; new entries are appended on
+// the host task, the same task that walks them for notifications.
+void fill_gaps(NimBLEClient *client) {
+  for (auto *svc : client->getServices(/*refresh=*/false)) {
+    if (svc->getCharacteristics(/*refresh=*/false).empty()) {
+      svc->getCharacteristics(/*refresh=*/true);
+    }
+    for (auto *chr : svc->getCharacteristics(/*refresh=*/false)) {
+      if (chr->getDescriptors(/*refresh=*/false).empty()) {
+        chr->getDescriptors(/*refresh=*/true);
+      }
+    }
+  }
 }
 
 }  // namespace ble_backend::gatt_discovery

@@ -4,7 +4,8 @@
 // Runs the real api_server on lwIP loopback (no WiFi, no BLE in QEMU), makes
 // the heap actually run out by allocating it away ("hog"), and checks that
 // the GetServices path and the API send path return errors instead of
-// aborting. Every step prints `OOM-SELFTEST <name>: PASS|FAIL <detail>`; the
+// aborting (a queued frame waits in the TX ring for the heap, and its
+// client is reaped if the heap does not come back within 20 s). Every step prints `OOM-SELFTEST <name>: PASS|FAIL <detail>`; the
 // last step deliberately exhausts the heap under a throwing `new` and must
 // end in the "OOM: operator new" abort.
 
@@ -284,25 +285,50 @@ void step_send_fails() {
   a.sin_port = htons(proxy::API_PORT);
   a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   ::connect(fd2, reinterpret_cast<sockaddr *>(&a), sizeof(a));
-  vTaskDelay(pdMS_TO_TICKS(200));
+  // Idle past the 20 s deadline first: api_tx makes no passes while every
+  // ring is empty, so the stall clock must start when data arrives, not at
+  // the last progress before the idle (that reaped at once).
+  vTaskDelay(pdMS_TO_TICKS(21000));
+  const api_server::TxqStats s0 = api_server::txq_stats();
+  // The frame is only queued (the ring is static, no heap needed); api_tx
+  // cannot get it into lwIP while the heap is gone, and after 20 s without
+  // progress it reaps client 1. Client 2 has nothing queued and stays.
   hog(0);
   const int64_t t0 = esp_timer_get_time();
-  const bool sent = api_send(-78);
+  const bool queued = api_send(-78);
   const int64_t ms = (esp_timer_get_time() - t0) / 1000;
+  // At ~15 s the frame has moved nothing, but the deadline is not up.
+  vTaskDelay(pdMS_TO_TICKS(15000));
+  const api_server::TxqStats sm = api_server::txq_stats();
+  bool c1_mid = false;
+  for (uint8_t i = 0; i < sm.n_clients; ++i) c1_mid = c1_mid || sm.clients[i].id == 1;
+  const bool kept_mid = c1_mid && sm.reaps == s0.reaps && sm.ring_reaps == s0.ring_reaps;
+  vTaskDelay(pdMS_TO_TICKS(7000));
   unhog();
-  // Reaped: the server shut the socket down (RST); our recv sees it.
-  set_rcv_timeout(5000);
+  vTaskDelay(pdMS_TO_TICKS(500));
+  // Reaped: the server shut the socket down (RST); our recv sees it, or
+  // times out if the RST itself found no heap.
+  set_rcv_timeout(3000);
   uint8_t b;
   const ssize_t r = ::recv(g_fd, &b, 1, 0);
   const int e = errno;
   vTaskDelay(pdMS_TO_TICKS(500));
+  const api_server::TxqStats s1 = api_server::txq_stats();
+  bool c1 = false;
+  for (uint8_t i = 0; i < s1.n_clients; ++i) c1 = c1 || s1.clients[i].id == 1;
   result("send_heap_exhausted",
-         !sent && r <= 0 && api_server::has_active_client(),
-         "send_to %s after %lld ms; client 1 recv=%d errno=%d (reaped); "
-         "client 2 %s",
-         sent ? "true" : "false", static_cast<long long>(ms),
-         static_cast<int>(r), r < 0 ? e : 0,
-         api_server::has_active_client() ? "still connected" : "gone");
+         queued && ms < 100 && kept_mid && r <= 0 && !c1 &&
+             s1.n_clients == 1 && s1.reaps == s0.reaps + 1,
+         "after 21 s idle: send_to queued=%s in %lld ms; at 15 s client 1 %s; "
+         "after 22 s: client 1 %s (recv=%d errno=%d), stall reaps %lu->%lu; "
+         "clients %u",
+         queued ? "true" : "false", static_cast<long long>(ms),
+         kept_mid ? "kept" : "already reaped",
+         c1 ? "still there" : "reaped", static_cast<int>(r), r < 0 ? e : 0,
+         static_cast<unsigned long>(s0.reaps), static_cast<unsigned long>(s1.reaps),
+         s1.n_clients);
+  // fd2 stays open: see above.
+  (void)fd2;
 }
 
 }  // namespace
@@ -335,6 +361,12 @@ void run() {
     step_throwing_new_recovers();
     step_send_recovers();
     step_send_fails();
+  }
+  {
+    // api_tx ran its "no memory" retry path above (with its log line).
+    TaskHandle_t tx = xTaskGetHandle("api_tx");
+    std::printf("OOM-MEASURE stack_free_min[api_tx] %u\n",
+                tx ? static_cast<unsigned>(uxTaskGetStackHighWaterMark(tx)) : 0u);
   }
   std::printf("OOM-SELFTEST summary: %d failure(s); oom count %lu; free %u\n",
               g_fail, static_cast<unsigned long>(oom_guard::count()),
