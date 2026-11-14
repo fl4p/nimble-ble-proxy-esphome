@@ -3,8 +3,9 @@
 
 Drives a *live* device over HTTP (the dashboard endpoints) and over the
 WebSocket bridge at ws://<ip>/api (NBP_WS_PROXY). Covers the runtime-tunable
-settings and their persistence, the ls/pdcpu interaction, input validation,
-and the esphome-over-WebSocket handshake + round-trip.
+settings and their persistence, the ls/pdcpu interaction, BLE bonding
+config, input validation, and the esphome-over-WebSocket handshake +
+round-trip.
 
 Stdlib only (urllib + socket) — no pip deps.
 
@@ -47,8 +48,24 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 # ---- HTTP helpers ---------------------------------------------------------
 
-def http(method: str, path: str, timeout: float = 5.0):
+# State-changing POSTs that the firmware gates on a CSRF confirm header.
+# Every POST needs X-NBP-Confirm (include/http_confirm.h); these older
+# routes need their own header instead.
+CONFIRM_HEADERS = (
+    ("/nat", "X-Nat-Confirm"),
+    ("/portmap", "X-Nat-Confirm"),
+    ("/bond", "X-Bond-Confirm"),
+)
+
+
+def http(method: str, path: str, timeout: float = 5.0, confirm: bool = True):
     req = urllib.request.Request(f"http://{BASE}{path}", method=method)
+    if method == "POST" and confirm:
+        req.add_header("X-NBP-Confirm", "yes")
+        route = path.split("?", 1)[0]
+        for prefix, hdr in CONFIRM_HEADERS:
+            if route == prefix:
+                req.add_header(hdr, "yes")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read().decode()
@@ -92,7 +109,8 @@ def _recvn(sock: socket.socket, n: int) -> bytes:
     return buf
 
 
-def ws_connect(ip: str, path: str = "/api", timeout: float = 5.0) -> socket.socket:
+def ws_connect(ip: str, path: str = "/api", timeout: float = 5.0,
+               origin: str | None = None) -> socket.socket:
     sock = socket.create_connection((ip, 80), timeout=timeout)
     sock.settimeout(timeout)
     key = "dGhlIHNhbXBsZSBub25jZQ=="
@@ -102,7 +120,8 @@ def ws_connect(ip: str, path: str = "/api", timeout: float = 5.0) -> socket.sock
         "Connection: Upgrade\r\n"
         "Upgrade: websocket\r\n"
         "Sec-WebSocket-Version: 13\r\n"
-        f"Sec-WebSocket-Key: {key}\r\n\r\n"
+        + (f"Origin: {origin}\r\n" if origin is not None else "")
+        + f"Sec-WebSocket-Key: {key}\r\n\r\n"
     )
     sock.sendall(req.encode())
     # Read response headers (up to blank line).
@@ -281,6 +300,85 @@ def test_wifips_roundtrip():
     check("wifips li=0 (PS off)", f.get("li") == 0, str(f))
 
 
+def test_bond_roundtrip():
+    """/bond: passkey, auto-bond list add/remove, input validation.
+
+    Skipped on firmware built without CONFIG_NBP_SMP (the endpoint 404s).
+    Uses a locally-administered test MAC that no real peer will carry, and
+    always removes it again — the list is capped at 4 entries.
+    """
+    print("[bond: passkey + auto-bond list]")
+    st, _ = http("GET", "/bond")
+    if st == 404:
+        check("skipped: /bond not served (built without CONFIG_NBP_SMP)", True)
+        return
+
+    before = get_json("/bond")
+    original_pin = before.get("passkey")
+    check("bond JSON has passkey", isinstance(original_pin, int), str(before))
+    check("bond JSON has auto list", isinstance(before.get("auto"), list),
+          str(before))
+    check("bond JSON has bonded list", isinstance(before.get("bonded"), list),
+          str(before))
+    # ble_off=true means the NimBLE host was deinited by POST
+    # /txpower?ble=off, so `bonded` is unreadable rather than empty.
+    if before.get("ble_off"):
+        check("skipped the rest: BLE is powered off, reboot to re-test", True)
+        return
+
+    st, _ = http("POST", "/bond?passkey=424242", confirm=False)
+    check("POST /bond without X-Bond-Confirm is refused", st == 400,
+          f"status {st}")
+    check("refused POST /bond left the passkey alone",
+          get_json("/bond")["passkey"] == original_pin)
+    post("/bond?passkey=424242")
+    f = get_json("/bond")
+    check("passkey set to 424242", f.get("passkey") == 424242, str(f))
+    post(f"/bond?passkey={original_pin}")
+    f = get_json("/bond")
+    check("passkey restored", f.get("passkey") == original_pin, str(f))
+
+    test_mac = "02:00:00:aa:bb:cc"
+    post(f"/bond?add={test_mac}")
+    f = get_json("/bond")
+    check("auto-bond add landed", test_mac in [a.lower() for a in f["auto"]],
+          str(f))
+    # Adding twice must not duplicate or fail.
+    post(f"/bond?add={test_mac}")
+    f = get_json("/bond")
+    check("auto-bond add is idempotent",
+          [a.lower() for a in f["auto"]].count(test_mac) == 1, str(f))
+    post(f"/bond?remove={test_mac}")
+    f = get_json("/bond")
+    check("auto-bond remove landed",
+          test_mac not in [a.lower() for a in f["auto"]], str(f))
+
+    st, body = post("/bond?add=nonsense")
+    check("malformed MAC rejected (4xx)", 400 <= st < 500, f"got {st}: {body}")
+    st, body = post("/bond?passkey=1234567")
+    check("out-of-range passkey rejected (4xx)", 400 <= st < 500,
+          f"got {st}: {body}")
+    st, body = post("/bond")
+    check("empty bond POST rejected (4xx)", 400 <= st < 500,
+          f"got {st}: {body}")
+    st, body = post("/bond?unbond=02:00:00:de:ad:00")
+    check("unbond of an unbonded address rejected (4xx)", 400 <= st < 500,
+          f"got {st}: {body}")
+    st, body = post("/bond?passkey=abc")
+    check("non-numeric passkey rejected (4xx)", 400 <= st < 500,
+          f"got {st}: {body}")
+
+    # A request that ends in a 400 must not have applied any earlier
+    # parameter — notably it must not have changed the stored passkey that
+    # every outbound pairing uses.
+    st, _ = post(f"/bond?passkey=999999&add=nonsense")
+    f = get_json("/bond")
+    check("rejected request left the passkey untouched",
+          400 <= st < 500 and f.get("passkey") == original_pin, str(f))
+    check("rejected request left the auto-bond list untouched",
+          test_mac not in [a.lower() for a in f["auto"]], str(f))
+
+
 def test_ws_bridge():
     print("[websocket bridge: handshake + esphome round-trip]")
     try:
@@ -306,6 +404,33 @@ def test_ws_bridge():
               f"types={sorted(types)}")
     finally:
         sock.close()
+
+
+def test_csrf_guards():
+    print("[CSRF guards: confirm header, WebSocket Origin]")
+    before = get_json("/level")
+    lvl = before.get("nimble")
+    st, body = http("POST", f"/level?nimble={lvl}", confirm=False)
+    check("POST /level without X-NBP-Confirm is refused", st == 400,
+          f"got {st}: {body}")
+    st, body = http("POST", f"/level?nimble={lvl}")
+    check("POST /level with X-NBP-Confirm is accepted", st == 200,
+          f"got {st}: {body}")
+
+    s0 = get_json("/stats.json").get("ws_origin_refused")
+    for origin, want in ((f"http://{BASE}", True), (None, True),
+                         ("http://evil.example", False), ("null", False)):
+        try:
+            sock = ws_connect(BASE, origin=origin)
+            sock.close()
+            ok = True
+        except Exception:
+            ok = False
+        check(f"WS /api with Origin {origin!r} -> "
+              f"{'101' if want else 'refused'}", ok == want)
+    s1 = get_json("/stats.json").get("ws_origin_refused")
+    check("ws_origin_refused counts the two refused handshakes",
+          s0 is not None and s1 == s0 + 2, f"{s0} -> {s1}")
 
 
 def test_cpufreq_persistence():
@@ -349,7 +474,9 @@ def main() -> int:
     test_txpower_roundtrip()
     test_ble_txpower()
     test_wifips_roundtrip()
+    test_bond_roundtrip()
     test_ws_bridge()
+    test_csrf_guards()
     if args.reboot:
         test_cpufreq_persistence()
         test_ble_off_reboot()

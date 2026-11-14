@@ -18,7 +18,8 @@
   `POST /wifips?li=0` and `POST /cpufreq?mhz=240&ls=0`, or rely on the
   `/log` web-console endpoint while keeping the page polling. Config
   endpoints (`/wifips`, `/cpufreq`, `/txpower`, …) only apply via `POST`;
-  a bare GET just reads.
+  a bare GET just reads. Every such `POST` needs `-H 'X-NBP-Confirm: yes'`
+  (400 without it), see "CSRF guards" below.
 
 - **NAT builds are heap- and coex-bound — don't over-provision NimBLE.**
   This S3 has *no PSRAM*, so WiFi (APSTA) + NimBLE + httpd + NAPT all share
@@ -141,6 +142,12 @@
 
 ## OTA over a loaded device — quiesce the radio during the upload
 
+- **OTA command:** `curl -H 'X-NBP-Confirm: yes' --data-binary @build/nimble_ble_proxy.bin
+  http://<device>/update`. Without the header the device answers 400
+  (`needs header X-NBP-Confirm: yes`) and writes nothing; curl still sends
+  the whole body first, httpd discards it. Firmware older than the guard
+  ignores the header, so the same command works on every version.
+
 - **A firmware upload competes for the single radio and gets starved.** On a
   busy NAT build (`/update` POST of ~1.3 MB) the SoftAP forward path + BLE scan
   + coex leave so little airtime for the upload's TCP stream that it crawls to a
@@ -227,6 +234,51 @@
   this natively (`CONFIG_LWIP_DHCPS_REPORT_CLIENT_HOSTNAME`) — prefer that
   if/when the project moves to IDF 6 and drop the hook.
 
+## Static SoftAP DHCP leases — same hook, plus a second parse
+
+- IDF's DHCP server has no reservations: it assigns in join order, so the
+  NAT S3's fixed-IP port-forwards (fry/flat telnet + scope) pointed at the
+  wrong board after reboots (2026-11-13: flat got .2, fry .3/.4). Leases
+  are configured with `POST /nat?lease_mac=…&lease_ip=…` (`&lease_del=1`
+  removes; header `X-Nat-Confirm: yes`, see Crash capture), persisted in NVS `nat`/`leases`, listed in `GET /nat` `leases`.
+  The .231 table: fry `70:04:1d:a6:ab:30` → .2, flat `70:04:1d:a4:ea:34` →
+  .4 (WiFi STA MAC = BLE MAC − 2 on both, checked against the lease table).
+- Mechanism (`components/dhcps_hostname/dhcps_static.c`): the server first
+  looks the client's MAC up in its private IP-sorted lease list and the
+  allocator skips every IP in that list, so an always-present entry
+  (static MAC, static IP, lease timer `UINT32_MAX`) IS a static lease. The
+  `LWIP_HOOK_DHCPS_POST_STATE` macro expands inside `handle_dhcp()` and
+  uses its locals `dhcps`/`tlen` and the file-static `parse_msg()`: after
+  each parse it pins the entries (dropping a static MAC's other entry and
+  anyone else holding a reserved IP) and, if this packet was answered from
+  the unpinned list, parses it once more. Pinning per packet also survives
+  `dhcps_stop/start` (every `set_ap_dns()`), RELEASE and expiry.
+- **IDF-coupled**: mirrors the private `list_node`, relies on `struct
+  dhcps_pool` and the local names `dhcps`, `tlen`, `parse_msg` (a rename is
+  a compile error, not a silent no-op). Same in IDF 5.5 and 6.0.3. Verify
+  with `nm …/dhcpserver.c.obj | grep nbp_dhcps_static` (`U`).
+- A change deauths associated clients whose address now disagrees
+  (`kick_mismatched`), else they keep it until renewal (half the 120 min
+  lease). The IP must lie in the derived pool (.2 .. .101).
+- **QEMU:** `idf.py -B build-qemu-dhcps -DIDF_TARGET=esp32s3
+  -DNBP_DHCPS_SELFTEST=1 build`, then `… qemu` (IDF 6.0.3). Runs the real
+  server on lwIP loopback and prints `DHCPS-SELFTEST <step>: PASS|FAIL`
+  (join order, INIT-REBOOT NAK, renew of a reserved IP, server restart,
+  RELEASE, table cleared).
+
+## WiFi disconnect reasons (`wifi_sta`)
+
+- `WIFI_EVENT_STA_DISCONNECTED` is logged under tag `wifi_ev` (the `wifi`
+  tag is held at WARN for the driver) with reason code + name, the RSSI the
+  event carries and the BSSID; `STA back after N ms (M failed reconnect
+  attempts)` on the next IP. Failed retries log only on a reason change and
+  every 10th attempt. SoftAP `AP_STADISCONNECTED` logs reason + MAC, and
+  joins log the MAC.
+- `/stats.json`: `sta_disc`, `sta_disc_reason`, `sta_disc_rssi`,
+  `sta_disc_down_ms`, `ap_disc`, `ap_disc_reason`, `ap_disc_mac`. `GET
+  /wifidisc`: the last 8 events with names and uptime stamps (160 B ring),
+  since the 4 KB `/log` ring rolls over within minutes.
+
 ## NAPT table size — lwIP asserts if it can't allocate it (ESP32-C3 boot loop)
 
 - On the first `esp_netif_napt_enable`, lwIP `mem_calloc`s the whole NAPT
@@ -305,6 +357,105 @@
   materialise the `default y`. Watch for this whenever adding a Kconfig symbol
   to a configured tree.
 
+## BLE bonding (NBP_SMP) — two paths, and why the second one exists
+
+- The proxy can bond as a **central**: `NimBLEDevice::setSecurityAuth(bond,
+  mitm, sc)` + `IO_CAP=KEYBOARD_ONLY`, with a static passkey injected from
+  `ClientCb::onPassKeyEntry` (`/bond?passkey=`, NVS `stats/ble_passkey`).
+  `CONFIG_BT_NIMBLE_NVS_PERSIST` keeps the resulting bond across reboots.
+- **Path 1 — HA asks.** `BT_PROXY_FEATURE_FLAGS` now sets bit 3 (`PAIRING`,
+  gated on `CONFIG_NBP_SMP`) and bit 4 (`CACHE_CLEARING`), so
+  `bleak-esphome` lets `BleakClient.pair()` through as
+  `BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR`. `bt_handlers` answers with
+  `BluetoothDevicePairingResponse` (85) / `…UnpairingResponse` (86) /
+  `…ClearCacheResponse` (88). CLEAR_CACHE is a truthful no-op — we
+  re-discover on every connect, so "cache cleared" is already the case.
+  **The ESPHome protocol carries no passkey**, which is the one real gap
+  vs a local BlueZ adapter: the PIN has to be on the device beforehand.
+- **Path 2 — the auto-bond list, and it is the one that matters.** HA only
+  sends PAIR *after* a successful connect **and** service discovery. Peers
+  that refuse discovery on an unauthenticated link (Felicity/SolarB packs,
+  batmon-ha#415) drop the connection before that, so path 1 can never
+  trigger for exactly the devices that need it. For an address on the
+  auto-bond list (`/bond?add=MAC`, NVS `stats/auto_bond`, cap
+  `AUTO_BOND_MAX` = `CONFIG_BT_NIMBLE_MAX_BONDS` = 4) `ClientCb::onConnect`
+  **withholds the ConnectionResponse**, runs SMP, and only then tells HA the
+  link is up — so discovery happens over an encrypted link. A failed bond
+  still reports `connected=true` (the link is real, just unauthenticated):
+  that keeps HA's retry behaviour identical to a build without the list.
+- **`secureConnection()` blocks with no timeout of its own** (it waits for
+  `BLE_GAP_EVENT_ENC_CHANGE` or a disconnect — bounded in practice by the
+  30 s SMP timeout). It must not run on the api_server client task (HA's
+  pings would stall) nor on the NimBLE host task (which delivers the very
+  event it waits for), so it runs on a lazily-created `ble_bond` worker
+  (3 KB stack, spawned on first use, deletes itself after 30 s idle, so the
+  stack is heap only while bonding happens; creation, enqueue and idle exit
+  are serialised by `g_bond_start`). A failed `xTaskCreate` falls back to
+  reporting the link unauthenticated / answering PAIR with -102. The async variant
+  (`secureConnection(true)`) is NOT used: NimBLE-cpp only calls
+  `onAuthenticationComplete` on **success**, so async gives no failure edge.
+- **Lock ordering: never call into NimBLE while holding `connection.cpp`'s
+  `g_mutex`.** `getConnInfo()`/`ble_gap_conn_find` take the `ble_hs` lock,
+  and the host task calls our callbacks; taking them in the other order
+  inverts. `onConnect` therefore reads `getMTU()` + `getConnInfo()` *before*
+  the mutex, and `pair()` snapshots the client pointer, releases, then asks.
+- **Slot recycling is handled with a generation counter.** A bonding job
+  carries `{slot, gen}`; `alloc_locked()` bumps `Slot::gen`. A job that
+  finishes after the peer dropped sees the mismatch (or `state != Connected`)
+  and stays silent, so HA never gets two connect results for one attempt —
+  `onDisconnect` already sent `connected=false` in that case.
+- **Ownership (merged onto per-client links, 2026-11).** PAIR is
+  owner-only like every other per-link request (`pair(addr, owner, cb)`;
+  another client's link answers `paired=false, error=-102`), and the
+  pairing, unpairing and clear-cache responses go to the requester alone
+  (`send_to`). The auto-bond's deferred connect result goes to the slot's
+  owner at finish time; if the owner left, `release_owner` has already moved
+  the slot to Disconnecting and the job stays silent. While a result is
+  withheld, a re-CONNECT from the owner answers "in progress"
+  (`OwnInProgress`), not `connected=true`. UNPAIR has no owner check: the
+  bond store is device-wide. When a job finishes on a slot that was freed
+  under it, `bond_finish` fires the free-change callback, because only then
+  does the slot count as free again. No connection slot was added: bonding
+  runs on the proxy's 2 existing slots.
+- **RAM cost** (IDF 6.0.3, `idf.py size` vs main 3f5d6ad): +64 B static
+  `.bss` on both S3 (DIRAM) and C3 (DRAM). NBP_SMP's NimBLE SM/store was
+  already on in main, so the feature adds no NimBLE RAM. Heap: the job
+  queue and start mutex (~0.3 KB) from `connection::init()`; the worker
+  stack (3 KB + TCB) only while a bond is in progress and for 30 s after.
+  Under the ~2 KB threshold, so not Kconfig-gated beyond `NBP_SMP`.
+- **`POST /bond` needs `X-Bond-Confirm: yes`** over HTTP (same CSRF guard as
+  `X-Nat-Confirm`); the dashboard and `scripts/test_settings.py` send it. The
+  BLE dashboard transport carries no headers and is not gated.
+- `NimBLEDevice::isBonded()/deleteBond()` match on the **full NimBLEAddress
+  including type**, but HA only hands us 48 bits (and the adv address type
+  isn't necessarily the identity type in the store). `find_bond()` enumerates
+  `getNumBonds()`/`getBondedAddress(i)` and compares the 48 bits instead.
+- **The bond store is a host facility — guard every read on
+  `ble_backend::powered_off()`.** `POST /txpower?ble=off` does a full
+  `NimBLEDevice::deinit(true)`, so `getNumBonds()` afterwards walks a
+  torn-down `ble_hs`. The dashboard polls `/bond` every 5 s, which makes this
+  a *reliable* abort rather than a rare one. `find_bond`, `bonded_addresses`
+  and `pair()` all check first; `/bond` surfaces `"ble_off":true` so the panel
+  can say why the list is empty instead of implying the keys were deleted.
+  (This is the same guard `build_txpower_json` already used — the pattern is
+  called out in `ble_backend.h`'s comment on `powered_off()`.)
+- **A slot with a bonding job in flight is not allocatable.** The worker
+  holds the slot's `NimBLEClient*` across `secureConnection()`, and slots
+  *reuse* their client object — so re-tenanting the slot in that window would
+  run SMP against the wrong peer. `alloc_locked()`/`free_slots()` share
+  `slot_available_locked()` (`state == Free && !bond_busy`), and
+  `onDisconnect`/`onConnectFail` deliberately clear only `bond_holds_connect`,
+  leaving `bond_busy` to `bond_finish()`. The generation counter alone does
+  *not* cover this: it detects a recycled slot after the fact, but by then
+  SMP has already run on the wrong link.
+- **Sending the deferred connect result is not atomic with the state check.**
+  The peer can drop between `bond_finish()` observing `Connected` and the
+  worker's `connect_cb(connected=true)` — and `onDisconnect` would then have
+  pushed its `connected=false` *first*, leaving HA holding a link that no
+  longer exists. The worker re-checks with `job_link_live()` after the send
+  and emits a corrective `connected=false`. A duplicate disconnect is
+  harmless; a phantom connection is not.
+
 ## WebSocket bridge (NBP_WS_PROXY)
 
 - Gated off by default. When on, `GET ws://<host>/api` tunnels the plaintext
@@ -312,6 +463,53 @@
   A browser JS client must treat inbound WS data as a **continuous ESPHome byte
   stream** (device→browser is chunked at arbitrary boundaries; one WS frame ≠
   one ESPHome message).
+- **The handshake checks `Origin` (2026-11-13).** Browsers apply no CORS to
+  WebSockets, so before it any page open on the LAN could open the bridge and
+  drive GATT writes and PAIR/UNPAIR. Rules (`components/ws_proxy/origin_check.h`):
+  no/empty `Origin` → accept (aioesphomeapi, curl); `Origin` host[:port] ==
+  `Host` → accept (on-device dashboard; default port and case ignored);
+  exact entry in `CONFIG_NBP_WS_ORIGIN_ALLOWLIST` (default empty — the
+  dashboard does not use the bridge, no off-device page does) → accept;
+  anything else, `null` included, → 403 before the 101, `ws_origin_refused`
+  in `/stats.json`. UNPAIR over the native TCP API with no ownership check is
+  stock ESPHome behaviour and stays. Not covered: DNS rebinding.
+- **esp_http_server no longer calls the URI handler for the handshake GET**
+  (IDF commit 222d470312, 2026-02; in release/v5.5 and v6.0.3, not in tag
+  v5.5.3). The old `if (req->method == HTTP_GET)` set-up branch therefore
+  never ran: the first data frame found no session and closed the socket, so
+  the bridge was dead on current IDF builds (read from the IDF source, not
+  run on hardware). The checks now live in
+  `ws_pre_handshake_cb` (Origin, session cap → 503) and the bridge set-up in
+  `ws_post_handshake_cb`; NBP_WS_PROXY selects both
+  `HTTPD_WS_{PRE,POST}_HANDSHAKE_CB_SUPPORT` and ws_proxy.cpp `#error`s
+  without them. A refusal returns non-OK from the pre-callback, so nothing is
+  allocated and httpd closes the socket.
+- **QEMU test:** `idf.py -B build-qemu-ws -DIDF_TARGET=esp32s3
+  -DNBP_WS_SELFTEST=1 -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.wstest"
+  build`, then `… qemu`. Prints `WS-SELFTEST <step>: PASS|FAIL`: forged,
+  null, look-alike and port-mismatch origins get 403 and close; no-origin and
+  same-origin get 101 and a real HelloResponse through the bridge; the third
+  bridge gets 503; 90 refused handshakes cost no heap or task; POST without
+  `X-NBP-Confirm` gets 400. Host test of the policy alone:
+  `components/ws_proxy/host_test/test_origin_check.cpp` (build line inside).
+
+## CSRF guards on the HTTP surface (2026-11-13)
+
+- **Every state-changing `POST` needs a non-safelisted header.** `/level`,
+  `/txpower`, `/cpufreq`, `/scan`, `/advitvl`, `/wifips`, `/hostname`,
+  `/passkey`, `/liveness`, `/trace`, `/reboot`, `/clone`, `/update` need
+  `X-NBP-Confirm: yes` (`include/http_confirm.h`, one shared header for all
+  new guards); `/nat`, `/portmap` (`X-Nat-Confirm`), `/bond`
+  (`X-Bond-Confirm`), `/crash`, `/crash-test` (`X-Crash-Confirm`) keep their
+  older headers. A cross-origin page cannot send a custom header without a
+  preflight and httpd answers no `OPTIONS`. Not authentication.
+- Callers that send it: `web/index.html` `confirmHeaders()` (every POST),
+  `scripts/test_settings.py` `http()`, `scripts/ant-probe/capture_*.py`. The
+  BLE transport (`ble_httpd`) carries no headers and is not gated.
+- **Left unguarded:** `POST /wifi` on the SoftAP provisioning httpd (open AP,
+  plain HTML form for JS-less captive-portal views; anyone on that AP owns
+  the device anyway) and the test-only raw-socket `/bench`
+  (`CONFIG_NBP_BENCH`, discards the body).
 
 ## ESP-IDF workflow (for the agent)
 
@@ -511,6 +709,11 @@
   crash-test). It is not CORS-safelisted and the server answers no preflight,
   so a page on another origin cannot fire them from a browser. It is not
   authentication: anyone on the LAN can still send it.
+- **The same guard on the NAT router (2026-11-13): every `POST /nat`
+  (enable, AP creds, static leases) and `POST /portmap` needs `X-Nat-Confirm:
+  yes`**, else 400. A lease change deauths fry/flat, so a drive-by no-cors
+  fetch from any LAN page must not reach it. The dashboard's `apiText()`
+  adds the header for those two paths; `ble_httpd` does not route them.
 - **`POST /crash-test?kind=null|abort` is compiled out by default**
   (`CONFIG_NBP_CRASH_TEST` default n since 2026-11-12). For a test build use
   `-DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.crashtest"`.

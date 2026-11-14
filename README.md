@@ -18,6 +18,7 @@ Specifically it is or can be:
 * BLE scanner: decodes BTHome enconded advertisement packages and looks up vendor detaisls
 * SoftAP NAT router with port-mappings
 * Many energy saving knobs to explore the power saving capabilities of an esp32/s3 chip
+* Up to 4 API client connections (stock esphome proxy firmware supports only 1)
 * Boilerplate for any coex WiFi/Bluetooth projects with web-interface
 
 ## Why
@@ -53,13 +54,18 @@ client accepts the device as a Bluetooth proxy:
     - GATT connect / disconnect with MTU exchange.
     - GATT service / characteristic / descriptor discovery (chunked).
     - GATT read / write / notify (with CCCD subscription).
-- **Feature flags** advertised: `PASSIVE_SCAN | ACTIVE_CONNECTIONS | REMOTE_CACHING | RAW_ADVERTISEMENTS` (`0x27`).
+    - Pairing / unpairing (`BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR` / `UNPAIR`,
+      `CONFIG_NBP_SMP`) and a no-op `CLEAR_CACHE` — see
+      [**Bonding**](#bonding) below.
+- **Feature flags** advertised: `PASSIVE_SCAN | ACTIVE_CONNECTIONS |
+  REMOTE_CACHING | PAIRING | CACHE_CLEARING | RAW_ADVERTISEMENTS` (`0x3f`;
+  `PAIRING` drops out at `0x37` when built without `CONFIG_NBP_SMP`).
 - **mDNS** — announces `_esphomelib._tcp` with the TXT records HA's discovery
   flow expects (`platform=ESP32`, `network=wifi`, `mac=…`, `version=…`, etc.).
 - **9 concurrent BLE connections**, up to 4 concurrent API clients (e.g. HA
   plus a CLI smoke test at the same time).
-- **HTTP OTA** on port 80 — `POST /update` writes the inactive OTA slot via
-  `esp_ota_*` and reboots into it.
+- **HTTP OTA** on port 80 — `POST /update` (header `X-NBP-Confirm: yes`)
+  writes the inactive OTA slot via `esp_ota_*` and reboots into it.
 - **Optional clone mode** (`CONFIG_NBP_CLONE`) — mirror one BLE peripheral
   as a local GATT server so multiple centrals (HA + a vendor app) share one
   upstream link. Full spec in [`docs/clone.md`](docs/clone.md).
@@ -67,7 +73,8 @@ client accepts the device as a Bluetooth proxy:
   live charts (BLE activity, CPU + chip-temperature), a devices-seen table
   with one-click clone, a streaming log console, and tunables for CPU
   frequency, WiFi/BLE TX power, BLE scan duty, BLE advertising interval,
-  WiFi power-save listen interval, device hostname, and SMP passkey. Full
+  WiFi power-save listen interval, device hostname, and BLE bonding
+  (passkey, auto-bond list, stored bonds). Full
   spec in [`docs/web-ui.md`](docs/web-ui.md).
 - **BLE-side HTTP transport** (`CONFIG_NBP_BLE_HTTPD`) — same dashboard,
   same endpoints, reachable via a GATT request/response service when WiFi
@@ -75,10 +82,44 @@ client accepts the device as a Bluetooth proxy:
 
 **Out of scope** (by design): sensors, switches, lights, voice assistant,
 Noise encryption, password auth (deprecated in ESPHome 2026.1), bonding
-replication across clones, cache management. HA never asks for these
-because the feature flags don't advertise them. SMP / static-passkey
-pairing for paired upstream peripherals (e.g. Victron SmartShunt) is in
-scope under `CONFIG_NBP_SMP`.
+replication across clones. HA never asks for these because the feature
+flags don't advertise them.
+
+## Bonding
+
+Some BLE peripherals refuse to serve GATT on an unauthenticated link.
+The proxy can bond with them, using NimBLE's Security Manager
+(`CONFIG_NBP_SMP`, default on) and a static passkey held on the device.
+There are two ways in, because they solve different failure modes:
+
+**On request, from Home Assistant.** With the `PAIRING` feature flag
+advertised, `bleak-esphome` lets `BleakClient.pair()` through as a
+`BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR`; the proxy runs SMP on the live link
+and answers with `BluetoothDevicePairingResponse`. `UNPAIR` deletes the
+stored keys. The ESPHome protocol carries no passkey, so a peer that asks
+for one gets whatever `POST /bond?passkey=NNNNNN` last stored (default
+`123456`) — set it before pairing.
+
+**Automatically, on connect.** The PAIR request above can only arrive
+after HA has connected *and* discovered services. Peers that drop the
+link during discovery unless bonded — Felicity / SolarB packs are the
+known case — never get that far. For those, put the address on the
+**auto-bond list**: the proxy then runs SMP as soon as the GAP connect
+completes and only reports the link to HA once pairing has resolved, so
+discovery happens over an already-encrypted link.
+
+    curl -X POST -H 'X-Bond-Confirm: yes' 'http://nimble-proxy.local/bond?passkey=123456'
+    curl -X POST -H 'X-Bond-Confirm: yes' 'http://nimble-proxy.local/bond?add=A4:05:FD:13:98:6E'
+    curl 'http://nimble-proxy.local/bond'
+    # {"passkey":123456,"max":4,"auto":["a4:05:fd:13:98:6e"],"bonded":[...]}
+
+The dashboard exposes the same thing: a **BLE bonding** panel (passkey,
+auto-bond list, stored bonds) plus a `bond` button on each connectable
+row of the devices table. Both lists are capped at
+`CONFIG_BT_NIMBLE_MAX_BONDS` (4) — the size of NimBLE's NVS bond store.
+`POST /bond?unbond=MAC` (or `unbond=all`) forgets stored keys, which is
+the fix when a peer has been factory-reset and starts rejecting the
+proxy's encrypted reconnects.
 
 ## Architecture
 
@@ -89,9 +130,10 @@ components/
 ├── api_server/            plaintext frame codec, handshake, BT request handlers,
 │                          dashboard endpoints (stats / log / level / txpower /
 │                          cpufreq / scan / hostname / wifips / advitvl / trace
-│                          / reboot / devices), embedded web/index.html
+│                          / reboot / devices / bond), embedded web/index.html
 ├── ble_backend/           NimBLE wrappers — scanner, connection slots, GATT
-│                          discovery, adv interval state, SMP passkey holder
+│                          discovery, adv interval state, SMP passkey holder,
+│                          bonding worker + auto-bond list
 ├── ble_clone/             optional (CONFIG_NBP_CLONE) — supervisor task +
 │                          upstream client + local GATT mirror + /clone endpoint
 ├── ble_httpd/             optional (CONFIG_NBP_BLE_HTTPD) — GATT request/
@@ -142,12 +184,10 @@ Two common profiles:
 
 ## Build
 
-ESP-IDF 6.0.3 is what main is currently built and checked with
-(2026-11; activate with `. ~/dev/esp/idf6.0.3/export.sh`). The IDF 6
-compile fix in the root `CMakeLists.txt` is gated on
-`IDF_VERSION_MAJOR >= 6`, so the IDF 5.5 path is unchanged, but 5.5
-has not been re-built since that checkout went missing. Treat 5.5 as
-untested, not broken. The nanopb generator needs `protobuf` and
+Build with ESP-IDF 6.0.3, the version CI uses (`v6.0.3` in
+`.github/workflows/build.yml`). The IDF 6 compile fix in the root
+`CMakeLists.txt` is gated on `IDF_VERSION_MAJOR >= 6`, so the IDF 5.5
+path is still there but untested. The nanopb generator needs `protobuf` and
 `grpcio-tools` in the IDF Python env. Component manager pulls
 [`h2zero/esp-nimble-cpp ^2.5.0`](https://github.com/h2zero/esp-nimble-cpp)
 and `nanopb`. A small patch is auto-applied to the managed NimBLE-CPP
@@ -165,8 +205,16 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 After the first serial flash, subsequent updates can go over WiFi:
 
 ```sh
-curl --data-binary @build/nimble_ble_proxy.bin http://<device-ip>/update
+curl -H 'X-NBP-Confirm: yes' --data-binary @build/nimble_ble_proxy.bin http://<device-ip>/update
 ```
+
+Every state-changing `POST` (`/update`, `/reboot`, `/level`, `/txpower`,
+`/cpufreq`, `/wifips`, `/clone`, …) needs `X-NBP-Confirm: yes`; `/nat`,
+`/portmap`, `/bond` and `/crash` keep their own `X-*-Confirm` headers. A
+web page on another origin cannot send a custom header, so it cannot fire
+these routes; see [`docs/web-ui.md`](docs/web-ui.md#endpoints). The
+`ws://<device>/api` bridge refuses a browser handshake from a foreign
+origin the same way.
 
 Or, for a BLE-only build (no WiFi):
 

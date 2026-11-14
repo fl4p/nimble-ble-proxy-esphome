@@ -20,6 +20,7 @@ const char *set_passkey(uint32_t pin);
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "http_confirm.h"
 
 #include <cctype>
 #include <cstdio>
@@ -100,7 +101,9 @@ size_t build_clone_json(char *buf, size_t cap) {
       "\"type\":%u,"
       "\"name_suffix\":\"%s\","
 #ifdef CONFIG_NBP_SMP
-      "\"passkey\":%06lu,"
+      // %lu, not %06lu: a zero-padded number ("000042") is not valid
+      // JSON, and the dashboard pads for display anyway.
+      "\"passkey\":%lu,"
 #endif
       "\"state\":\"%s\","
       "\"mtu\":%u,"
@@ -201,6 +204,7 @@ esp_err_t clone_get(httpd_req_t *req) {
 }
 
 esp_err_t clone_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   char query[160];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");

@@ -49,7 +49,7 @@ jobs:
       - name: Build (${{ matrix.target }}, ${{ matrix.variant.name }})
         uses: espressif/esp-idf-ci-action@v1
         with:
-          esp_idf_version: release-v5.5
+          esp_idf_version: v6.0.3
           target: ${{ matrix.target }}
           # nanopb_generator.py (run by CMake) needs protobuf + a protoc;
           # install both inside the IDF container before building.
@@ -65,7 +65,7 @@ jobs:
             cp build/ota_data_initial.bin "dist/$name/ota_data_initial-$name.bin"
             cp build/flash_args "dist/$name/flash_args-$name"
             cd build
-            python -m esptool --chip "${{ matrix.target }}" merge_bin -o "../dist/$name/nimble_ble_proxy-$name-flash.bin" @flash_args
+            python -m esptool --chip "${{ matrix.target }}" merge-bin -o "../dist/$name/nimble_ble_proxy-$name-flash.bin" @flash_args
 
       - name: Upload firmware binaries (${{ matrix.target }}, ${{ matrix.variant.name }})
         uses: actions/upload-artifact@v4

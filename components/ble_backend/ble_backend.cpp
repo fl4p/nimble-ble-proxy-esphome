@@ -11,6 +11,7 @@
 #include <atomic>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #if CONFIG_NBP_BLE_AUTO_OFF
@@ -231,6 +232,28 @@ std::atomic<bool> g_powered_off{false};
 
 bool powered_off() { return g_powered_off.load(std::memory_order_relaxed); }
 
+namespace {
+SemaphoreHandle_t host_use_mutex() {
+  static StaticSemaphore_t buf;
+  static SemaphoreHandle_t m = xSemaphoreCreateMutexStatic(&buf);
+  return m;
+}
+}  // namespace
+
+bool host_acquire() {
+  if (powered_off()) return false;
+  xSemaphoreTake(host_use_mutex(), portMAX_DELAY);
+  // Re-check under the lock: power_off() may have latched the flag and
+  // finished deinit while we were waiting.
+  if (powered_off()) {
+    xSemaphoreGive(host_use_mutex());
+    return false;
+  }
+  return true;
+}
+
+void host_release() { xSemaphoreGive(host_use_mutex()); }
+
 bool power_off() {
   if (g_powered_off.exchange(true)) return true;  // already off — idempotent
 #if CONFIG_NBP_BLE_AUTO_OFF
@@ -241,10 +264,17 @@ bool power_off() {
   // the flag — then no other task races our deinit. (2 s tick; rare action.)
   vTaskDelay(pdMS_TO_TICKS(2100));
 #endif
+  // Wait for in-flight host_acquire() holders (e.g. an httpd /links
+  // request on another task) and keep new ones out during deinit. They only
+  // wait for HCI command acks, which NimBLE completes in the transport
+  // callback, not on the host task, so this cannot deadlock when power_off()
+  // runs on the host task (the BLE dashboard's POST /txpower?ble=off).
+  xSemaphoreTake(host_use_mutex(), portMAX_DELAY);
   scanner::stop_forwarding();
   // deinit(true): stop scan, disconnect all links, delete the server/scan/
   // advertising objects, and disable+deinit the BT controller.
   NimBLEDevice::deinit(true);
+  xSemaphoreGive(host_use_mutex());
   ESP_LOGI(TAG, "BLE powered off (full deinit; reboot to re-enable)");
   return true;
 }

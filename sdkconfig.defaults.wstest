@@ -1,0 +1,7 @@
+# Test-build overlay for the QEMU WebSocket/CSRF self-test (main/ws_selftest.cpp):
+#   idf.py -B build-qemu-ws -DIDF_TARGET=esp32s3 -DNBP_WS_SELFTEST=1 \
+#     -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.wstest" build
+# A third API client slot, so the self-test's sentinel client plus two
+# bridges fit and the bridge's own session cap (2) is what refuses the third.
+# Never for firmware that goes to a deployed device.
+CONFIG_NBP_API_MAX_CLIENTS=3

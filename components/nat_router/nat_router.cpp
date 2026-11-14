@@ -84,6 +84,7 @@ constexpr const char *NVS_AP_SSID = "ap_ssid";
 constexpr const char *NVS_AP_PSK = "ap_psk";
 constexpr const char *NVS_PORTMAP = "portmap";
 constexpr const char *NVS_ENABLED = "enabled";
+constexpr const char *NVS_LEASES = "leases";
 
 // IPv4 protocol numbers (lwip/prot/ip.h: IP_PROTO_TCP/UDP) — duplicated
 // as small literals so we don't pull a private lwip header just for two
@@ -113,6 +114,18 @@ struct PortmapEntry {
 };
 
 PortmapEntry g_portmap[PORTMAP_MAX] = {};
+
+// One static DHCP lease (MAC -> fixed SoftAP IP), persisted verbatim as an
+// NVS blob like the port map. ip is network byte order. The live copy the
+// DHCP-server hook reads is in dhcps_static.c; this is the persisted source.
+struct LeaseEntry {
+  uint8_t mac[6];
+  uint8_t valid;
+  uint8_t _pad;
+  uint32_t ip;
+};
+constexpr size_t LEASE_MAX = DHCPS_STATIC_LEASE_MAX;
+LeaseEntry g_leases[LEASE_MAX] = {};
 esp_netif_t *g_ap = nullptr;
 uint32_t g_sta_ip = 0;  // STA IP, network byte order; NAPT external addr
 char g_ap_ssid[33] = {0};
@@ -208,6 +221,171 @@ void save_portmap() {
   nvs_set_blob(h, NVS_PORTMAP, g_portmap, sizeof(g_portmap));
   nvs_commit(h);
   nvs_close(h);
+}
+
+void load_leases() {
+  std::memset(g_leases, 0, sizeof(g_leases));
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+  size_t len = 0;
+  if (nvs_get_blob(h, NVS_LEASES, nullptr, &len) == ESP_OK &&
+      len == sizeof(g_leases)) {
+    nvs_get_blob(h, NVS_LEASES, g_leases, &len);
+  }
+  nvs_close(h);
+}
+
+void save_leases() {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_set_blob(h, NVS_LEASES, g_leases, sizeof(g_leases));
+  nvs_commit(h);
+  nvs_close(h);
+}
+
+// Hand the valid entries to the DHCP-server hook.
+void push_leases() {
+  dhcps_static_lease_t tbl[LEASE_MAX];
+  size_t n = 0;
+  for (size_t i = 0; i < LEASE_MAX; ++i) {
+    if (!g_leases[i].valid) continue;
+    std::memcpy(tbl[n].mac, g_leases[i].mac, 6);
+    tbl[n].ip = g_leases[i].ip;
+    ++n;
+  }
+  dhcps_static_set(tbl, n);
+}
+
+// The SoftAP DHCP pool, network order, as IDF's dhcps_poll_set() derives
+// it when no range is configured (we never configure one): the /24 half
+// that holds the AP address, next to the AP, at most DHCPS_MAX_LEASE (100)
+// addresses. For 192.168.4.1 that is .2 .. .101. A static IP outside it
+// would be NAKed by the server's own pool check.
+bool ip_in_dhcp_pool(uint32_t ip_net) {
+  const uint32_t ap = lwip_ntohl(esp_ip4addr_aton(CONFIG_NBP_NAT_AP_IP));
+  const uint32_t ip = lwip_ntohl(ip_net);
+  const uint32_t mask = 0xffffff00u;
+  uint32_t start = ap & mask;
+  uint32_t end = start | ~mask;
+  if (ap - start > end - ap) {
+    start = start + 1;
+    end = ap - 1;
+  } else {
+    start = ap + 1;
+    end = end - 1;
+  }
+  if (end - start + 1 > 100) end = start + 99;
+  return ip >= start && ip <= end;
+}
+
+// "aa:bb:cc:dd:ee:ff" (or '-'-separated), exactly. Hand-rolled: sscanf
+// pulls ~6.5 KB of newlib scanf into the image.
+bool parse_mac(const char *s, uint8_t out[6]) {
+  auto hex = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + c - 'a';
+    if (c >= 'A' && c <= 'F') return 10 + c - 'A';
+    return -1;
+  };
+  for (int i = 0; i < 6; ++i) {
+    const int hi = hex(s[0]);
+    const int lo = hi < 0 ? -1 : hex(s[1]);
+    if (lo < 0) return false;
+    out[i] = static_cast<uint8_t>(hi << 4 | lo);
+    s += 2;
+    if (i < 5) {
+      if (*s != ':' && *s != '-') return false;
+      ++s;
+    }
+  }
+  return *s == '\0';
+}
+
+// A lease change only reaches a client at its next DHCP exchange, and an
+// associated client renews after half the lease (an hour). Deauthenticate
+// every associated client whose current address disagrees with the table,
+// so it rejoins and gets the right one now: a static MAC on another IP, or
+// another client on a reserved IP. Called right after the table changes,
+// before the hook has pinned it into the server's list (the pin deletes the
+// stale entries this reads).
+void kick_mismatched() {
+  if (!g_enabled) return;
+  wifi_sta_list_t sl = {};
+  if (esp_wifi_ap_get_sta_list(&sl) != ESP_OK) return;
+  wifi_sta_mac_ip_list_t ipl = {};
+  if (esp_wifi_ap_get_sta_list_with_ip(&sl, &ipl) != ESP_OK) return;
+  for (int i = 0; i < ipl.num; ++i) {
+    const uint8_t *mac = ipl.sta[i].mac;
+    const uint32_t ip = ipl.sta[i].ip.addr;
+    if (ip == 0) continue;  // no lease seen (static client): leave it alone
+    const uint32_t want = dhcps_static_lookup(mac);
+    const bool wrong = want != 0 ? ip != want : dhcps_static_is_reserved(ip);
+    if (!wrong) continue;
+    uint16_t aid = 0;
+    if (esp_wifi_ap_get_sta_aid(mac, &aid) != ESP_OK || aid == 0) continue;
+    char ips[16];
+    ip_to_str(ip, ips, sizeof(ips));
+    ESP_LOGI(TAG,
+             "static lease: kicking %02x:%02x:%02x:%02x:%02x:%02x off %s to "
+             "re-DHCP",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ips);
+    esp_wifi_deauth_sta(aid);
+  }
+}
+
+// POST /nat lease_mac=…&lease_ip=… (add or replace) or lease_mac=…&lease_del=1.
+// Returns nullptr on success, else the error text for a 400.
+const char *handle_lease(const char *mac_s, const char *ip_s, bool del) {
+  uint8_t mac[6];
+  if (!parse_mac(mac_s, mac)) return "lease_mac must be aa:bb:cc:dd:ee:ff";
+  int slot = -1;
+  for (size_t i = 0; i < LEASE_MAX; ++i) {
+    if (g_leases[i].valid && std::memcmp(g_leases[i].mac, mac, 6) == 0) {
+      slot = static_cast<int>(i);
+      break;
+    }
+  }
+  if (del) {
+    if (slot >= 0) {
+      g_leases[slot].valid = 0;
+      save_leases();
+      push_leases();
+      ESP_LOGI(TAG, "static lease removed: %s", mac_s);
+    }
+    return nullptr;
+  }
+  ip4_addr_t ip;
+  if (ip_s == nullptr || !ip4addr_aton(ip_s, &ip)) return "bad lease_ip";
+  if (!ip_in_dhcp_pool(ip.addr)) {
+    return "lease_ip must be in the SoftAP DHCP pool (AP .2 .. .101)";
+  }
+  for (size_t i = 0; i < LEASE_MAX; ++i) {
+    if (g_leases[i].valid && g_leases[i].ip == ip.addr &&
+        static_cast<int>(i) != slot) {
+      return "lease_ip already reserved for another MAC";
+    }
+  }
+  if (slot < 0) {
+    for (size_t i = 0; i < LEASE_MAX; ++i) {
+      if (!g_leases[i].valid) {
+        slot = static_cast<int>(i);
+        break;
+      }
+    }
+  }
+  if (slot < 0) return "static lease table full";
+  LeaseEntry e = {};
+  std::memcpy(e.mac, mac, 6);
+  e.valid = 1;
+  e.ip = ip.addr;
+  g_leases[slot] = e;
+  save_leases();
+  push_leases();
+  char ips[16];
+  ip_to_str(ip.addr, ips, sizeof(ips));
+  ESP_LOGI(TAG, "static lease set: %02x:%02x:%02x:%02x:%02x:%02x -> %s", mac[0],
+           mac[1], mac[2], mac[3], mac[4], mac[5], ips);
+  return nullptr;
 }
 
 // ──────────────────────────── NAPT plumbing ────────────────────────
@@ -492,9 +670,10 @@ int append_stations_json(char *buf, int off, size_t cap,
     off += std::snprintf(
         buf + off, cap - off,
         "%s{\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"ip\":\"%s\","
-        "\"rssi\":%d,\"hostname\":\"%s\"}",
+        "\"rssi\":%d,\"hostname\":\"%s\",\"static\":%s}",
         first ? "" : ",", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ips,
-        static_cast<int>(sl.sta[i].rssi), esc);
+        static_cast<int>(sl.sta[i].rssi), esc,
+        dhcps_static_lookup(mac) != 0 ? "true" : "false");
     first = false;
   }
   off += std::snprintf(buf + off, cap - off, "]");
@@ -502,6 +681,26 @@ int append_stations_json(char *buf, int off, size_t cap,
 }
 
 // ──────────────────────────── HTTP endpoints ───────────────────────
+
+// Every state-changing POST /nat and /portmap needs `X-Nat-Confirm: yes`
+// (same idea as crash_capture's X-Crash-Confirm). A custom header is not
+// CORS-safelisted, so a page on another origin cannot send it without a
+// preflight, which httpd never answers: a drive-by no-cors fetch() or form
+// cannot move a lease, deauth fry/flat, add a forward or drop the SoftAP.
+// Not authentication: anyone on the LAN can still send the header.
+constexpr const char *kConfirmHdr = "X-Nat-Confirm";
+
+bool confirmed(httpd_req_t *req) {
+  char v[8];
+  return httpd_req_get_hdr_value_str(req, kConfirmHdr, v, sizeof(v)) ==
+             ESP_OK &&
+         std::strcmp(v, "yes") == 0;
+}
+
+esp_err_t send_unconfirmed(httpd_req_t *req) {
+  return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                             "needs header X-Nat-Confirm: yes");
+}
 
 esp_err_t nat_get(httpd_req_t *req) {
   esp_netif_ip_info_t ap_info = {};
@@ -539,6 +738,20 @@ esp_err_t nat_get(httpd_req_t *req) {
                          g_portmap[i].mport, dip, g_portmap[i].dport);
     first = false;
   }
+  off += std::snprintf(buf + off, sizeof(buf) - off, "],\"leases\":[");
+  first = true;
+  for (size_t i = 0; i < LEASE_MAX && off < static_cast<int>(sizeof(buf)) - 64;
+       ++i) {
+    if (!g_leases[i].valid) continue;
+    const uint8_t *m = g_leases[i].mac;
+    char lip[16];
+    ip_to_str(g_leases[i].ip, lip, sizeof(lip));
+    off += std::snprintf(
+        buf + off, sizeof(buf) - off,
+        "%s{\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"ip\":\"%s\"}",
+        first ? "" : ",", m[0], m[1], m[2], m[3], m[4], m[5], lip);
+    first = false;
+  }
   off += std::snprintf(buf + off, sizeof(buf) - off, "]}");
 
   httpd_resp_set_type(req, "application/json");
@@ -547,8 +760,13 @@ esp_err_t nat_get(httpd_req_t *req) {
 
 // POST /nat?enabled=0|1            — toggle the SoftAP at runtime
 //      /nat?ssid=...&psk=...       — update AP credentials live + persist
-// Params are independent; any combination is accepted.
+//      /nat?lease_mac=M&lease_ip=I — static DHCP lease M -> I (add/replace)
+//      /nat?lease_mac=M&lease_del=1 — remove the static lease for M
+// Params are independent; any combination is accepted. A lease change
+// deauthenticates the clients whose address now disagrees, so they rejoin
+// with the right one.
 esp_err_t nat_post(httpd_req_t *req) {
+  if (!confirmed(req)) return send_unconfirmed(req);
   char query[160];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
@@ -562,9 +780,30 @@ esp_err_t nat_post(httpd_req_t *req) {
       httpd_query_key_value(query, "ssid", ssid, sizeof(ssid)) == ESP_OK;
   bool have_psk =
       httpd_query_key_value(query, "psk", psk, sizeof(psk)) == ESP_OK;
-  if (!have_en && !have_ssid && !have_psk) {
+  char lmac[24] = {0};
+  char lip[16] = {0};
+  char ldel[4] = {0};
+  bool have_lease =
+      httpd_query_key_value(query, "lease_mac", lmac, sizeof(lmac)) == ESP_OK;
+  bool have_lip =
+      httpd_query_key_value(query, "lease_ip", lip, sizeof(lip)) == ESP_OK;
+  bool lease_del =
+      httpd_query_key_value(query, "lease_del", ldel, sizeof(ldel)) == ESP_OK &&
+      ldel[0] == '1';
+  if (!have_en && !have_ssid && !have_psk && !have_lease) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                               "need enabled=, ssid= or psk=");
+                               "need enabled=, ssid=, psk= or lease_mac=");
+  }
+  if (have_lease) {
+    if (!lease_del && !have_lip) {
+      return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                 "lease_mac needs lease_ip= or lease_del=1");
+    }
+    const char *err = handle_lease(lmac, have_lip ? lip : nullptr, lease_del);
+    if (err != nullptr) {
+      return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+    }
+    kick_mismatched();
   }
 
   // Credentials first so an enable in the same request brings the AP up
@@ -617,6 +856,7 @@ esp_err_t nat_post(httpd_req_t *req) {
 // POST /portmap?proto=tcp&mport=8080&daddr=192.168.4.50&dport=80
 // POST /portmap?del=1&proto=tcp&mport=8080
 esp_err_t portmap_post(httpd_req_t *req) {
+  if (!confirmed(req)) return send_unconfirmed(req);
   char query[160];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
@@ -742,6 +982,10 @@ void resume_after_ota() {
 void start() {
   load_ap_creds();
   load_portmap();
+  // Before ap_up(): the DHCP server must know the reservations before the
+  // first client asks.
+  load_leases();
+  push_leases();
   g_enabled = load_enabled();
 
   // Seed the current STA IP so a runtime enable can apply port mappings

@@ -10,6 +10,12 @@
 #if NBP_HEAP_SELFTEST
 #include "heap_selftest.h"
 #endif
+#if NBP_DHCPS_SELFTEST
+#include "dhcps_hostname.h"
+#endif
+#if NBP_WS_SELFTEST
+#include "ws_selftest.h"
+#endif
 #include "proxy_config.h"
 #include "stats.h"
 #include "serial_provision.h"
@@ -162,6 +168,12 @@ extern "C" void app_main() {
 #if NBP_HEAP_SELFTEST
   api_server::heap_selftest::run();  // QEMU test build only; never returns
 #endif
+#if NBP_DHCPS_SELFTEST
+  dhcps_static_selftest_run();  // QEMU test build only; never returns
+#endif
+#if NBP_WS_SELFTEST
+  ws_selftest::run();  // QEMU test build only; never returns
+#endif
 
   ESP_LOGI(TAG, "nimble-ble-proxy %s booting",
            esp_app_get_description()->version);
@@ -201,6 +213,9 @@ extern "C" void app_main() {
   wifi_sta::start_and_wait_for_ip();
   mdns_announce::start();
   ota::start();
+  // GET /wifidisc + the sta_disc/ap_disc fields in /stats.json.
+  wifi_sta::register_endpoints(ota::handle());
+  api_server::stats::set_wifi_disc_provider(&wifi_sta::append_disc_stats_json);
   // Free the single radio for the duration of an OTA upload: drop the SoftAP
   // and pause the BLE scan so coex can't starve the transfer (the
   // SA-Query/heap death-spiral that makes a loaded device's OTA crawl and time
@@ -277,6 +292,7 @@ extern "C" void app_main() {
   // is opened lazily per browser. api_server stays untouched — each WS
   // client appears to it as an ordinary TCP client.
   ws_proxy::register_endpoint(ota::handle());
+  api_server::stats::set_ws_stats_provider(&ws_proxy::append_stats_json);
 #endif
 #if CONFIG_NBP_NAT_ROUTER
   // STA is up (start_and_wait_for_ip returned above). Bring up the SoftAP
@@ -369,6 +385,11 @@ extern "C" void app_main() {
   // window/interval override now (uses scanner::set_duty which is a
   // no-op until init() has been called by ble_backend::start).
   api_server::stats::apply_scan_from_nvs();
+#ifdef CONFIG_NBP_SMP
+  // Auto-bond list — same "after ble_backend::start" constraint as the
+  // scan duty above (connection::init() owns the mutex guarding it).
+  api_server::stats::apply_auto_bond_from_nvs();
+#endif
 #endif
 
 #if CONFIG_NBP_BLE_AUTO_OFF

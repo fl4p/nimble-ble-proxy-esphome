@@ -7,6 +7,10 @@
 // handshake, Bluetooth* handlers, send_async broadcast and fd-reaping are
 // all untouched.
 //
+// The handshake checks Origin (origin_check.h) and answers 403 to a
+// browser page from another origin, so a LAN web page cannot drive the
+// API; non-browser clients that send no Origin are unaffected.
+//
 // Compiled in only when CONFIG_NBP_WS_PROXY=y (which also selects
 // HTTPD_WS_SUPPORT so esp_http_server links its WebSocket layer).
 
@@ -16,6 +20,8 @@
 
 #ifdef CONFIG_NBP_WS_PROXY
 
+#include <cstddef>
+
 namespace ws_proxy {
 
 // Register the GET /api WebSocket route on the shared dashboard httpd
@@ -23,6 +29,10 @@ namespace ws_proxy {
 // httpd is up; api_server need not be listening yet — the loopback
 // connection is opened lazily on the first browser WebSocket.
 void register_endpoint(void *httpd_handle);
+
+// /stats.json appender (api_server::stats::StatsAppender): active bridge
+// sessions and handshakes refused by the Origin check (origin_check.h).
+int append_stats_json(char *buf, size_t cap);
 
 }  // namespace ws_proxy
 

@@ -22,16 +22,14 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_http_server.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "nvs.h"
-
-#if CONFIG_NBP_AP_FALLBACK
-#include "esp_http_server.h"
-#endif
 
 #include <atomic>
 #include <cctype>
@@ -75,6 +73,238 @@ constexpr const char *NVS_WIFI_PSK = "psk";
 
 EventGroupHandle_t g_events = nullptr;
 
+// ──────────────────── disconnect bookkeeping ─────────────────────
+// Why the STA dropped off the upstream AP, and why SoftAP clients left.
+// Logged under its own tag (the "wifi" tag is held at WARN for the driver's
+// sake) and kept in a small ring for /wifidisc, because the 4 KB /log ring
+// rolls over within minutes on a busy proxy. Updated from the default event
+// loop task, read from httpd: guarded by g_disc_mux.
+constexpr const char *EV_TAG = "wifi_ev";
+constexpr size_t DISC_RING = 8;
+constexpr uint8_t KIND_STA = 0;
+constexpr uint8_t KIND_AP = 1;
+
+struct DiscEvent {
+  uint32_t t_s;      // uptime at the event
+  uint32_t down_ms;  // STA: time until the next IP (0 while still down)
+  uint8_t mac[6];    // STA: upstream BSSID; AP: the client that left
+  uint8_t kind;
+  uint8_t reason;    // wifi_err_reason_t (all values fit in a byte)
+  int8_t rssi;       // STA: RSSI the driver reported with the event; AP: 0
+};
+
+portMUX_TYPE g_disc_mux = portMUX_INITIALIZER_UNLOCKED;
+DiscEvent g_disc_ring[DISC_RING] = {};
+uint32_t g_disc_total = 0;  // events ever recorded; ring slot = n % DISC_RING
+uint32_t g_sta_disc = 0;    // link losses (associated -> not), not retries
+uint32_t g_ap_disc = 0;     // SoftAP client departures
+uint8_t g_sta_last_reason = 0;
+int8_t g_sta_last_rssi = 0;
+uint32_t g_sta_last_down_ms = 0;
+uint8_t g_ap_last_reason = 0;
+uint8_t g_ap_last_mac[6] = {};
+// STA outage in progress: start time (0 = link up) and its ring entry.
+int64_t g_sta_down_since_us = 0;
+uint32_t g_sta_down_event = 0;  // g_disc_total value of that entry
+uint32_t g_sta_retries = 0;
+uint8_t g_sta_retry_reason = 0;
+bool g_sta_ever_up = false;
+
+const char *reason_name(unsigned r) {
+  switch (r) {
+    case WIFI_REASON_UNSPECIFIED: return "UNSPECIFIED";
+    case WIFI_REASON_AUTH_EXPIRE: return "AUTH_EXPIRE";
+    case WIFI_REASON_AUTH_LEAVE: return "AUTH_LEAVE";
+    case WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY: return "DISASSOC_INACTIVITY";
+    case WIFI_REASON_ASSOC_TOOMANY: return "ASSOC_TOOMANY";
+    case WIFI_REASON_CLASS2_FRAME_FROM_NONAUTH_STA: return "CLASS2_FROM_NONAUTH";
+    case WIFI_REASON_CLASS3_FRAME_FROM_NONASSOC_STA: return "CLASS3_FROM_NONASSOC";
+    case WIFI_REASON_ASSOC_LEAVE: return "ASSOC_LEAVE";
+    case WIFI_REASON_ASSOC_NOT_AUTHED: return "ASSOC_NOT_AUTHED";
+    case WIFI_REASON_DISASSOC_PWRCAP_BAD: return "PWRCAP_BAD";
+    case WIFI_REASON_DISASSOC_SUPCHAN_BAD: return "SUPCHAN_BAD";
+    case WIFI_REASON_BSS_TRANSITION_DISASSOC: return "BSS_TRANSITION";
+    case WIFI_REASON_IE_INVALID: return "IE_INVALID";
+    case WIFI_REASON_MIC_FAILURE: return "MIC_FAILURE";
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: return "4WAY_HANDSHAKE_TIMEOUT";
+    case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT: return "GROUP_KEY_UPDATE_TIMEOUT";
+    case WIFI_REASON_IE_IN_4WAY_DIFFERS: return "IE_IN_4WAY_DIFFERS";
+    case WIFI_REASON_GROUP_CIPHER_INVALID: return "GROUP_CIPHER_INVALID";
+    case WIFI_REASON_PAIRWISE_CIPHER_INVALID: return "PAIRWISE_CIPHER_INVALID";
+    case WIFI_REASON_AKMP_INVALID: return "AKMP_INVALID";
+    case WIFI_REASON_802_1X_AUTH_FAILED: return "802_1X_AUTH_FAILED";
+    case WIFI_REASON_CIPHER_SUITE_REJECTED: return "CIPHER_SUITE_REJECTED";
+    case WIFI_REASON_MISSING_ACKS: return "MISSING_ACKS";
+    case WIFI_REASON_STA_LEAVING: return "STA_LEAVING";
+    case WIFI_REASON_TIMEOUT: return "TIMEOUT";
+    case WIFI_REASON_PEER_INITIATED: return "PEER_INITIATED";
+    case WIFI_REASON_AP_INITIATED: return "AP_INITIATED";
+    case WIFI_REASON_BEACON_TIMEOUT: return "BEACON_TIMEOUT";
+    case WIFI_REASON_NO_AP_FOUND: return "NO_AP_FOUND";
+    case WIFI_REASON_AUTH_FAIL: return "AUTH_FAIL";
+    case WIFI_REASON_ASSOC_FAIL: return "ASSOC_FAIL";
+    case WIFI_REASON_HANDSHAKE_TIMEOUT: return "HANDSHAKE_TIMEOUT";
+    case WIFI_REASON_CONNECTION_FAIL: return "CONNECTION_FAIL";
+    case WIFI_REASON_AP_TSF_RESET: return "AP_TSF_RESET";
+    case WIFI_REASON_ROAMING: return "ROAMING";
+    case WIFI_REASON_ASSOC_COMEBACK_TIME_TOO_LONG: return "ASSOC_COMEBACK_TOO_LONG";
+    case WIFI_REASON_SA_QUERY_TIMEOUT: return "SA_QUERY_TIMEOUT";
+    case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY: return "NO_AP_COMPATIBLE_SECURITY";
+    case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD: return "NO_AP_IN_AUTHMODE_THRESHOLD";
+    case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD: return "NO_AP_IN_RSSI_THRESHOLD";
+    default: return "?";
+  }
+}
+
+uint32_t uptime_s() {
+  return static_cast<uint32_t>(esp_timer_get_time() / 1000000);
+}
+
+// Append under g_disc_mux; returns the event's sequence number.
+uint32_t record_event_locked(uint8_t kind, uint8_t reason, int8_t rssi,
+                             const uint8_t mac[6]) {
+  DiscEvent &e = g_disc_ring[g_disc_total % DISC_RING];
+  e = DiscEvent{};
+  e.t_s = uptime_s();
+  e.kind = kind;
+  e.reason = reason;
+  e.rssi = rssi;
+  std::memcpy(e.mac, mac, 6);
+  return g_disc_total++;
+}
+
+void on_sta_disconnected(const wifi_event_sta_disconnected_t *d) {
+  const uint8_t reason = d != nullptr ? d->reason : 0;
+  const int8_t rssi = d != nullptr ? d->rssi : 0;
+  static const uint8_t kZero[6] = {};
+  const uint8_t *bssid = d != nullptr ? d->bssid : kZero;
+  bool lost = false;
+  uint32_t retries = 0;
+  bool log_retry = false;
+  taskENTER_CRITICAL(&g_disc_mux);
+  if (g_sta_down_since_us == 0) {
+    // First event of an outage (or of the boot-time connect).
+    g_sta_down_since_us = esp_timer_get_time();
+    g_sta_retries = 0;
+    g_sta_retry_reason = reason;
+    if (g_sta_ever_up) {
+      lost = true;
+      ++g_sta_disc;
+      g_sta_last_reason = reason;
+      g_sta_last_rssi = rssi;
+      g_sta_down_event = record_event_locked(KIND_STA, reason, rssi, bssid);
+    }
+  } else {
+    // A reconnect attempt failed. Log only when the reason changes and on
+    // every 10th attempt, so a long outage cannot flush the /log ring.
+    retries = ++g_sta_retries;
+    log_retry = reason != g_sta_retry_reason || retries % 10 == 0;
+    g_sta_retry_reason = reason;
+  }
+  taskEXIT_CRITICAL(&g_disc_mux);
+  if (lost) {
+    ESP_LOGW(EV_TAG,
+             "STA disconnected: reason %u (%s), rssi %d dBm, bssid "
+             "%02x:%02x:%02x:%02x:%02x:%02x; reconnecting",
+             reason, reason_name(reason), rssi, bssid[0], bssid[1], bssid[2],
+             bssid[3], bssid[4], bssid[5]);
+  } else if (log_retry) {
+    ESP_LOGW(EV_TAG, "STA reconnect attempt %u failed: reason %u (%s), rssi %d",
+             static_cast<unsigned>(retries), reason, reason_name(reason), rssi);
+  }
+}
+
+void on_sta_got_ip_event() {
+  uint32_t down_ms = 0;
+  uint32_t retries = 0;
+  bool was_down = false;
+  taskENTER_CRITICAL(&g_disc_mux);
+  if (g_sta_down_since_us != 0 && g_sta_ever_up) {
+    was_down = true;
+    down_ms = static_cast<uint32_t>(
+        (esp_timer_get_time() - g_sta_down_since_us) / 1000);
+    retries = g_sta_retries;
+    g_sta_last_down_ms = down_ms;
+    // Fill the outage's ring entry unless 8 newer events overwrote it.
+    if (g_disc_total - g_sta_down_event <= DISC_RING) {
+      g_disc_ring[g_sta_down_event % DISC_RING].down_ms = down_ms;
+    }
+  }
+  g_sta_down_since_us = 0;
+  g_sta_ever_up = true;
+  taskEXIT_CRITICAL(&g_disc_mux);
+  if (was_down) {
+    ESP_LOGW(EV_TAG, "STA back after %u ms (%u failed reconnect attempts)",
+             static_cast<unsigned>(down_ms), static_cast<unsigned>(retries));
+  }
+}
+
+void on_ap_sta_left(const wifi_event_ap_stadisconnected_t *d) {
+  if (d == nullptr) return;
+  const uint8_t reason = static_cast<uint8_t>(d->reason);
+  taskENTER_CRITICAL(&g_disc_mux);
+  ++g_ap_disc;
+  g_ap_last_reason = reason;
+  std::memcpy(g_ap_last_mac, d->mac, 6);
+  record_event_locked(KIND_AP, reason, 0, d->mac);
+  taskEXIT_CRITICAL(&g_disc_mux);
+  ESP_LOGW(EV_TAG, "AP client %02x:%02x:%02x:%02x:%02x:%02x left: reason %u (%s)",
+           d->mac[0], d->mac[1], d->mac[2], d->mac[3], d->mac[4], d->mac[5],
+           static_cast<unsigned>(d->reason), reason_name(d->reason));
+}
+
+void on_ap_sta_joined(const wifi_event_ap_staconnected_t *d) {
+  if (d == nullptr) return;
+  ESP_LOGI(EV_TAG, "AP client %02x:%02x:%02x:%02x:%02x:%02x joined (aid %u)",
+           d->mac[0], d->mac[1], d->mac[2], d->mac[3], d->mac[4], d->mac[5],
+           static_cast<unsigned>(d->aid));
+}
+
+esp_err_t wifidisc_get(httpd_req_t *req) {
+  DiscEvent ev[DISC_RING];
+  uint32_t total;
+  int64_t down_since;
+  taskENTER_CRITICAL(&g_disc_mux);
+  std::memcpy(ev, g_disc_ring, sizeof(ev));
+  total = g_disc_total;
+  down_since = g_sta_down_since_us;
+  taskEXIT_CRITICAL(&g_disc_mux);
+  char buf[1280];
+  const uint32_t now = uptime_s();
+  int off = std::snprintf(
+      buf, sizeof(buf), "{\"uptime_s\":%lu,\"sta_down_ms\":%lu,\"total\":%lu,\"events\":[",
+      static_cast<unsigned long>(now),
+      static_cast<unsigned long>(
+          down_since != 0 && g_sta_ever_up
+              ? (esp_timer_get_time() - down_since) / 1000
+              : 0),
+      static_cast<unsigned long>(total));
+  // Newest first.
+  const uint32_t n = total < DISC_RING ? total : DISC_RING;
+  for (uint32_t k = 0; k < n && off < static_cast<int>(sizeof(buf)) - 160; ++k) {
+    const DiscEvent &e = ev[(total - 1 - k) % DISC_RING];
+    off += std::snprintf(
+        buf + off, sizeof(buf) - off,
+        "%s{\"if\":\"%s\",\"t_s\":%lu,\"age_s\":%lu,\"reason\":%u,"
+        "\"name\":\"%s\",\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\"",
+        k ? "," : "", e.kind == KIND_STA ? "sta" : "ap",
+        static_cast<unsigned long>(e.t_s),
+        static_cast<unsigned long>(now - e.t_s), e.reason,
+        reason_name(e.reason), e.mac[0], e.mac[1], e.mac[2], e.mac[3],
+        e.mac[4], e.mac[5]);
+    if (e.kind == KIND_STA) {
+      off += std::snprintf(buf + off, sizeof(buf) - off,
+                           ",\"rssi\":%d,\"down_ms\":%lu}", e.rssi,
+                           static_cast<unsigned long>(e.down_ms));
+    } else {
+      off += std::snprintf(buf + off, sizeof(buf) - off, "}");
+    }
+  }
+  off += std::snprintf(buf + off, sizeof(buf) - off, "]}");
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, off);
+}
+
 int read_listen_interval_from_nvs() {
   nvs_handle_t h;
   if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return DEFAULT_WIFI_LI;
@@ -107,15 +337,20 @@ bool read_creds_from_nvs(char *ssid_out, size_t ssid_cap,
 }
 
 void on_wifi_event(void * /*arg*/, esp_event_base_t base, int32_t id,
-                   void * /*data*/) {
+                   void *data) {
   const bool prov = g_provisioning.load(std::memory_order_relaxed);
-  if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+  if (base != WIFI_EVENT) return;
+  if (id == WIFI_EVENT_STA_START) {
     if (!prov) esp_wifi_connect();
-  } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+  } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
     g_sta_connected.store(false, std::memory_order_relaxed);
     if (prov) return;  // provisioning loop owns the retry cadence
-    ESP_LOGW(TAG, "disconnected; retrying");
+    on_sta_disconnected(static_cast<wifi_event_sta_disconnected_t *>(data));
     esp_wifi_connect();
+  } else if (id == WIFI_EVENT_AP_STADISCONNECTED) {
+    on_ap_sta_left(static_cast<wifi_event_ap_stadisconnected_t *>(data));
+  } else if (id == WIFI_EVENT_AP_STACONNECTED) {
+    on_ap_sta_joined(static_cast<wifi_event_ap_staconnected_t *>(data));
   }
 }
 
@@ -125,6 +360,7 @@ void on_ip_event(void * /*arg*/, esp_event_base_t base, int32_t id,
     auto *evt = static_cast<ip_event_got_ip_t *>(data);
     ESP_LOGI(TAG, "got IP " IPSTR, IP2STR(&evt->ip_info.ip));
     g_sta_connected.store(true, std::memory_order_relaxed);
+    on_sta_got_ip_event();
     xEventGroupSetBits(g_events, BIT_GOT_IP);
   }
 }
@@ -481,6 +717,39 @@ void start_and_wait_for_ip() {
 
 bool is_connected() {
   return g_sta_connected.load(std::memory_order_relaxed);
+}
+
+int append_disc_stats_json(char *buf, size_t cap) {
+  uint32_t sta, ap, sta_down;
+  uint8_t sta_reason, ap_reason, ap_mac[6];
+  int8_t sta_rssi;
+  taskENTER_CRITICAL(&g_disc_mux);
+  sta = g_sta_disc;
+  ap = g_ap_disc;
+  sta_reason = g_sta_last_reason;
+  sta_rssi = g_sta_last_rssi;
+  sta_down = g_sta_last_down_ms;
+  ap_reason = g_ap_last_reason;
+  std::memcpy(ap_mac, g_ap_last_mac, 6);
+  taskEXIT_CRITICAL(&g_disc_mux);
+  return std::snprintf(
+      buf, cap,
+      ",\"sta_disc\":%lu,\"sta_disc_reason\":%u,\"sta_disc_rssi\":%d,"
+      "\"sta_disc_down_ms\":%lu,\"ap_disc\":%lu,\"ap_disc_reason\":%u,"
+      "\"ap_disc_mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\"",
+      static_cast<unsigned long>(sta), sta_reason, sta_rssi,
+      static_cast<unsigned long>(sta_down), static_cast<unsigned long>(ap),
+      ap_reason, ap_mac[0], ap_mac[1], ap_mac[2], ap_mac[3], ap_mac[4],
+      ap_mac[5]);
+}
+
+void register_endpoints(void *httpd_handle) {
+  if (httpd_handle == nullptr) return;
+  httpd_uri_t g = {.uri = "/wifidisc",
+                   .method = HTTP_GET,
+                   .handler = &wifidisc_get,
+                   .user_ctx = nullptr};
+  httpd_register_uri_handler(static_cast<httpd_handle_t>(httpd_handle), &g);
 }
 
 }  // namespace wifi_sta

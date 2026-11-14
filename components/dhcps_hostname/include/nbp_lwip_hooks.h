@@ -6,9 +6,9 @@
 // LWIP_HOOK_DHCPS_POST_STATE, on each received DHCP message after parsing.
 //
 // We use it to capture the client's hostname (DHCP option 12), which the
-// built-in IDF 5.5 DHCP server otherwise parses past and discards. The
-// state value is returned unchanged — this is observe-only. See
-// dhcps_hostname.c for the registry + the dhcps_hostname_lookup() accessor.
+// built-in IDF 5.5 DHCP server otherwise parses past and discards (see
+// dhcps_hostname.c), and to serve static leases (dhcps_static.c), which may
+// re-run the parse and so change the state the server acts on.
 //
 // It also defines LWIP_HOOK_IP4_CANFORWARD, which ip4_canforward() invokes
 // for every datagram the router is about to forward (in BOTH NAT
@@ -24,6 +24,7 @@
 
 #include "sdkconfig.h"   // CONFIG_NBP_NAT_THROUGHPUT gate
 #include "lwip/arch.h"  // s16_t, u32_t
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,6 +37,16 @@ struct pbuf;
 // `state` verbatim. msg/len/state mirror the LWIP_HOOK_DHCPS_POST_STATE
 // contract (msg is the parsed *incoming* packet).
 s16_t nbp_dhcps_post_state(struct dhcps_msg *msg, s16_t len, s16_t state);
+
+// Static leases (dhcps_static.c). `plist` is &dhcps->plist, the server's
+// private lease list; `client_ip` the address parse_msg() chose for this
+// packet. Pins the reserved entries into the list and returns true when the
+// packet must be parsed again because it was answered from the unpinned list.
+bool nbp_dhcps_static_fix(void **plist, u32_t client_ip,
+                          const struct dhcps_msg *msg, s16_t state);
+// Re-pins after that second parse_msg() (it resets the matched entry's lease
+// timer) and returns `state` unchanged.
+s16_t nbp_dhcps_static_pin(void **plist, s16_t state);
 
 #if CONFIG_NBP_NAT_THROUGHPUT
 // Observe-only forward hook: adds p->tot_len to the SoftAP up/down byte
@@ -53,13 +64,40 @@ int nbp_ip4_canforward(struct pbuf *p, u32_t dest);
 // NAT builds only: a heap self-test build without the NAT router also
 // includes this header (for the input hook below) but links no dhcps_hostname.
 #if CONFIG_NBP_NAT_ROUTER
-#define LWIP_HOOK_DHCPS_POST_STATE(msg, len, state) \
-  nbp_dhcps_post_state((msg), (len), (state))
+// Expands inside dhcpserver.c's handle_dhcp(), so it uses that function's
+// locals `dhcps` and `tlen` and the file-static parse_msg() (the second
+// parse is the same call handle_dhcp() just made). Re-verify on an IDF bump:
+// a rename there is a compile error here, not a silent no-op.
+#define LWIP_HOOK_DHCPS_POST_STATE(msg, len, state)                          \
+  nbp_dhcps_post_state(                                                      \
+      (msg), (len),                                                          \
+      nbp_dhcps_static_fix((void **)&dhcps->plist,                           \
+                           dhcps->client_address.addr, (msg), (state))       \
+          ? nbp_dhcps_static_pin(                                            \
+                (void **)&dhcps->plist,                                      \
+                parse_msg(dhcps, (msg),                                      \
+                          tlen >= 240 ? (u16_t)(tlen - 240) : 0))            \
+          : (state))
 #endif
 
 #if CONFIG_NBP_NAT_THROUGHPUT
 #define LWIP_HOOK_IP4_CANFORWARD(p, dest) \
   nbp_ip4_canforward((p), (dest))
+#endif
+
+#if NBP_DHCPS_SELFTEST
+// QEMU static-lease self-test only (dhcps_static_selftest.c): record each
+// reply's type and yiaddr. Expands inside send_offer/send_ack/send_nak,
+// whose outgoing message is the local `m`.
+#ifdef __cplusplus
+extern "C" {
+#endif
+void nbp_dhcps_selftest_reply(int type, const unsigned char *yiaddr);
+#ifdef __cplusplus
+}
+#endif
+#define LWIP_HOOK_DHCPS_POST_APPEND_OPTS(netif, dhcps, state, pp_opts) \
+  nbp_dhcps_selftest_reply((state), m->yiaddr);
 #endif
 
 #if NBP_HEAP_SELFTEST

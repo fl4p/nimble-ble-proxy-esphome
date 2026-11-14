@@ -170,6 +170,7 @@ struct ClientEntry {
   // instead of being kept topped up by adverts (on the C3 a 2054 B frame
   // fits only into a near-empty ring).
   bool bulk_waiting = false;
+  uint32_t peer_ip = 0;  // IPv4, network order, from accept(); for /links
 };
 std::array<ClientEntry, proxy::MAX_API_CLIENTS> g_clients;
 
@@ -737,7 +738,7 @@ void sender_task(void *) {
 // Add/remove a client fd from the active set. Returns the client's id,
 // or 0 if no slot is free; in that case the caller should reject the
 // connection.
-uint32_t register_client(int fd) {
+uint32_t register_client(int fd, uint32_t peer_ip) {
   uint32_t id = 0;
   xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
   for (auto &s : g_clients) {
@@ -754,6 +755,7 @@ uint32_t register_client(int fd) {
       s = ClientEntry{};
       s.id = id;
       s.fd = fd;
+      s.peer_ip = peer_ip;
       break;
     }
   }
@@ -1020,7 +1022,7 @@ void listener_task(void *) {
     ::setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
     ::setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
 
-    uint32_t client_id = register_client(client_fd);
+    uint32_t client_id = register_client(client_fd, peer.sin_addr.s_addr);
     if (client_id == 0) {
       // All NBP_API_MAX_CLIENTS slots taken: refuse with an RST right away
       // (nothing was sent, so nothing lingers in FIN-WAIT), no task, no
@@ -1105,6 +1107,21 @@ bool send_to(uint32_t client_id, uint16_t msg_type, EncodeFn encode,
     raise_max(g_enq_us_max, static_cast<uint32_t>(esp_timer_get_time() - t0));
   }
   return sent;
+}
+
+bool client_peer_ip(uint32_t client_id, uint32_t *ip_out) {
+  if (client_id == 0 || g_clients_mutex == nullptr) return false;
+  bool found = false;
+  xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
+  for (const auto &c : g_clients) {
+    if (c.fd >= 0 && c.id == client_id) {
+      *ip_out = c.peer_ip;
+      found = true;
+      break;
+    }
+  }
+  xSemaphoreGive(g_clients_mutex);
+  return found;
 }
 
 TxqStats txq_stats() {

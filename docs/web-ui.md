@@ -43,7 +43,7 @@ Six Kconfig flags shape what gets compiled in. Edit in
 | `CONFIG_NBP_AP_FALLBACK` | `n` | ~15 KB flash, extra netif + httpd | SoftAP fallback when STA can't associate within `CONFIG_NBP_AP_FALLBACK_SECS`. Hosts a single page at `192.168.4.1/` with a form that POSTs `/wifi?ssid=…&psk=…` into NVS namespace `wifi` and reboots. Credential lookup at boot: NVS first, then `wifi_creds.h` if present, then AP fallback. Makes `wifi_creds.h` optional. |
 | `CONFIG_NBP_BLE_HTTPD` | `n` | ~4 KB flash | GATT request/response service that lets Web Bluetooth talk to the same handlers |
 | `CONFIG_NBP_CLONE` | `n` | ~20 KB flash, ~10-15 KB RAM when active | clone supervisor + local GATT mirror + `/clone` endpoint + dashboard clone button + synthetic clone-target row |
-| `CONFIG_NBP_SMP` | `n` | ~2 KB flash | static-passkey pairing as central (paired upstream peripherals); `passkey` field on `/clone` |
+| `CONFIG_NBP_SMP` | `y` | ~2 KB flash + 3 KB stack while bonding | static-passkey pairing as central (paired upstream peripherals); the `PAIRING` BT-proxy feature flag and the PAIR/UNPAIR handlers; `/bond` endpoint + dashboard bonding panel + per-row bond button; `passkey` field on `/clone` |
 | `CONFIG_NBP_DEVICES_PANEL` | `y` | ~12 KB BSS | scanner device table, `/devices`, dashboard table |
 | `CONFIG_NBP_WEB_CONSOLE` | `y` | 64 KB BSS (NimBLE DEBUG) / 8 KB BSS | `esp_log_set_vprintf` hook, ring buffer, `/log`, on-page console |
 
@@ -65,6 +65,38 @@ ESP-IDF httpd default). In Web Bluetooth mode the same `<method>
 transport*); responses arrive on the notify characteristic. The
 client-side `apiText` / `apiJson` helpers in `web/index.html` paper
 over the difference.
+
+**Every state-changing `POST` over HTTP needs a confirm header**, else
+400. `/level`, `/txpower`, `/cpufreq`, `/scan`, `/advitvl`, `/wifips`,
+`/hostname`, `/passkey`, `/liveness`, `/trace`, `/reboot`, `/clone` and
+the OTA `/update` need `X-NBP-Confirm: yes` (`include/http_confirm.h`);
+`/nat` and `/portmap` need `X-Nat-Confirm: yes`, `/bond` needs
+`X-Bond-Confirm: yes` and `/crash`, `/crash-test` need `X-Crash-Confirm:
+yes` (older, per-endpoint). It is a CSRF guard, not authentication: a page
+on another origin cannot send a custom header without a CORS preflight,
+which httpd never answers, so a drive-by form post or no-cors `fetch()`
+from any page open on the LAN cannot reach these routes. Anyone on the LAN
+can still send the header. The dashboard's `confirmHeaders()` adds them;
+the BLE transport carries no headers and is not gated (a page reaches it
+only through a Web Bluetooth device the user picked). Example:
+`curl -X POST -H 'X-NBP-Confirm: yes' 'http://<proxy>/wifips?li=0'`.
+
+The one exception is `POST /wifi` on the SoftAP provisioning server
+(`CONFIG_NBP_AP_FALLBACK`, 192.168.4.1 on an open AP): it is a plain HTML
+form that must work in JS-less captive-portal views, and any client on
+that open AP can already reconfigure the device, so it stays unguarded.
+
+**`ws://<proxy>/api` (`CONFIG_NBP_WS_PROXY`) checks `Origin` at the
+handshake**, before the 101, because browsers apply no CORS to
+WebSockets. Accepted: no `Origin` (non-browser clients); an `Origin`
+whose host[:port] equals the `Host` header (the on-device dashboard;
+default ports and case ignored); an exact entry of
+`CONFIG_NBP_WS_ORIGIN_ALLOWLIST` (space/comma separated, default empty,
+since no off-device page uses the bridge). Everything else, including
+`Origin: null` (file:// pages, sandboxed iframes), gets 403 and counts in
+`/stats.json` `ws_origin_refused` (`ws_sessions` = live bridges). Not
+covered: DNS rebinding (the attacker's name resolving to the proxy makes
+its page same-origin), which also defeats the confirm headers.
 
 ### `GET /` — dashboard HTML
 
@@ -132,7 +164,8 @@ Layout (top → bottom):
    `Range.createContextualFragment` (avoids `innerHTML` to stay clear of
    the security hook). Trimmed to 3000 DOM nodes; auto-scrolls only if
    the user was already at the bottom.
-6. **Footer** — OTA `curl` hint.
+6. **Footer** — OTA `curl` hint (`curl -H 'X-NBP-Confirm: yes'
+   --data-binary @firmware.bin http://<host>/update`).
 
 Both charts re-fit on viewport resize / orientation change: a `resize`
 listener calls `u.setSize` / `u2.setSize` with `chartW(el)`, where
@@ -181,6 +214,34 @@ Cumulative counters and instantaneous state. Always available.
 - `temp_c` — ESP32-S3 internal silicon temperature sensor, °C, one
   decimal. ±1-2 °C absolute accuracy, fine for trend visibility. Sensor
   is lazy-installed on first `/stats.json` hit.
+- WiFi disconnects (WiFi builds; `wifi_sta`):
+  `"sta_disc":1,"sta_disc_reason":200,"sta_disc_rssi":-71,"sta_disc_down_ms":6070,
+  "ap_disc":3,"ap_disc_reason":2,"ap_disc_mac":"70:04:1d:a6:ab:30"`.
+  `sta_disc` counts losses of the upstream link (failed reconnect attempts
+  are not counted); reason, RSSI (as the driver reported it with the event)
+  and outage length (disconnect to the next IP) are the last loss's.
+  `ap_disc` counts SoftAP clients leaving, with the last one's reason and
+  MAC. Reasons are `wifi_err_reason_t`; `/wifidisc` adds their names.
+
+### `GET /wifidisc` *(WiFi builds)*
+
+The last 8 WiFi disconnect events, newest first, kept in RAM because the
+`/log` ring (4 KB) rolls over within minutes. `t_s` is uptime at the event,
+`age_s` how long ago; `sta_down_ms` is non-zero while the upstream link is
+down. STA events carry the upstream BSSID, RSSI and `down_ms` (0 until the
+link is back); AP events carry the client's MAC.
+
+```json
+{"uptime_s":5000,"sta_down_ms":0,"total":2,"events":[
+ {"if":"ap","t_s":4810,"age_s":190,"reason":2,"name":"AUTH_EXPIRE","mac":"70:04:1d:a6:ab:30"},
+ {"if":"sta","t_s":3002,"age_s":1998,"reason":200,"name":"BEACON_TIMEOUT","mac":"aa:bb:cc:dd:ee:ff","rssi":-71,"down_ms":6070}]}
+```
+
+The same events are logged under tag `wifi_ev`: `STA disconnected: reason
+200 (BEACON_TIMEOUT), rssi -71 dBm, bssid …; reconnecting`, then `STA back
+after 6070 ms (2 failed reconnect attempts)`; failed attempts are logged
+when the reason changes and every 10th time; `AP client … left: reason 2
+(AUTH_EXPIRE)` and `AP client … joined (aid 1)`.
 
 ### `GET /devices` *(gated by `CONFIG_NBP_DEVICES_PANEL`)*
 
@@ -250,6 +311,53 @@ mapping:
 The synthetic row carries a `.synthetic` class (italic, dim) so it's
 visually distinct from a live-scanned row. RSSI / adv/s / age all show
 `—` since the scanner isn't seeing the peripheral.
+
+### `GET /links` *(BLE builds; HTTP only, not on the BLE transport)*
+
+Live state of every in-use GATT client slot (the proxy's links to BLE
+peripherals). The ESPHome native API has no message for this: upstream
+`BluetoothDeviceConnectionResponse` carries only `connected`/`mtu`/`error`,
+and `BluetoothSetConnectionParamsRequest` (145) cannot read values back.
+
+```json
+{
+  "slots": 2,
+  "ble_off": false,
+  "links": [
+    {
+      "address": "63:8B:3B:FA:E1:4D",
+      "state": "connected",
+      "owner": 3,
+      "owner_ip": "192.168.1.200",
+      "mtu": 23,
+      "age_s": 6,
+      "rssi": -65,
+      "tx_power": 9,
+      "interval_ms": 50.00,
+      "latency": 0,
+      "supervision_timeout_ms": 2560,
+      "encrypted": false,
+      "bonded": false
+    }
+  ]
+}
+```
+
+- `state` — `connecting`, `connected` or `disconnecting`.
+- `owner` / `owner_ip` — id and source IP of the API client that opened the
+  link. HTTP has no API-client identity, so every link is listed and a
+  consumer picks its own by IP. `null` once that client has left.
+- `rssi` — dBm from an HCI Read RSSI on the live link, per request.
+- `tx_power` — dBm the controller applies to this connection
+  (`esp_ble_tx_power_get_enhanced` on C3/S3/C6, per-handle
+  `esp_ble_tx_power_get` on ESP32); follows `POST /txpower?ble=`.
+- `interval_ms`, `latency`, `supervision_timeout_ms`, `encrypted`, `bonded`
+  — from `ble_gap_conn_find`.
+
+A value the stack cannot supply is `null`, never `0`: everything but
+`address`/`state`/`owner` while a link is still connecting, and any value
+whose read fails or whose handle no longer belongs to that peer. After
+`POST /txpower?ble=off`, `links` is empty and `ble_off` is `true`.
 
 ### `GET /log?since=<seq>` *(gated by `CONFIG_NBP_WEB_CONSOLE`)*
 
@@ -466,7 +574,24 @@ SoftAP/NAT router status + control. `GET` returns:
 `stations` lists the currently-associated SoftAP clients. `mac` + `rssi`
 come from `esp_wifi_ap_get_sta_list`; `ip` from the DHCP server's MAC↔IP
 pairing (`esp_wifi_ap_get_sta_list_with_ip`); `hostname` is the client's
-DHCP **option 12** (Host Name), empty when the client didn't send one.
+DHCP **option 12** (Host Name), empty when the client didn't send one;
+`static` is true when the MAC has a static lease. `leases` lists the static
+leases (`[{"mac":"70:04:1d:a6:ab:30","ip":"192.168.4.2"}]`).
+
+**Static leases.** IDF's DHCP server hands out the pool in join order, so
+after a reboot a port-forward to a fixed IP reaches whichever client joined
+first. A static lease pins a MAC to an IP: the server always offers that
+client that IP, NAKs its requests for any other, and never gives the IP to
+anyone else, even while the client is away. Configure with
+`POST /nat?lease_mac=70:04:1d:a6:ab:30&lease_ip=192.168.4.2` (add or
+replace) and `POST /nat?lease_mac=70:04:1d:a6:ab:30&lease_del=1` (both with
+`X-Nat-Confirm: yes`); up to 8
+leases, persisted in NVS (`nat`/`leases`). The IP must be in the DHCP pool
+(192.168.4.2 .. .101 for the default AP address) and not reserved for
+another MAC. A change deauthenticates every associated client whose current
+address disagrees with the table, so it rejoins and gets the right one at
+once (otherwise it would keep the old address until it renews, up to an
+hour). Implementation: `components/dhcps_hostname/dhcps_static.c`.
 
 IDF 5.5's DHCP server parses past option 12 and discards it, so we recover
 it with a custom lwIP hook (`LWIP_HOOK_DHCPS_POST_STATE`, wired via
@@ -477,7 +602,14 @@ station. The built-in server is left fully intact — no fork, no
 `CONFIG_LWIP_DHCPS` change. The dashboard NAT panel renders the array as a
 "hostname / IP / MAC / RSSI" table.
 
-`POST /nat?enabled=0|1`, `?ssid=…`, `?psk=…` toggle/reconfigure the AP;
+Every `POST /nat` and `POST /portmap` needs the header `X-Nat-Confirm: yes`
+(400 without it), e.g. `curl -X POST -H 'X-Nat-Confirm: yes' …`. It is a
+CSRF guard, not authentication: a page on another origin cannot send a
+custom header without a CORS preflight, which httpd never answers. The
+dashboard sends it.
+
+`POST /nat?enabled=0|1`, `?ssid=…`, `?psk=…` toggle/reconfigure the AP,
+`?lease_mac=…&lease_ip=…` / `&lease_del=1` set static leases (above);
 `/portmap` (separate endpoint) adds/deletes inbound forwards.
 
 ### `POST /trace?on=<0|1>`
@@ -509,24 +641,92 @@ Tiny inline SVG (Bluetooth glyph on a blue rounded square) embedded
 into the WiFi build via `EMBED_FILES`. `Cache-Control: public,
 max-age=86400` so browsers stop refetching it. ~300 B.
 
-### Passkey (folded into `/clone`)
+### `GET /bond` &nbsp;·&nbsp; `POST /bond?…` *(gated by `CONFIG_NBP_SMP`)*
 
-The static SMP passkey used when the proxy is the initiator and an
-upstream peer demands MITM pairing (Victron SmartShunt, some BMS
-variants) is now part of the `/clone` payload — there is no
-standalone `/passkey` HTTP endpoint anymore. Both the dashboard's clone
-prompt and any external scripting use:
+Everything about BLE bonding in one endpoint.
 
-```
-GET  /clone                   → {"passkey":NNNNNN,...} (when CONFIG_NBP_SMP)
-POST /clone?addr=…&passkey=N&enabled=1
+```json
+{"passkey":123456,"max":4,"ble_off":false,
+ "auto":["a4:05:fd:13:98:6e"],
+ "bonded":["a4:05:fd:13:98:6e","c0:3b:8f:11:22:33"]}
 ```
 
-The `api_server::stats::set_passkey()` C++ helper is the single source
-of truth for NVS persistence (`stats / ble_passkey`) and apply
-(`ble_backend::connection::set_passkey`). Boot-time replay still runs
-inside `apply_log_overrides_from_nvs()` so the passkey is loaded
-before any GATT pairing can be triggered. See `docs/clone.md` §6.
+| Field | Meaning |
+|---|---|
+| `passkey` | static SMP passkey injected when a peer asks for one (`onPassKeyEntry`). Applies to *every* outbound pairing — proxied peers and the clone upstream alike. |
+| `max` | capacity of the auto-bond list = `ble_backend::connection::AUTO_BOND_MAX`, itself capped at `CONFIG_BT_NIMBLE_MAX_BONDS` |
+| `ble_off` | `ble_backend::powered_off()` — see the note below |
+| `auto` | addresses the proxy pairs with immediately after connecting |
+| `bonded` | peers whose keys are currently in NimBLE's NVS bond store |
+
+**After `POST /txpower?ble=off` there is no host to ask.** That option
+does a full `NimBLEDevice::deinit(true)`, and the bond store is a host
+facility — reading it would walk a torn-down `ble_hs`. The bond-store
+accessors in `connection.cpp` (`find_bond`, `bonded_addresses`, `pair`)
+all check `ble_backend::powered_off()` first, so `bonded` comes back
+empty and `unbond` is refused with `ble off; reboot to re-enable`. The
+`ble_off` flag is what lets the panel say *why* the list is empty
+instead of implying the keys were deleted. The passkey and the
+auto-bond list are plain NVS/RAM state and stay editable.
+
+`POST` needs the header `X-Bond-Confirm: yes` over HTTP (400 without it),
+the same CSRF guard as `X-Nat-Confirm`; the BLE dashboard transport carries
+no headers and is not gated. It accepts any combination of:
+
+| Param | Effect |
+|---|---|
+| `passkey=NNNNNN` | 0..999999, persisted to `stats / ble_passkey` |
+| `add=MAC` | add to the auto-bond list (`"auto-bond list is full"` at `max`) |
+| `remove=MAC` | drop from the auto-bond list |
+| `unbond=MAC` \| `unbond=all` | delete stored bond keys |
+
+Both `GET` and `POST` return the full JSON above, so the dashboard
+re-renders from the POST response without a second round trip. A `POST`
+that matches none of the parameters is a `400 nothing to do`.
+
+`handle_bond_set()` runs in **two passes: validate everything, then
+apply**. A request is all-or-nothing, so `?passkey=1&add=garbage` leaves
+the stored passkey alone rather than changing the PIN used by every
+outbound pairing on its way to returning a 400. The same holds for a
+list edit rejected by the `max` cap, and for an `unbond` of an address
+that holds no keys (pre-checked with `connection::has_bond()`).
+
+**Why the auto-bond list exists.** Home Assistant can ask the proxy to
+pair (`BLUETOOTH_DEVICE_REQUEST_TYPE_PAIR`, enabled by the `PAIRING`
+feature flag) — but only *after* a connect and a successful service
+discovery. Peers that refuse discovery on an unauthenticated link drop
+the connection before that point, so the request never happens. For a
+listed address the proxy instead runs SMP the moment the GAP connect
+completes, and withholds `BluetoothDeviceConnectionResponse` until
+pairing resolves; HA's discovery then runs over an encrypted link. A
+failed auto-bond still reports the link (unauthenticated) rather than
+inventing a connect failure — that leaves HA's retry behaviour exactly
+as it is today.
+
+Pairing blocks its caller (NimBLE's `secureConnection()` waits for
+`BLE_GAP_EVENT_ENC_CHANGE`, up to the 30 s SMP timeout), so it runs on a
+dedicated `ble_bond` worker task — created lazily on the first bonding
+request, never on a device that doesn't bond. Neither the api_server
+client task nor the NimBLE host task is ever blocked on SMP.
+
+Persistence: the auto-bond list is a packed `uint64` blob at
+`stats / auto_bond`, replayed by `apply_auto_bond_from_nvs()` — which
+must run *after* `ble_backend::start()` because the list is guarded by
+the connection mutex. The passkey (`stats / ble_passkey`) has no such
+constraint and is replayed earlier, from
+`apply_log_overrides_from_nvs()`, so it is in place before any GATT
+pairing can be triggered. `api_server::stats::set_passkey()` remains the
+single source of truth for persist+apply; `/clone` funnels its own
+`passkey=` into it. See `docs/clone.md` §6.
+
+#### Dashboard rendering
+
+`loadBond()` polls `GET /bond` every 5 s and unhides `#bondpanel` on the
+first success — a firmware without `CONFIG_NBP_SMP` 404s, so the panel
+and the per-row bond buttons simply never appear. The devices table
+grows a second button next to `clone` on every connectable row: `bond` /
+`no-bond` toggles auto-bond membership, and a 🔒 prefix marks a peer
+whose keys are already in the store (the two are independent).
 
 ## BLE transport (`CONFIG_NBP_BLE_HTTPD`)
 

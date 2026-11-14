@@ -41,7 +41,9 @@ def mac_to_int(mac: str) -> int:
 
 
 def http_post(url: str) -> bytes:
-    req = urllib.request.Request(url, method="POST")
+    # Every state-changing POST needs the CSRF confirm header.
+    req = urllib.request.Request(url, method="POST",
+                                 headers={"X-NBP-Confirm": "yes"})
     with urllib.request.urlopen(req, timeout=5) as r:
         return r.read()
 

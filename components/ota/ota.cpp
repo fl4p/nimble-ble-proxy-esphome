@@ -1,6 +1,7 @@
 #include "ota.h"
 
 #include "proxy_config.h"
+#include "http_confirm.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -35,6 +36,7 @@ QuiesceFn g_quiesce_end = nullptr;
 constexpr size_t CHUNK = 4096;
 
 esp_err_t update_post(httpd_req_t *req) {
+  if (!nbp_http::confirmed(req)) return nbp_http::send_unconfirmed(req);
   // OTA is a remote firmware-write primitive — surface it prominently in
   // the web console (WARN) and record who kicked it off.
   char peer[48] = "?";
@@ -159,11 +161,14 @@ void start() {
   // We're now well past that: /favicon.svg, /txpower, /cpufreq, /scan,
   // /wifips, /hostname, /advitvl (all GET+POST pairs), /devices, /clone
   // GET+POST (clone absorbed /passkey), plus /nat GET+POST and /portmap
-  // POST when the NAT router is built in — ~28 routes today. Each
+  // POST when the NAT router is built in, /bond GET+POST with NBP_SMP,
+  // /links GET with NBP_BLE — 39 routes on the full S3 build (40 with
+  // NBP_CRASH_TEST). Each
   // unregistered handler is a silent 404 in production (we saw
   // /devices drop at boot), so size with a comfortable margin and add
-  // a runtime assert at registration time.
-  cfg.max_uri_handlers = 40;
+  // a runtime assert at registration time. Each slot is one pointer of
+  // heap (4 B).
+  cfg.max_uri_handlers = 44;
   // CONFIG_LWIP_MAX_SOCKETS=16 leaves the api_server (1 listen + up to
   // 4 clients), mDNS and clone.mirror plenty of room alongside the
   // dashboard. Bumping httpd here to 5 lets a phone + a desktop browser

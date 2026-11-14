@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.cpp"
+    SRCS "main.cpp" "ws_selftest.cpp"
     INCLUDE_DIRS "." "../include"
     REQUIRES
         ble_backend
@@ -11,6 +11,7 @@ idf_component_register(
         ble_httpd
         ws_proxy
         nat_router
+        dhcps_hostname
         liveness_wdt
         serial_provision
         crash_capture
