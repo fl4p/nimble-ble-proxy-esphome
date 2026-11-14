@@ -312,6 +312,53 @@ The synthetic row carries a `.synthetic` class (italic, dim) so it's
 visually distinct from a live-scanned row. RSSI / adv/s / age all show
 `—` since the scanner isn't seeing the peripheral.
 
+### `GET /links` *(BLE builds; HTTP only, not on the BLE transport)*
+
+Live state of every in-use GATT client slot (the proxy's links to BLE
+peripherals). The ESPHome native API has no message for this: upstream
+`BluetoothDeviceConnectionResponse` carries only `connected`/`mtu`/`error`,
+and `BluetoothSetConnectionParamsRequest` (145) cannot read values back.
+
+```json
+{
+  "slots": 2,
+  "ble_off": false,
+  "links": [
+    {
+      "address": "63:8B:3B:FA:E1:4D",
+      "state": "connected",
+      "owner": 3,
+      "owner_ip": "192.168.1.200",
+      "mtu": 23,
+      "age_s": 6,
+      "rssi": -65,
+      "tx_power": 9,
+      "interval_ms": 50.00,
+      "latency": 0,
+      "supervision_timeout_ms": 2560,
+      "encrypted": false,
+      "bonded": false
+    }
+  ]
+}
+```
+
+- `state` — `connecting`, `connected` or `disconnecting`.
+- `owner` / `owner_ip` — id and source IP of the API client that opened the
+  link. HTTP has no API-client identity, so every link is listed and a
+  consumer picks its own by IP. `null` once that client has left.
+- `rssi` — dBm from an HCI Read RSSI on the live link, per request.
+- `tx_power` — dBm the controller applies to this connection
+  (`esp_ble_tx_power_get_enhanced` on C3/S3, per-handle
+  `esp_ble_tx_power_get` on ESP32); follows `POST /txpower?ble=`.
+- `interval_ms`, `latency`, `supervision_timeout_ms`, `encrypted`, `bonded`
+  — from `ble_gap_conn_find`.
+
+A value the stack cannot supply is `null`, never `0`: everything but
+`address`/`state`/`owner` while a link is still connecting, and any value
+whose read fails or whose handle no longer belongs to that peer. After
+`POST /txpower?ble=off`, `links` is empty and `ble_off` is `true`.
+
 ### `GET /log?since=<seq>` *(gated by `CONFIG_NBP_WEB_CONSOLE`)*
 
 Chunked stream of the slice `[since, current_seq)` of the log ring.

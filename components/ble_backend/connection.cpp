@@ -6,7 +6,10 @@
 #include "scanner.h"
 
 #include "NimBLEDevice.h"
+#include "esp_bt.h"  // esp_ble_tx_power_get[_enhanced] for /links
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "host/ble_gap.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -45,6 +48,7 @@ struct Slot {
   // invocation carries it so the bridge reports only to the owner.
   OwnerId owner = kNoOwner;
   uint16_t mtu = 0;  // negotiated MTU, set in onConnect
+  int64_t connected_us = 0;  // esp_timer_get_time() at onConnect (/links)
   // Teardown requested while the slot was still Connecting. NimBLE may
   // already have the link up (connect-established timer pending) when
   // we cancel, so onConnect checks this and terminates instead of
@@ -151,6 +155,7 @@ void clear_locked(Slot *s) {
   s->cb = nullptr;
   s->owner = kNoOwner;
   s->mtu = 0;
+  s->connected_us = 0;
   s->abort = false;
 #ifdef CONFIG_NBP_SMP
   // A bonding job may still be blocked in secureConnection(); it detects
@@ -449,6 +454,7 @@ class ClientCb : public NimBLEClientCallbacks {
       } else {
         s->state = State::Connected;
         s->mtu = mtu;
+        s->connected_us = esp_timer_get_time();
         owner_snapshot = s->owner;
 #ifdef CONFIG_NBP_SMP
         if (!encrypted && auto_bond_listed_locked(s->address)) {
@@ -955,6 +961,106 @@ uint8_t in_use_addresses(uint64_t *out, uint8_t cap) {
     }
   }
   xSemaphoreGive(g_mutex);
+  return n;
+}
+
+namespace {
+
+const char *state_name(State st) {
+  switch (st) {
+    case State::Connecting: return "connecting";
+    case State::Connected: return "connected";
+    case State::Disconnecting: return "disconnecting";
+    case State::Free: break;
+  }
+  return "free";
+}
+
+// TX power level the controller applies to connection `handle`, in dBm.
+// False when the controller has no per-connection figure for it. The
+// level enums differ per target (ESP32: -12..+9 dBm in 3 dB steps from
+// index 0; C3/S3: -24..+20 dBm, index 15 = +20), so map by target and
+// report nothing on targets this was not written against.
+bool conn_tx_power_dbm(uint16_t handle, int8_t *out) {
+#if CONFIG_IDF_TARGET_ESP32
+  // Legacy controller: one power type per connection handle 0..8.
+  if (handle > ESP_BLE_PWR_TYPE_CONN_HDL8) return false;
+  esp_power_level_t lvl =
+      esp_ble_tx_power_get(static_cast<esp_ble_power_type_t>(handle));
+  if (lvl < ESP_PWR_LVL_N12 || lvl > ESP_PWR_LVL_P9) return false;
+  *out = static_cast<int8_t>(-12 + 3 * static_cast<int>(lvl));
+  return true;
+#elif CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32S3
+  esp_power_level_t lvl =
+      esp_ble_tx_power_get_enhanced(ESP_BLE_ENHANCED_PWR_TYPE_CONN, handle);
+  if (lvl < ESP_PWR_LVL_N24 || lvl > ESP_PWR_LVL_P20) return false;
+  *out = lvl == ESP_PWR_LVL_P20
+             ? 20
+             : static_cast<int8_t>(-24 + 3 * static_cast<int>(lvl));
+  return true;
+#else
+  (void)handle;
+  (void)out;
+  return false;
+#endif
+}
+
+}  // namespace
+
+uint8_t link_info(LinkInfo *out, uint8_t cap) {
+  // After POST /txpower?ble=off the host is gone; nothing to ask.
+  if (ble_backend::powered_off() || g_mutex == nullptr) return 0;
+  uint16_t handles[proxy::MAX_CONNECTIONS];
+  uint8_t n = 0;
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  for (auto &s : g_slots) {
+    if (s.state == State::Free || n >= cap ||
+        n >= proxy::MAX_CONNECTIONS) {
+      continue;
+    }
+    LinkInfo &li = out[n];
+    li = LinkInfo{};
+    li.address = s.address;
+    li.owner = s.owner;
+    li.state = state_name(s.state);
+    li.mtu = s.mtu;
+    li.connected_us = s.connected_us;
+    // m_connHandle is a plain member read, no host lock.
+    handles[n] = (s.state == State::Connected && s.client != nullptr)
+                     ? s.client->getConnHandle()
+                     : BLE_HS_CONN_HANDLE_NONE;
+    ++n;
+  }
+  xSemaphoreGive(g_mutex);
+
+  // Host calls only after g_mutex is released (lock ordering, see
+  // CLAUDE.md). The handle may have been freed and reused by another
+  // link in between, so every value is taken only if ble_gap_conn_find
+  // still shows the same peer behind it.
+  for (uint8_t i = 0; i < n; ++i) {
+    LinkInfo &li = out[i];
+    const uint16_t h = handles[i];
+    if (h == BLE_HS_CONN_HANDLE_NONE) continue;
+    ble_gap_conn_desc d{};
+    if (ble_gap_conn_find(h, &d) != 0) continue;
+    if (address::nimble_le_to_uint64(d.peer_ota_addr.val) != li.address &&
+        address::nimble_le_to_uint64(d.peer_id_addr.val) != li.address) {
+      continue;
+    }
+    li.has_params = true;
+    li.interval = d.conn_itvl;
+    li.latency = d.conn_latency;
+    li.supervision_timeout = d.supervision_timeout;
+    li.encrypted = d.sec_state.encrypted;
+    li.bonded = d.sec_state.bonded;
+    int8_t rssi = 0;
+    // HCI Read RSSI: 127 is the spec's "not available".
+    if (ble_gap_conn_rssi(h, &rssi) == 0 && rssi != 127) {
+      li.has_rssi = true;
+      li.rssi = rssi;
+    }
+    li.has_tx_power = conn_tx_power_dbm(h, &li.tx_power);
+  }
   return n;
 }
 

@@ -940,6 +940,93 @@ esp_err_t scan_post(httpd_req_t *req) {
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
+
+// GET /links: every in-use GATT client slot with its live link values.
+// HTTP carries no API-client identity, so all links are listed with the
+// owning client's id and IP; a consumer picks its own by IP. Values the
+// stack could not read are null.
+size_t build_links_json(char *buf, size_t cap) {
+  using ble_backend::connection::LinkInfo;
+  LinkInfo links[proxy::MAX_CONNECTIONS];
+  const uint8_t n =
+      ble_backend::connection::link_info(links, proxy::MAX_CONNECTIONS);
+  const int64_t now = esp_timer_get_time();
+  size_t off = 0;
+  auto put = [&](const char *fmt, auto... args) {
+    if (off >= cap) return;
+    int w = std::snprintf(buf + off, cap - off, fmt, args...);
+    if (w > 0) off += static_cast<size_t>(w);
+  };
+  put("{\"slots\":%u,\"ble_off\":%s,\"links\":[",
+      static_cast<unsigned>(proxy::MAX_CONNECTIONS),
+      ble_backend::powered_off() ? "true" : "false");
+  for (uint8_t i = 0; i < n; ++i) {
+    const LinkInfo &l = links[i];
+    const uint64_t a = l.address;
+    put("%s{\"address\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"state\":\"%s\"",
+        i ? "," : "", static_cast<unsigned>((a >> 40) & 0xFF),
+        static_cast<unsigned>((a >> 32) & 0xFF),
+        static_cast<unsigned>((a >> 24) & 0xFF),
+        static_cast<unsigned>((a >> 16) & 0xFF),
+        static_cast<unsigned>((a >> 8) & 0xFF),
+        static_cast<unsigned>(a & 0xFF), l.state);
+    uint32_t ip = 0;
+    if (l.owner != ble_backend::connection::kNoOwner &&
+        api_server::client_peer_ip(l.owner, &ip)) {
+      put(",\"owner\":%lu,\"owner_ip\":\"%u.%u.%u.%u\"",
+          static_cast<unsigned long>(l.owner), ip & 0xFF, (ip >> 8) & 0xFF,
+          (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+    } else {
+      put(",\"owner\":null,\"owner_ip\":null");
+    }
+    if (l.connected_us > 0) {
+      put(",\"mtu\":%u,\"age_s\":%lu", static_cast<unsigned>(l.mtu),
+          static_cast<unsigned long>((now - l.connected_us) / 1000000));
+    } else {
+      put(",\"mtu\":null,\"age_s\":null");
+    }
+    if (l.has_rssi) {
+      put(",\"rssi\":%d", static_cast<int>(l.rssi));
+    } else {
+      put(",\"rssi\":null");
+    }
+    if (l.has_tx_power) {
+      put(",\"tx_power\":%d", static_cast<int>(l.tx_power));
+    } else {
+      put(",\"tx_power\":null");
+    }
+    if (l.has_params) {
+      // interval: 1.25 ms units; supervision timeout: 10 ms units.
+      const unsigned itvl_x100 = static_cast<unsigned>(l.interval) * 125u;
+      put(",\"interval_ms\":%u.%02u,\"latency\":%u,"
+          "\"supervision_timeout_ms\":%u,\"encrypted\":%s,\"bonded\":%s}",
+          itvl_x100 / 100, itvl_x100 % 100, static_cast<unsigned>(l.latency),
+          static_cast<unsigned>(l.supervision_timeout) * 10u,
+          l.encrypted ? "true" : "false", l.bonded ? "true" : "false");
+    } else {
+      put(",\"interval_ms\":null,\"latency\":null,"
+          "\"supervision_timeout_ms\":null,\"encrypted\":null,"
+          "\"bonded\":null}");
+    }
+  }
+  put("]}");
+  // Truncated: send nothing rather than broken JSON.
+  return off < cap ? off : 0;
+}
+
+esp_err_t links_get(httpd_req_t *req) {
+  // ~300 B per link at most. On the httpd stack (8 KiB), not static:
+  // this device is DRAM-bound and the buffer is only needed per request.
+  static_assert(proxy::MAX_CONNECTIONS <= 3, "grow the /links buffer");
+  char buf[1024];
+  size_t n = build_links_json(buf, sizeof(buf));
+  if (n == 0) {
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                               "links overflow");
+  }
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, buf, n);
+}
 #endif  // CONFIG_NBP_BLE
 
 #if CONFIG_NBP_DEVICES_PANEL
@@ -2287,6 +2374,11 @@ void register_endpoints(httpd_handle_t srv) {
                         .user_ctx = nullptr};
   httpd_register_uri_handler(srv, &scan_g);
   httpd_register_uri_handler(srv, &scan_p);
+  httpd_uri_t links_g = {.uri = "/links",
+                         .method = HTTP_GET,
+                         .handler = &links_get,
+                         .user_ctx = nullptr};
+  httpd_register_uri_handler(srv, &links_g);
 #endif  // CONFIG_NBP_BLE
 #if CONFIG_NBP_DEVICES_PANEL
   httpd_uri_t devices = {.uri = "/devices",

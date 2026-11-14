@@ -161,8 +161,9 @@ void start() {
   // We're now well past that: /favicon.svg, /txpower, /cpufreq, /scan,
   // /wifips, /hostname, /advitvl (all GET+POST pairs), /devices, /clone
   // GET+POST (clone absorbed /passkey), plus /nat GET+POST and /portmap
-  // POST when the NAT router is built in, /bond GET+POST with NBP_SMP —
-  // 38 routes on the full S3 build (39 with NBP_CRASH_TEST). Each
+  // POST when the NAT router is built in, /bond GET+POST with NBP_SMP,
+  // /links GET with NBP_BLE — 39 routes on the full S3 build (40 with
+  // NBP_CRASH_TEST). Each
   // unregistered handler is a silent 404 in production (we saw
   // /devices drop at boot), so size with a comfortable margin and add
   // a runtime assert at registration time. Each slot is one pointer of

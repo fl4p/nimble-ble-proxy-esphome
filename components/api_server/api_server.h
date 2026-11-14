@@ -34,6 +34,10 @@ bool send_to(uint32_t client_id, uint16_t msg_type, EncodeFn encode, void *ctx);
 // callbacks to bail out early before doing real work.
 bool has_active_client();
 
+// IPv4 address (network order) the API client `client_id` connected from.
+// False if that client is gone. Loopback for the dashboard's /api bridge.
+bool client_peer_ip(uint32_t client_id, uint32_t *ip_out);
+
 // Send-queue cap bookkeeping for /stats.json (NBP_API_CLIENT_TXQ_CAP).
 // Heap figures are the bytes lwIP holds for a client's unsent + unacked
 // segments, measured at that client's last send.
