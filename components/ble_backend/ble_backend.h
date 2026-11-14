@@ -74,6 +74,15 @@ void set_advertising_auto_suspend(bool suspend);
 bool power_off();
 bool powered_off();
 
+// Guard for NimBLE host calls made from tasks other than the host task (httpd
+// handlers such as /links and /bond). host_acquire() returns false once BLE is
+// powered off, and then the caller must not touch the stack. On true, the
+// stack stays up until host_release(): power_off() latches the flag first,
+// then waits for current holders before it deinits. Never take it while
+// holding connection.cpp's g_mutex.
+bool host_acquire();
+void host_release();
+
 // Reversible radio quiesce for an OTA download (vs the destructive power_off):
 // pauses the central scan and suspends advertising so coex can't starve the
 // firmware upload, holding that state against the auto-off supervisor. Restore

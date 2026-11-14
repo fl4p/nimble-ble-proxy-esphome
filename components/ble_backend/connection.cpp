@@ -663,11 +663,12 @@ namespace {
 // address type it sends is the one from the advertisement, which is not
 // necessarily the peer's *identity* address type in the bond store).
 // Enumerate the store and compare the 48 bits instead.
+// The bond store is a host facility. Callers hold host_acquire(), which
+// fails after power_off()'s NimBLEDevice::deinit(true) and keeps a
+// concurrent power_off() from deinit-ing mid-call. Before
+// ble_backend::start() (g_mutex still null) the host is not up yet.
 bool find_bond(uint64_t address, NimBLEAddress *out) {
-  // The bond store is a host facility; after power_off()'s
-  // NimBLEDevice::deinit(true) there is no host to ask. Before
-  // ble_backend::start() (g_mutex still null) the host is not up yet.
-  if (ble_backend::powered_off() || g_mutex == nullptr) return false;
+  if (g_mutex == nullptr) return false;
   int n = NimBLEDevice::getNumBonds();
   for (int i = 0; i < n; ++i) {
     NimBLEAddress a = NimBLEDevice::getBondedAddress(i);
@@ -681,13 +682,21 @@ bool find_bond(uint64_t address, NimBLEAddress *out) {
 }  // namespace
 
 bool has_bond(uint64_t address) {
-  return find_bond(address, nullptr);
+  if (!ble_backend::host_acquire()) return false;
+  bool found = find_bond(address, nullptr);
+  ble_backend::host_release();
+  return found;
 }
 
 bool unpair(uint64_t address) {
+  if (!ble_backend::host_acquire()) return false;
   NimBLEAddress a{};
-  if (!find_bond(address, &a)) return false;
+  if (!find_bond(address, &a)) {
+    ble_backend::host_release();
+    return false;
+  }
   bool ok = NimBLEDevice::deleteBond(a);
+  ble_backend::host_release();
   ESP_LOGI(TAG, "unpair %012llx -> %s",
            static_cast<unsigned long long>(address), ok ? "ok" : "failed");
   return ok;
@@ -695,11 +704,12 @@ bool unpair(uint64_t address) {
 
 uint8_t bonded_addresses(uint64_t *out, uint8_t cap) {
   uint8_t n = 0;
-  if (ble_backend::powered_off() || g_mutex == nullptr) return 0;
+  if (g_mutex == nullptr || !ble_backend::host_acquire()) return 0;
   int total = NimBLEDevice::getNumBonds();
   for (int i = 0; i < total && n < cap; ++i) {
     out[n++] = static_cast<uint64_t>(NimBLEDevice::getBondedAddress(i));
   }
+  ble_backend::host_release();
   return n;
 }
 
@@ -990,10 +1000,18 @@ bool conn_tx_power_dbm(uint16_t handle, int8_t *out) {
   if (lvl < ESP_PWR_LVL_N12 || lvl > ESP_PWR_LVL_P9) return false;
   *out = static_cast<int8_t>(-12 + 3 * static_cast<int>(lvl));
   return true;
-#elif CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32S3
+#elif CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32S3 || \
+    CONFIG_IDF_TARGET_ESP32C6
   esp_power_level_t lvl =
       esp_ble_tx_power_get_enhanced(ESP_BLE_ENHANCED_PWR_TYPE_CONN, handle);
-  if (lvl < ESP_PWR_LVL_N24 || lvl > ESP_PWR_LVL_P20) return false;
+  // Same index -> dBm mapping on all three; the C6 enum just starts at
+  // N15 (= 3) instead of N24 (= 0).
+#if CONFIG_IDF_TARGET_ESP32C6
+  constexpr esp_power_level_t kLowest = ESP_PWR_LVL_N15;
+#else
+  constexpr esp_power_level_t kLowest = ESP_PWR_LVL_N24;
+#endif
+  if (lvl < kLowest || lvl > ESP_PWR_LVL_P20) return false;
   *out = lvl == ESP_PWR_LVL_P20
              ? 20
              : static_cast<int8_t>(-24 + 3 * static_cast<int>(lvl));
@@ -1034,9 +1052,13 @@ uint8_t link_info(LinkInfo *out, uint8_t cap) {
   xSemaphoreGive(g_mutex);
 
   // Host calls only after g_mutex is released (lock ordering, see
-  // CLAUDE.md). The handle may have been freed and reused by another
-  // link in between, so every value is taken only if ble_gap_conn_find
-  // still shows the same peer behind it.
+  // CLAUDE.md), and under host_acquire() so a concurrent power_off()
+  // cannot deinit the stack mid-query. If BLE went off since the snapshot,
+  // report the links with null values rather than ask a dead host.
+  // The handle may have been freed and reused by another link in between,
+  // so every value is taken only if ble_gap_conn_find still shows the same
+  // peer behind it.
+  if (!ble_backend::host_acquire()) return n;
   for (uint8_t i = 0; i < n; ++i) {
     LinkInfo &li = out[i];
     const uint16_t h = handles[i];
@@ -1061,6 +1083,7 @@ uint8_t link_info(LinkInfo *out, uint8_t cap) {
     }
     li.has_tx_power = conn_tx_power_dbm(h, &li.tx_power);
   }
+  ble_backend::host_release();
   return n;
 }
 

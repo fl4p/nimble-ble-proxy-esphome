@@ -349,7 +349,7 @@ and `BluetoothSetConnectionParamsRequest` (145) cannot read values back.
   consumer picks its own by IP. `null` once that client has left.
 - `rssi` — dBm from an HCI Read RSSI on the live link, per request.
 - `tx_power` — dBm the controller applies to this connection
-  (`esp_ble_tx_power_get_enhanced` on C3/S3, per-handle
+  (`esp_ble_tx_power_get_enhanced` on C3/S3/C6, per-handle
   `esp_ble_tx_power_get` on ESP32); follows `POST /txpower?ble=`.
 - `interval_ms`, `latency`, `supervision_timeout_ms`, `encrypted`, `bonded`
   — from `ble_gap_conn_find`.
