@@ -184,12 +184,10 @@ Two common profiles:
 
 ## Build
 
-ESP-IDF 6.0.3 is what main is currently built and checked with
-(2026-11; activate with `. ~/dev/esp/idf6.0.3/export.sh`). The IDF 6
-compile fix in the root `CMakeLists.txt` is gated on
-`IDF_VERSION_MAJOR >= 6`, so the IDF 5.5 path is unchanged, but 5.5
-has not been re-built since that checkout went missing. Treat 5.5 as
-untested, not broken. The nanopb generator needs `protobuf` and
+Build with ESP-IDF 6.0.3, the version CI uses (`v6.0.3` in
+`.github/workflows/build.yml`). The IDF 6 compile fix in the root
+`CMakeLists.txt` is gated on `IDF_VERSION_MAJOR >= 6`, so the IDF 5.5
+path is still there but untested. The nanopb generator needs `protobuf` and
 `grpcio-tools` in the IDF Python env. Component manager pulls
 [`h2zero/esp-nimble-cpp ^2.5.0`](https://github.com/h2zero/esp-nimble-cpp)
 and `nanopb`. A small patch is auto-applied to the managed NimBLE-CPP
