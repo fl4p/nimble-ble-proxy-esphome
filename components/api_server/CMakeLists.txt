@@ -24,6 +24,7 @@ idf_component_register(
         api_proto
         ble_backend
         bt
+        efuse
         esp_app_format
         esp_driver_tsens
         esp_event

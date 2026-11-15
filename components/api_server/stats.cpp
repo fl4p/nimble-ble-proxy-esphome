@@ -14,6 +14,11 @@
 #include "esp_bt.h"  // esp_ble_tx_power_set / esp_power_level_t (BT stack)
 #endif
 #include "esp_attr.h"      // __NOINIT_ATTR for the retained log ring
+#include "esp_chip_info.h"
+#include "esp_efuse.h"
+#if CONFIG_IDF_TARGET_ESP32S3
+#include "esp_efuse_table.h"
+#endif
 #include "esp_app_desc.h"  // esp_app_get_description (project/version/build)
 #include "esp_log.h"
 #include "esp_pm.h"
@@ -916,9 +921,9 @@ esp_err_t stats_get(httpd_req_t *req) {
   // and the capability flags); the optional ap_rx/ap_tx 64-bit byte
   // counters (NAT builds) add ~60 more, the oom counters ~70, the notify
   // breakdown ~75, the BLE disconnect fields ~250, the WiFi disconnect
-  // fields ~170, the API transmit figures ~260 + ~70 per client: ~1.4 KB
-  // with two clients on a NAT build. Static: httpd runs one handler at a
-  // time, and that much is too much for its task stack.
+  // fields ~170, chip ids ~90, the API transmit figures ~260 + ~70 per
+  // client: ~1.5 KB with two clients on a NAT build. Static: httpd runs one
+  // handler at a time, and that much is too much for its task stack.
   static char buf[1792];
   size_t n = build_stats_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
@@ -1191,6 +1196,42 @@ size_t build_stats_json(char *buf, size_t cap) {
       cpu0, cpu1_s, static_cast<double>(temp_c), ble_cap, clone_cap, nat_cap,
       smp_cap);
   if (n < 0) return 0;
+  // Chip identification (eFuse, read once). psram_cap: 0 none, 1 8M, 2 2M,
+  // 3 16M, 4 4M (esp32s3/esp_efuse_table.csv).
+  if (static_cast<size_t>(n) < cap) {
+    static int16_t chip_rev = -1;
+    static uint8_t pkg_ver;
+#if CONFIG_IDF_TARGET_ESP32S3
+    static uint8_t psram_cap, psram_vendor, flash_cap;
+#endif
+    if (chip_rev < 0) {
+      esp_chip_info_t ci;
+      esp_chip_info(&ci);
+      pkg_ver = static_cast<uint8_t>(esp_efuse_get_pkg_ver());
+#if CONFIG_IDF_TARGET_ESP32S3
+      esp_efuse_read_field_blob(ESP_EFUSE_PSRAM_CAP, &psram_cap, 3);
+      esp_efuse_read_field_blob(ESP_EFUSE_PSRAM_VENDOR, &psram_vendor, 2);
+      esp_efuse_read_field_blob(ESP_EFUSE_FLASH_CAP, &flash_cap, 3);
+#endif
+      chip_rev = static_cast<int16_t>(ci.revision);
+    }
+    int m = std::snprintf(buf + n, cap - n, ",\"chip_rev\":%d,\"pkg_ver\":%u",
+                          chip_rev, pkg_ver);
+    if (m > 0) n += m;
+#if CONFIG_IDF_TARGET_ESP32S3
+    static const int8_t kPsramMb[] = {0, 8, 2, 16, 4};
+    if (static_cast<size_t>(n) < cap) {
+      char mb[5] = "null";
+      if (psram_cap < sizeof(kPsramMb))
+        std::snprintf(mb, sizeof(mb), "%d", kPsramMb[psram_cap]);
+      m = std::snprintf(buf + n, cap - n,
+                        ",\"psram_cap\":%u,\"psram_mb\":%s,"
+                        "\"psram_vendor\":%u,\"flash_cap\":%u",
+                        psram_cap, mb, psram_vendor, flash_cap);
+      if (m > 0) n += m;
+    }
+#endif
+  }
   // NAT-router SoftAP throughput, only when a provider is installed (i.e.
   // NBP_NAT_ROUTER builds). Cumulative byte counters; the dashboard turns
   // them into a KB/s rate. Omitted entirely on non-router builds so the
