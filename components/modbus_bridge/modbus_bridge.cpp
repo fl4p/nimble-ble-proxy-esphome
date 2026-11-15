@@ -7,12 +7,10 @@
 
 #include "driver/gpio.h"
 #include "driver/uart.h"
-#include "esp_bit_defs.h"
 #include "esp_http_server.h"
 #include "esp_intr_alloc.h"
 #include "esp_log.h"
 #include "esp_netif.h"
-#include "esp_private/esp_gpio_reserve.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -20,11 +18,8 @@
 #include "http_confirm.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
+#include "nbp_gpio.h"
 #include "nvs.h"
-#include "soc/uart_pins.h"
-#if CONFIG_IDF_TARGET_ESP32S3
-#include "soc/usb_pins.h"
-#endif
 
 namespace modbus_bridge {
 namespace {
@@ -66,19 +61,9 @@ uint8_t g_buf[kBufLen];
 constexpr char kParity[] = "neo";
 
 bool pin_ok(int p) {
-  if (p < 0 || !GPIO_IS_VALID_OUTPUT_GPIO(p)) return false;
-  if (p == U0TXD_GPIO_NUM || p == U0RXD_GPIO_NUM) return false;  // console
-  // Claimed by IDF (flash, PSRAM); a running bridge's UART claims its TX.
-  if (esp_gpio_is_reserved(BIT64(p)) &&
-      !(g_task && (p == g_tx || p == g_rx || p == g_de)))
-    return false;
-#if CONFIG_IDF_TARGET_ESP32S3
-  // Octal PSRAM 33..37 is not reserved with quad flash.
-  if (p >= 26 && p <= 37) return false;
-  if (p == 0 || p == 3 || p == 45 || p == 46) return false;  // straps
-  if (p == USBPHY_DM_NUM || p == USBPHY_DP_NUM) return false;
-#endif
-  return true;
+  return nbp_gpio::allowed(
+      p, g_pins_ok ? nbp_gpio::bit(g_tx) | nbp_gpio::bit(g_rx) | nbp_gpio::bit(g_de)
+                   : 0);
 }
 
 bool pins_ok(int tx, int rx, int de) {
@@ -178,7 +163,9 @@ void load_once() {
   g_loaded = true;
   nvs_load();
   g_pins_ok = pins_ok(g_tx, g_rx, g_de);
-  if (!g_pins_ok)
+  if (g_pins_ok)
+    nbp_gpio::claim(nbp_gpio::bit(g_tx) | nbp_gpio::bit(g_rx) | nbp_gpio::bit(g_de));
+  else
     ESP_LOGE(TAG, "pins tx=%d rx=%d de=%d not allowed, bridge off", g_tx, g_rx, g_de);
 }
 

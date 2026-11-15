@@ -19,4 +19,5 @@ idf_component_register(
         oom_guard
         bench
         modbus_bridge
+        env_sensors
 )

@@ -930,8 +930,8 @@
 - **Not NimBLE `MEM_ALLOC_MODE_EXTERNAL`**: it allocates PSRAM-only and
   asserts on the first host allocation when PSRAM is absent.
 - **GPIO 33-37 belong to the octal PSRAM** on an S3R8 (26-32 to flash). The
-  firmware drives no GPIO itself except the optional RS485 bridge below
-  (console UART0 on 43/44).
+  firmware drives no GPIO itself except the optional RS485 bridge and env
+  sensors below (console UART0 on 43/44).
 - **Every heap figure and guard reads internal RAM**
   (`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`), not `esp_get_free_heap_size()` /
   `MALLOC_CAP_DEFAULT`, which include PSRAM once it is in the heap. Without
@@ -1003,6 +1003,86 @@
   succeeded.
 - Host check (read-only, FC04 0x3108.. + FC01 coil 0x0F, slave 3):
   `scripts/modbus_bridge_test.py <ip>`.
+
+## Environment sensors (`NBP_ENV_SENSORS`, `components/env_sensors`)
+
+- **Build** (PSRAM unit, with the bridge): `idf.py -B build-psram-mb-env
+  -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-psram-mb-env/sdkconfig
+  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.modbus;sdkconfig.defaults.sensors" build`.
+  Default n. Builds only so far, not hardware-tested.
+- **Sensors:** SHT3x (SHT30/SHT31-F) at I2C 0x44 and/or 0x45, single shot
+  0x2400, both CRC8s checked; DS18B20/DS1822 on one 1-Wire bus
+  (`espressif/onewire_bus`, RMT, pulled in only with the option): ROM search,
+  convert all (skip ROM), 750 ms, read each scratchpad by match ROM, CRC and
+  config byte checked (a bus held low reads zeros with a valid CRC), 85.0 C
+  power-on value = `por`. Up to `NBP_ENV_DS_MAX` (6) probes; slots of
+  vanished ROMs are reused once the table is full.
+- **Pins** (Kconfig, NVS namespace `envsens`): SDA 8, SCL 9, 1-Wire 7; -1 turns
+  a bus off. Chosen free on the S3R8: not flash/PSRAM 26-37, straps 0/3/45/46,
+  USB 19/20, UART0 43/44, JTAG 39-42, the bridge's 4/5 (+DE 6) or the DevKit
+  RGB LED 38/48. Checked by `nbp_gpio::allowed()` (`include/nbp_gpio.h`,
+  shared with the modbus bridge): console, `esp_gpio_is_reserved()`, S3
+  ranges, and pins claimed by the other peripheral (`nbp_gpio::claim`,
+  bridge first). A disallowed set leaves the sensors off
+  (`running:false`). Internal pull-ups are on; **the 1-Wire bus needs an
+  external 4.7 kOhm pull-up to 3V3** and the probes their own VDD (3-wire;
+  parasite power is not supported, it reads `por`). I2C breakouts usually
+  carry their own pull-ups.
+- **Task** `env`, priority 1, 3 KiB internal stack (`stack_free` = high-water),
+  every `NBP_ENV_PERIOD_S` (30 s). The fragment moves the RMT/I2C driver code
+  out of IRAM; neither ISR is cache-safe either way, so a transfer hit by a
+  flash write fails its CRC and reads null for that cycle.
+- **Readings are never stale-as-fresh:** a value is shown only if the last
+  attempt succeeded and it is younger than 3 periods, with `age_s`; otherwise
+  `t`/`rh` are null with `err` (`crc`, `i2c`, `absent`, `bus`, `por`,
+  `stale`) and `fails` (consecutive). An SHT address never seen is omitted;
+  one that vanished stays as `absent`.
+- `GET /sensors` (worst case 2 SHT + 6 DS < 744 B, stack buffer):
+  `{"sht":[{"addr":68,"t":21.40,"rh":55.20,"age_s":12}],"ds":[{"id":"28ff…","t":19.81,"age_s":12}],"err":{"sht_crc":0,"sht_i2c":0,"ds_crc":0,"ds_miss":0,"ds_bus":0,"ds_por":0,"ds_full":0},"cfg":{"sda":8,"scl":9,"ow":7,"period_s":30,"running":true,"stack_free":1234,"cycles":5}}`.
+  The DS id is the ROM in bus order, family byte first.
+  `POST /sensors?period=5..3600&sda=&scl=&ow=` (`-1` = off, `kconfig` = drop
+  the override) with `X-NBP-Confirm: yes`; period at once, pins after a
+  reboot. `/stats.json`: `env_cycles`, `env_sht_err`, `env_ds_err`,
+  `env_stack_free` (~100 B).
+- Host test (CRCs, conversions, JSON bound and freshness):
+  `c++ -std=c++20 -Wall -Wextra -Werror -I components/env_sensors
+  components/env_sensors/host_test/test_env_core.cpp -o /tmp/t && /tmp/t`.
+- **Home Assistant** (`rest`, no decoding; replace the ROM id and IP):
+
+```yaml
+rest:
+  - resource: http://192.0.2.10/sensors
+    scan_interval: 30
+    sensor:
+      - name: Caravan temperature
+        unique_id: caravan_sht_44_t
+        device_class: temperature
+        unit_of_measurement: "°C"
+        value_template: >
+          {% set s = value_json.sht | selectattr('addr', 'eq', 68) | first %}
+          {{ s.t if s is defined and s.t is not none else none }}
+        json_attributes_path: "$.sht[?(@.addr==68)]"
+        json_attributes: [age_s, err, fails]
+      - name: Caravan humidity
+        unique_id: caravan_sht_44_rh
+        device_class: humidity
+        unit_of_measurement: "%"
+        value_template: >
+          {% set s = value_json.sht | selectattr('addr', 'eq', 68) | first %}
+          {{ s.rh if s is defined and s.rh is not none else none }}
+      - name: Water tank temperature
+        unique_id: caravan_ds_28ff0123456789ab
+        device_class: temperature
+        unit_of_measurement: "°C"
+        value_template: >
+          {% set d = value_json.ds | selectattr('id', 'eq', '28ff0123456789ab') | first %}
+          {{ d.t if d is defined and d.t is not none else none }}
+        json_attributes_path: "$.ds[?(@.id=='28ff0123456789ab')]"
+        json_attributes: [age_s, err, fails]
+```
+
+  A `none` state shows as unknown in HA, so a failed or stale reading never
+  carries the last value forward.
 
 ## Liveness watchdog targets (v0.2.4, issue #2)
 

@@ -1,0 +1,7 @@
+dependencies:
+  # RMT-based 1-Wire bus; only pulled in when the sensors are compiled.
+  espressif/onewire_bus:
+    version: "^1.0.4"
+    rules:
+      - if: "$CONFIG{NBP_ENV_SENSORS} == True"
+  idf: ">=5.1"

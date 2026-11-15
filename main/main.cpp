@@ -54,6 +54,10 @@
 #include "modbus_bridge.h"
 #endif
 
+#if CONFIG_NBP_ENV_SENSORS
+#include "env_sensors.h"
+#endif
+
 #include "bench.h"
 
 #include "esp_app_desc.h"
@@ -162,6 +166,10 @@ extern "C" void app_main() {
 #if CONFIG_NBP_MODBUS_BRIDGE
   // RS485 DE low and TX idle from here, also in AP provisioning.
   modbus_bridge::early_init();
+#endif
+#if CONFIG_NBP_ENV_SENSORS
+  // After the bridge: its pins are claimed first.
+  env_sensors::early_init();
 #endif
 
   // Report a panic captured by the previous boot (RTC record, flash core
@@ -307,6 +315,11 @@ extern "C" void app_main() {
   modbus_bridge::start();
   modbus_bridge::register_endpoints(ota::handle());
   api_server::stats::set_modbus_stats_provider(&modbus_bridge::append_stats_json);
+#endif
+#if CONFIG_NBP_ENV_SENSORS
+  env_sensors::start();
+  env_sensors::register_endpoints(ota::handle());
+  api_server::stats::set_env_stats_provider(&env_sensors::append_stats_json);
 #endif
 #if CONFIG_NBP_NAT_ROUTER
   // STA is up (start_and_wait_for_ip returned above). Bring up the SoftAP

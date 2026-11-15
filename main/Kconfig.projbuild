@@ -398,6 +398,48 @@ config NBP_MB_REPLY_TIMEOUT_MS
 
 endif # NBP_MODBUS_BRIDGE
 
+config NBP_ENV_SENSORS
+    bool "Environment sensors (SHT3x on I2C, DS18B20 on 1-Wire)"
+    depends on NBP_WIFI
+    default n
+    help
+        Samples SHT3x (I2C 0x44/0x45) and DS18B20 probes (one 1-Wire bus,
+        RMT) in a low-priority task. GET /sensors (readings with age or
+        error), POST /sensors (pins, period), counters in /stats.json.
+        Enabled by sdkconfig.defaults.sensors.
+
+if NBP_ENV_SENSORS
+
+config NBP_ENV_SDA_GPIO
+    int "Env sensors: I2C SDA GPIO (-1 = no I2C)"
+    range -1 48
+    default 8
+
+config NBP_ENV_SCL_GPIO
+    int "Env sensors: I2C SCL GPIO (-1 = no I2C)"
+    range -1 48
+    default 9
+
+config NBP_ENV_OW_GPIO
+    int "Env sensors: 1-Wire data GPIO (-1 = no 1-Wire)"
+    range -1 48
+    default 7
+    help
+        Needs an external 4.7 kOhm pull-up to 3V3; the internal one is too
+        weak for a cable.
+
+config NBP_ENV_PERIOD_S
+    int "Env sensors: sample period (s)"
+    range 5 3600
+    default 30
+
+config NBP_ENV_DS_MAX
+    int "Env sensors: DS18B20 slots"
+    range 1 16
+    default 6
+
+endif # NBP_ENV_SENSORS
+
 config NBP_BLE
     bool "Enable BLE (NimBLE scanner/proxy + all BLE features)"
     default y

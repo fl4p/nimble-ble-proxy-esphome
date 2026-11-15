@@ -71,6 +71,7 @@ NatThroughputProvider g_nat_throughput_provider = nullptr;
 StatsAppender g_wifi_disc_provider = nullptr;
 StatsAppender g_ws_stats_provider = nullptr;
 StatsAppender g_modbus_stats_provider = nullptr;
+StatsAppender g_env_stats_provider = nullptr;
 
 #if CONFIG_NBP_WEB_CONSOLE
 // ---- log ring buffer ----
@@ -923,8 +924,8 @@ esp_err_t stats_get(httpd_req_t *req) {
   // 64-bit byte counters (NAT builds) add ~60 more, the oom counters ~70, the notify
   // breakdown ~75, the BLE disconnect fields ~250, the WiFi disconnect
   // fields ~170, chip ids ~90, the API transmit figures ~260 + ~70 per
-  // client, the modbus bridge ~150: ~1.8 KB with two clients on a NAT build
-  // and long uptime. Static: httpd runs one handler at a time, and that much
+  // client, the modbus bridge ~150, the env sensors ~100: ~1.9 KB with two
+  // clients on a NAT build and long uptime. Static: httpd runs one handler at a time, and that much
   // is too much for its task stack.
   static char buf[2304];
   size_t n = build_stats_json(buf, sizeof(buf));
@@ -1099,6 +1100,7 @@ void set_nat_throughput_provider(NatThroughputProvider fn) {
 void set_wifi_disc_provider(StatsAppender fn) { g_wifi_disc_provider = fn; }
 void set_ws_stats_provider(StatsAppender fn) { g_ws_stats_provider = fn; }
 void set_modbus_stats_provider(StatsAppender fn) { g_modbus_stats_provider = fn; }
+void set_env_stats_provider(StatsAppender fn) { g_env_stats_provider = fn; }
 
 size_t build_stats_json(char *buf, size_t bufsz) {
   if (bufsz < 2) return 0;
@@ -1308,6 +1310,11 @@ size_t build_stats_json(char *buf, size_t bufsz) {
   // RS485 bridge: client connected, frames/bytes each way, timeouts, refusals.
   if (g_modbus_stats_provider && static_cast<size_t>(n) < cap) {
     int m = g_modbus_stats_provider(buf + n, cap - n);
+    if (m > 0) n += m;
+  }
+  // Env sensors: cycles, error totals, task stack high-water (readings: /sensors).
+  if (g_env_stats_provider && static_cast<size_t>(n) < cap) {
+    int m = g_env_stats_provider(buf + n, cap - n);
     if (m > 0) n += m;
   }
   // API clients and their transmit path. api_txq: [id, lwIP queue heap at
