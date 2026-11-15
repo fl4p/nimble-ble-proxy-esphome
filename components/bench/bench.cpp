@@ -102,14 +102,15 @@ bool path_is(const char *path, const char *want) {
 void handle_stats(int fd, const char *path) {
   char body[384];
   int64_t now = esp_timer_get_time();
+  constexpr uint32_t kInternal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
   std::snprintf(
       body, sizeof(body),
       "{\"heap\":%u,\"heap_min\":%u,\"heap_largest\":%u,\"window_ms\":%" PRId64
       ",\"udp_pkts\":%" PRIu32 ",\"udp_bytes\":%" PRIu64
       ",\"udp_span_ms\":%" PRId64 ",\"tcp_rx\":%" PRIu64 ",\"tcp_tx\":%" PRIu64 "}",
-      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
-      static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)),
-      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(heap_caps_get_free_size(kInternal)),
+      static_cast<unsigned>(heap_caps_get_minimum_free_size(kInternal)),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(kInternal)),
       (now - g_window_start_us) / 1000, g_udp_pkts, g_udp_bytes,
       g_udp_pkts > 1 ? (g_udp_last_us - g_udp_first_us) / 1000 : 0, g_tcp_rx,
       g_tcp_tx);

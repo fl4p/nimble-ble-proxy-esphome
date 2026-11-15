@@ -685,9 +685,10 @@ TickType_t drain_slot(int i) {
             ESP_LOGW(TAG, "send fd=%d: no memory (errno=%d, %u B room, %u "
                      "segs; free %u largest %u); retrying",
                      fd, e, static_cast<unsigned>(room), q.segs,
-                     static_cast<unsigned>(esp_get_free_heap_size()),
+                     static_cast<unsigned>(heap_caps_get_free_size(
+                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                      static_cast<unsigned>(heap_caps_get_largest_free_block(
-                         MALLOC_CAP_DEFAULT)));
+                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
           }
         } else {
           ESP_LOGW(TAG, "send fd=%d failed: errno=%d", fd, e);

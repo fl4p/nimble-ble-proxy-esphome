@@ -35,7 +35,9 @@
   conn (incl. the NAT'd client's MQTT/OTA) dies with `select() timeout`.
   Note PMF can't be turned off in IDF 5.5 (`wifi_pmf_config_t.capable` is
   deprecated/forced), so the lever is reducing re-assoc, i.e. the radio
-  contention. Fix was sizing NimBLE to what's actually used — 1 clone
+  contention. (2026-11-15: the .231 unit's eFuses say ESP32-S3R8, 8 MB
+  octal PSRAM in the package; the default build still leaves it unused, see
+  "PSRAM opt-in" below.) Fix was sizing NimBLE to what's actually used — 1 clone
   upstream + ~3 HA links: `BT_NIMBLE_MAX_CONNECTIONS 9→4`,
   `BT_CTRL_BLE_MAX_ACT 10→6`, `BT_NIMBLE_ACL_BUF_COUNT 24→12` (freed ~13 KB;
   42→55 KB steady, SA-Query loop gone, port-forwards work). 2026-11: further
@@ -911,6 +913,55 @@
   (1.1 KiB of 7 KiB used in the core; ~3 KiB), NimBLE `MSYS_2_BLOCK_COUNT`
   24→12 (~3.8 KiB), freeing a proxy slot's remote attribute cache on
   disconnect (a few KiB per peer; needs care: discovery may be walking it).
+
+## PSRAM opt-in (ESP32-S3R8, `sdkconfig.defaults.psram`)
+
+- **A fragment, not a Kconfig switch** (the PSRAM mode and speed are Kconfig
+  choices, which `select` cannot set). S3 only:
+  `idf.py -B build-psram -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-psram/sdkconfig
+  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.psram" build`.
+  The plain build is unchanged. Octal PSRAM, 80 MHz, `SPIRAM_IGNORE_NOTFOUND`
+  (boots without it), `SPIRAM_USE_MALLOC`, `MALLOC_ALWAYSINTERNAL=2048`,
+  `MALLOC_RESERVE_INTERNAL=32768`, `TRY_ALLOCATE_WIFI_LWIP`, NimBLE
+  `MEM_ALLOC_MODE_DEFAULT`. Reasons are in the fragment. Task stacks stay
+  internal (`FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=n`, the renamed
+  `SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY`). The bootloader is unchanged, so an
+  app OTA is enough.
+- **Not NimBLE `MEM_ALLOC_MODE_EXTERNAL`**: it allocates PSRAM-only and
+  asserts on the first host allocation when PSRAM is absent.
+- **GPIO 33-37 belong to the octal PSRAM** on an S3R8 (26-32 to flash). The
+  firmware drives no GPIO itself (console UART0 on 43/44); a future RS485
+  port must avoid 26-37.
+- **Every heap figure and guard reads internal RAM**
+  (`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`), not `esp_get_free_heap_size()` /
+  `MALLOC_CAP_DEFAULT`, which include PSRAM once it is in the heap. Without
+  PSRAM both select the same heaps on S3, C3 and ESP32, so nothing changes
+  there. `/stats.json` `heap`/`heap_largest`/`heap_min` are internal;
+  `psram_free`/`psram_min` are new (0 without PSRAM). Exceptions, on
+  purpose: `oom_guard`'s throwing-new retry gate keeps `MALLOC_CAP_DEFAULT`
+  (it predicts `malloc`, which may use PSRAM); the API send-queue cap sums
+  the segments' actual blocks wherever they live; `napt_heap_ok()` drops the
+  table size from the internal requirement when the tables fit in PSRAM
+  (lwIP prefers it). New code: never guard on `esp_get_free_heap_size()`.
+- **IDF 6.0.3 changed the reserve pool**: it now carries `MALLOC_CAP_DEFAULT`
+  at the lowest priority, so small `malloc()`s use it after the other
+  internal heaps and before PSRAM (IDF commit d3c628c759). The kb note on
+  the pool (`~/dev/kb/esp32/memory-and-display-dma.md`) describes 5.5.1.
+- **QEMU** (heap self-test with the fragment, `build-qemu-heap-psram`): two
+  emulator traps. `idf.py qemu` passes `-m 32M`; 32 MB of PSRAM fills the
+  data address space and the app aborts in `esp_mmu_map` (partition table).
+  And with the octal-PSRAM flag the bootloader hangs writing otadata after
+  `Loaded app` (no write, no hang: copy otadata 0xf000+0x2000 from a booted
+  non-PSRAM `qemu_flash.bin`). Run `qemu-system-xtensa` by hand with `-m 8M`
+  and `-global driver=ssi_psram,property=is_octal,value=true`. 2026-11-15:
+  boots, 8 MB found and added, all steps PASS; internal free 232→222 KB at
+  boot (PSRAM driver IRAM/DRAM ~10 KB), largest 172→131 KB (the 32 KiB
+  reserve is carved from it). QEMU has no WiFi/BLE, so the WiFi-buffer
+  saving is unmeasured.
+- **Flash writes with the cache off** (OTA, NVS, core dump) are safe for
+  PSRAM data: `esp_flash_write` bounces non-DRAM source buffers, and nothing
+  of ours touches heap memory from an ISR (oom_guard's IRAM hook writes
+  `DRAM_ATTR` words only).
 
 ## Liveness watchdog targets (v0.2.4, issue #2)
 

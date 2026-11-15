@@ -216,8 +216,10 @@ NimBLEClient *discover(uint64_t address, uint32_t owner, Status *st) {
   // CONFIG_NBP_OOM_NEW_WAIT_MS and then aborts (oom_guard.h). Refuse to
   // start it with less than kDiscoveryMinFreeHeap left. A heuristic, not a
   // guarantee: ~100 attribute objects of ~60-100 B for the largest peers we
-  // serve, plus vector growth.
-  const size_t free_now = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+  // serve, plus vector growth. Internal RAM: those small objects go there
+  // first even with PSRAM, and running it dry fails task stacks.
+  const size_t free_now =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (free_now < kDiscoveryMinFreeHeap) {
     ESP_LOGW(TAG, "OOM: %u B free < %u B, not starting discovery of %012llx",
              static_cast<unsigned>(free_now),
@@ -276,9 +278,10 @@ Status run(uint64_t address, uint32_t owner) {
              "free %u largest %u",
              static_cast<unsigned>(sizeof(ServicesEncodeCtx)),
              static_cast<unsigned long long>(address),
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_DEFAULT)),
-             static_cast<unsigned>(
-                 heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)));
+             static_cast<unsigned>(heap_caps_get_free_size(
+                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(
+                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
     emit_error(owner, address, kErrNoMemory);
     return Status::NoMemory;
   }

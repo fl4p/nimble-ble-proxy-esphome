@@ -26,6 +26,8 @@ namespace http_guard {
 namespace {
 
 constexpr const char *TAG = "http";
+// Internal RAM only: with PSRAM, MALLOC_CAP_DEFAULT counts it too.
+constexpr uint32_t kInternal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 
 // One slot per registration. httpd copies the httpd_uri_t, so the
 // registered user_ctx is the slot; the trampoline swaps the handler's own
@@ -57,9 +59,8 @@ esp_err_t trampoline(httpd_req_t *req) {
              "abortively",
              req->method == HTTP_POST ? "POST" : "GET", req->uri,
              esp_err_to_name(r),
-             static_cast<unsigned>(esp_get_free_heap_size()),
-             static_cast<unsigned>(
-                 heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)),
+             static_cast<unsigned>(heap_caps_get_free_size(kInternal)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(kInternal)),
              fd);
     if (fd >= 0) abortive(fd);
   }
@@ -90,8 +91,8 @@ err_t queue_fn(tcpip_api_call_data *c) {
 }  // namespace
 
 bool bulk_ok(httpd_req_t *req) {
-  const size_t free_now = esp_get_free_heap_size();
-  const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+  const size_t free_now = heap_caps_get_free_size(kInternal);
+  const size_t largest = heap_caps_get_largest_free_block(kInternal);
   if (free_now >= kBulkMinFree && largest >= kBulkMinLargest) return true;
   ESP_LOGW(TAG, "%s: 503, heap low (free %u largest %u)", req->uri,
            static_cast<unsigned>(free_now), static_cast<unsigned>(largest));

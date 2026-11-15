@@ -917,9 +917,9 @@ void sample_cpu_pct(int *cpu0, int *cpu1) {
 }
 
 esp_err_t stats_get(httpd_req_t *req) {
-  // The base object is ~280 chars worst case (with heap_largest/heap_min
-  // and the capability flags); the optional ap_rx/ap_tx 64-bit byte
-  // counters (NAT builds) add ~60 more, the oom counters ~70, the notify
+  // The base object is ~330 chars worst case (with heap_largest/heap_min,
+  // psram_free/psram_min and the capability flags); the optional ap_rx/ap_tx
+  // 64-bit byte counters (NAT builds) add ~60 more, the oom counters ~70, the notify
   // breakdown ~75, the BLE disconnect fields ~250, the WiFi disconnect
   // fields ~170, chip ids ~90, the API transmit figures ~260 + ~70 per
   // client: ~1.5 KB with two clients on a NAT build. Static: httpd runs one
@@ -1098,6 +1098,7 @@ void set_wifi_disc_provider(StatsAppender fn) { g_wifi_disc_provider = fn; }
 void set_ws_stats_provider(StatsAppender fn) { g_ws_stats_provider = fn; }
 
 size_t build_stats_json(char *buf, size_t cap) {
+  constexpr uint32_t kInternal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
   // BLE-sourced counters. When NBP_BLE is off the backend (scanner +
   // GATT pool) isn't compiled, so these read as zero — the dashboard
   // chart just shows flat BLE lines.
@@ -1169,7 +1170,7 @@ size_t build_stats_json(char *buf, size_t cap) {
       buf, cap,
       "{\"reads\":%lu,\"writes\":%lu,\"notifies\":%lu,\"adverts\":%lu,"
       "\"connections\":%u,\"heap\":%lu,\"heap_largest\":%lu,"
-      "\"heap_min\":%lu,"
+      "\"heap_min\":%lu,\"psram_free\":%lu,\"psram_min\":%lu,"
       "\"notify_rx\":%lu,\"last_notify_handle\":%u,"
       "\"notify_unknown\":%lu,\"notify_unowned\":%lu,"
       "\"notify_no_callback\":%ld,"
@@ -1183,13 +1184,19 @@ size_t build_stats_json(char *buf, size_t cap) {
           g_notifies.load(std::memory_order_relaxed) + cc.notifies),
       adverts,
       in_use,
-      static_cast<unsigned long>(esp_get_free_heap_size()),
+      // heap*: internal RAM only. With PSRAM in the heap, MALLOC_CAP_DEFAULT
+      // and esp_get_free_heap_size() would count it too; without PSRAM both
+      // are the same set of heaps.
+      static_cast<unsigned long>(heap_caps_get_free_size(kInternal)),
       // Largest single block: what an 8 KB api_server connection stack or
       // the NAPT table actually needs (issue #2: 16 KB free, 7.5 KB largest).
-      static_cast<unsigned long>(
-          heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)),
+      static_cast<unsigned long>(heap_caps_get_largest_free_block(kInternal)),
       // Low-water mark since boot.
-      static_cast<unsigned long>(esp_get_minimum_free_heap_size()),
+      static_cast<unsigned long>(heap_caps_get_minimum_free_size(kInternal)),
+      // 0 without PSRAM.
+      static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+      static_cast<unsigned long>(
+          heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)),
       notify_rx,
       notify_handle,
       notify_unknown, unowned, no_cb,

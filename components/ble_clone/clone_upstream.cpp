@@ -224,7 +224,8 @@ bool try_session(uint64_t address, uint8_t address_type) {
 
   g_state.store(State::Discovering, std::memory_order_relaxed);
   ESP_LOGI(TAG, "starting discoverAttributes; heap=%u",
-           static_cast<unsigned>(esp_get_free_heap_size()));
+           static_cast<unsigned>(heap_caps_get_free_size(
+               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
   if (!g_client->discoverAttributes()) {
     esp_log_level_set("NimBLEClient", ESP_LOG_WARN);
     ESP_LOGW(TAG, "discoverAttributes failed");
@@ -233,7 +234,8 @@ bool try_session(uint64_t address, uint8_t address_type) {
   }
   esp_log_level_set("NimBLEClient", ESP_LOG_WARN);
   ESP_LOGI(TAG, "discoverAttributes ok; heap=%u",
-           static_cast<unsigned>(esp_get_free_heap_size()));
+           static_cast<unsigned>(heap_caps_get_free_size(
+               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
 
   if (!g_mirror_built) {
     // First-time: extract the GATT structure (UUIDs / handles / props /

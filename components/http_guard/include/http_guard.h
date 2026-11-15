@@ -21,7 +21,7 @@
 
 namespace http_guard {
 
-// Below either, bulk_ok() refuses.
+// Below either (internal RAM, PSRAM not counted), bulk_ok() refuses.
 inline constexpr size_t kBulkMinFree = 16 * 1024;
 inline constexpr size_t kBulkMinLargest = 2 * 1024;
 // send_chunk_paced(): queued pbufs (pcb->snd_queuelen) allowed before the

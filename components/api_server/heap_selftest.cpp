@@ -1123,6 +1123,15 @@ void run() {
   std::printf("HEAP-SELFTEST summary: %d failure(s); free %u min %u\n", g_fail,
               static_cast<unsigned>(free_now()),
               static_cast<unsigned>(esp_get_minimum_free_heap_size()));
+  constexpr uint32_t kInternal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  std::printf("HEAP-MEASURE internal free %u largest %u min %u; psram free %u "
+              "min %u\n",
+              static_cast<unsigned>(heap_caps_get_free_size(kInternal)),
+              static_cast<unsigned>(heap_caps_get_largest_free_block(kInternal)),
+              static_cast<unsigned>(heap_caps_get_minimum_free_size(kInternal)),
+              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+              static_cast<unsigned>(
+                  heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)));
   std::printf("HEAP-SELFTEST done\n");
   for (;;) vTaskDelay(portMAX_DELAY);
 }

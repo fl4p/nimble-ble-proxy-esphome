@@ -24,6 +24,8 @@ namespace oom_guard {
 namespace {
 
 constexpr const char *TAG = "oom";
+// Reported figures are internal RAM; with PSRAM, MALLOC_CAP_DEFAULT counts it.
+constexpr uint32_t kInternal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 constexpr uint32_t kRetryStepMs = 10;
 constexpr uint64_t kLogPeriodUs = 2 * 1000 * 1000;
 
@@ -56,15 +58,25 @@ void log_tick(void *) {
   const char *fn = g_last_func;
   ESP_LOGW(TAG,
            "%lu failed heap allocation(s) since last report (total %lu); "
-           "last %lu B caps 0x%lx in %s; free %u largest %u min %u",
+           "last %lu B caps 0x%lx in %s; free %u largest %u min %u"
+#if CONFIG_SPIRAM
+           "; psram free %u largest %u"
+#endif
+           ,
            static_cast<unsigned long>(c - g_logged),
            static_cast<unsigned long>(c),
            static_cast<unsigned long>(g_last_size),
            static_cast<unsigned long>(g_last_caps), fn ? fn : "?",
-           static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_DEFAULT)),
+           static_cast<unsigned>(heap_caps_get_free_size(kInternal)),
+           static_cast<unsigned>(heap_caps_get_largest_free_block(kInternal)),
+           static_cast<unsigned>(heap_caps_get_minimum_free_size(kInternal))
+#if CONFIG_SPIRAM
+           ,
+           static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
            static_cast<unsigned>(
-               heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)),
-           static_cast<unsigned>(esp_get_minimum_free_heap_size()));
+               heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM))
+#endif
+  );
   g_logged = c;
 }
 
@@ -78,11 +90,20 @@ bool can_wait() {
   static char msg[112];
   std::snprintf(msg, sizeof(msg),
                 "OOM: operator new(%u) failed after %lu ms wait; free %u "
-                "largest %u",
+                "largest %u"
+#if CONFIG_SPIRAM
+                "; psram largest %u"
+#endif
+                ,
                 static_cast<unsigned>(n), static_cast<unsigned long>(waited_ms),
-                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_DEFAULT)),
+                static_cast<unsigned>(heap_caps_get_free_size(kInternal)),
+                static_cast<unsigned>(heap_caps_get_largest_free_block(kInternal))
+#if CONFIG_SPIRAM
+                    ,
                 static_cast<unsigned>(
-                    heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)));
+                    heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM))
+#endif
+  );
   esp_system_abort(msg);
 }
 
@@ -96,7 +117,8 @@ void *new_slow(size_t n) {
     vTaskDelay(pdMS_TO_TICKS(kRetryStepMs) ? pdMS_TO_TICKS(kRetryStepMs) : 1);
     waited += kRetryStepMs;
     // Only retry once a block could fit, so a long wait does not count
-    // one failed allocation per step.
+    // one failed allocation per step. DEFAULT on purpose: it is malloc's
+    // pool, PSRAM included when present.
     if (heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT) < n) continue;
     void *p = std::malloc(n);
     if (p != nullptr) {

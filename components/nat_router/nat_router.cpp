@@ -469,18 +469,30 @@ constexpr size_t NAPT_CONTIG_HEADROOM = 8 * 1024;
 constexpr size_t NAPT_HEAP_HEADROOM = 16 * 1024;
 
 // Can lwIP's NAPT table allocation succeed without starving the rest of
-// the firmware? mem_calloc is libc calloc here (MEM_LIBC_MALLOC), so
-// MALLOC_CAP_DEFAULT is the pool it draws from.
+// the firmware? mem_calloc is libc calloc here (MEM_LIBC_MALLOC). The
+// headroom is internal RAM (task stacks); with PSRAM, MALLOC_CAP_DEFAULT
+// would count PSRAM too.
 bool napt_heap_ok() {
   const size_t napt = CONFIG_NBP_NAT_TABLE_SIZE * NAPT_ENTRY_BYTES;
   const size_t pmap = IP_PORTMAP_MAX * PORTMAP_ENTRY_BYTES;
-  const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
-  const size_t free_total = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+  const size_t largest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const size_t free_total =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   // The two callocs are separate; the NAPT table is by far the larger and
   // is carved out of the largest block, so that block must also leave an
   // 8 KB task stack behind.
-  const bool ok = largest >= napt + NAPT_CONTIG_HEADROOM &&
-                  free_total >= napt + pmap + NAPT_HEAP_HEADROOM;
+  size_t in_internal = napt;
+#if CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP
+  // lwIP's calloc prefers PSRAM: if both tables fit there, internal RAM
+  // only has to keep the headroom.
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) >= napt + pmap) {
+    in_internal = 0;
+  }
+#endif
+  const bool ok =
+      largest >= in_internal + NAPT_CONTIG_HEADROOM &&
+      free_total >= (in_internal ? napt + pmap : 0) + NAPT_HEAP_HEADROOM;
   if (!ok) {
     ESP_LOGE(TAG,
              "not enough heap for the NAPT table (%u entries = %u B, needs "

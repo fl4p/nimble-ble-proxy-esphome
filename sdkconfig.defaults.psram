@@ -1,0 +1,40 @@
+# PSRAM opt-in for ESP32-S3R8 boards (in-package 8 MB octal PSRAM, AP 3.3 V;
+# eFuse psram_cap=1, psram_vendor=1 in /stats.json). ESP32-S3 only. Layer it
+# on top of the base defaults, in its own build dir:
+#   idf.py -B build-psram -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-psram/sdkconfig \
+#     -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.psram" build
+# Octal PSRAM occupies GPIO 33-37; never assign those pins on such a board.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+# Boot without PSRAM rather than abort if the chip is missing or fails init.
+# Side effect: the WiFi/lwIP buffer-count defaults stay at their no-PSRAM
+# values (the esp_wifi/lwip Kconfig gates them on !SPIRAM_IGNORE_NOTFOUND),
+# which is what we want: same buffer counts as the plain build. The
+# PSRAM-first allocators below still apply (compiled on
+# SPIRAM_TRY_ALLOCATE_WIFI_LWIP alone, falling back to internal RAM).
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# malloc() up to this size tries internal RAM first, larger ones PSRAM first
+# (each falls back to the other). 2 KiB sends the big variable buffers out
+# (GetServices encode ctx 2.9 KiB, NimBLE host mbuf/ACL/event pools, httpd
+# scratch) while small hot objects stay internal.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=2048
+# Internal pool carved out at boot, used only once the other internal heaps
+# cannot serve a request (IDF 6.0.3: by explicit INTERNAL/DMA requests such
+# as task stacks, and as a last resort by small malloc()s too). A contiguous
+# reserve for 8 KiB api_server stacks once the rest is fragmented.
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+# WiFi dynamic buffers and every lwIP allocation (pbufs, segments, pcbs, the
+# NAPT table) prefer PSRAM, falling back to internal RAM. These were the
+# variable consumers that drained the heap (stalled client ~25 KiB, UDP flood).
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# NimBLE host allocations through malloc() (the policy above). Not
+# MEM_ALLOC_MODE_EXTERNAL: that is PSRAM-only and asserts on every host
+# allocation when PSRAM is missing, defeating SPIRAM_IGNORE_NOTFOUND.
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_DEFAULT=y
+# Default y with SPIRAM: lets xTaskCreateStatic take a PSRAM stack (renamed
+# from SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY). Nothing here wants one; a PSRAM
+# stack must never run while the cache is off (flash writes), so keep it off.
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=n

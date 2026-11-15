@@ -424,11 +424,17 @@ extern "C" void app_main() {
   schedule_boot_stable_mark();
 #endif
 
-  // Heap headroom after everything is up. An api_server connection needs
-  // an 8 KB block, so "largest" is the number to watch (issue #2).
-  ESP_LOGI(TAG, "boot complete; heap free=%u largest=%u min=%u; main task exiting",
-           static_cast<unsigned>(esp_get_free_heap_size()),
+  // Internal-RAM headroom after everything is up. An api_server connection
+  // needs an 8 KB block, so "largest" is the number to watch (issue #2).
+  constexpr uint32_t kInternal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+#if CONFIG_SPIRAM
+  ESP_LOGI(TAG, "psram free=%u largest=%u",
+           static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
            static_cast<unsigned>(
-               heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT)),
-           static_cast<unsigned>(esp_get_minimum_free_heap_size()));
+               heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+#endif
+  ESP_LOGI(TAG, "boot complete; heap free=%u largest=%u min=%u; main task exiting",
+           static_cast<unsigned>(heap_caps_get_free_size(kInternal)),
+           static_cast<unsigned>(heap_caps_get_largest_free_block(kInternal)),
+           static_cast<unsigned>(heap_caps_get_minimum_free_size(kInternal)));
 }
