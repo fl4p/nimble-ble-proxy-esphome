@@ -627,6 +627,16 @@
   with no notify callback, i.e. not subscribed yet, or a clone upstream
   link). Without the clone they sum to `notify_rx` (S3 bench: 2233 =
   2233+0+0+0). The non-zero buckets have not been provoked on hardware yet.
+- **BLE link losses (`/stats.json`, 2026-11-14):** `ble_disc` (every
+  established link that ended) split into `ble_disc_timeout` (0x208,
+  supervision timeout: peer went silent), `ble_disc_remote` (0x213..0x215),
+  `ble_disc_local` (0x216, this host closed it), `ble_disc_fail_est`
+  (0x23e), `ble_disc_other`; `ble_disc_reason` and `ble_disc_up_ms` of the
+  last one; `ble_conn_fail` / `ble_conn_fail_reason` (onConnectFail).
+  Reasons are NimBLE codes, decimal (520 = 0x208). The `onDisconnect` log
+  line carries `up=Ns`. Counted in `connection.cpp` under a portMUX. S3
+  bench: killing the Mac peripheral app gave 531 (remote), an API client
+  leaving gave 534 (local); 520 and onConnectFail not provoked on purpose.
 - **httpd under low heap (`components/http_guard`).** `-Wl,--wrap=
   httpd_register_uri_handler` puts a trampoline in front of every handler
   (slot table, 56 entries; the handler's own `user_ctx` is swapped back

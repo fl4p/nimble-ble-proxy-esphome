@@ -69,6 +69,24 @@ void release_owner(OwnerId owner);
 // How many slots are currently unallocated.
 uint8_t free_slots();
 
+// Link losses since boot, by HCI reason (onDisconnect's reason is
+// BLE_HS_ERR_HCI_BASE 0x200 + the HCI code), for /stats.json. Counts every
+// established link that ended, whoever ended it, plus connect attempts
+// that never came up (onConnectFail).
+struct DiscStats {
+  uint32_t total;         // onDisconnect of an established link
+  uint32_t timeout;       // 0x208 supervision timeout (peer went silent)
+  uint32_t remote;        // 0x213..0x215 peer closed it
+  uint32_t local;         // 0x216 this host closed it (HA, owner left)
+  uint32_t fail_est;      // 0x23e link failed to establish
+  uint32_t other;         // anything else
+  int32_t last_reason;    // reason of the last one, 0 if none
+  uint32_t last_up_ms;    // how long that link had been up
+  uint32_t conn_fail;     // onConnectFail
+  int32_t conn_fail_reason;  // reason of the last one, 0 if none
+};
+DiscStats disc_stats();
+
 // Populate `out` (cap=proxy::MAX_CONNECTIONS) with addresses of slots
 // currently in use. Returns the number written.
 uint8_t in_use_addresses(uint64_t *out, uint8_t cap);

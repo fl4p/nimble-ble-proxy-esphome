@@ -70,6 +70,36 @@ std::array<Slot, proxy::MAX_CONNECTIONS> g_slots;
 SemaphoreHandle_t g_mutex = nullptr;
 FreeChangeCallback g_free_cb = nullptr;
 
+// Written on the host task, read by httpd (disc_stats()).
+portMUX_TYPE g_disc_mux = portMUX_INITIALIZER_UNLOCKED;
+DiscStats g_disc{};
+
+void record_disconnect(int reason, int64_t connected_us) {
+  const int64_t now = esp_timer_get_time();
+  const uint32_t up_ms =
+      connected_us > 0 ? static_cast<uint32_t>((now - connected_us) / 1000)
+                       : 0;
+  taskENTER_CRITICAL(&g_disc_mux);
+  ++g_disc.total;
+  switch (reason) {
+    case 0x208: ++g_disc.timeout; break;
+    case 0x213: case 0x214: case 0x215: ++g_disc.remote; break;
+    case 0x216: ++g_disc.local; break;
+    case 0x23e: ++g_disc.fail_est; break;
+    default: ++g_disc.other; break;
+  }
+  g_disc.last_reason = reason;
+  g_disc.last_up_ms = up_ms;
+  taskEXIT_CRITICAL(&g_disc_mux);
+}
+
+void record_connect_fail(int reason) {
+  taskENTER_CRITICAL(&g_disc_mux);
+  ++g_disc.conn_fail;
+  g_disc.conn_fail_reason = reason;
+  taskEXIT_CRITICAL(&g_disc_mux);
+}
+
 #ifdef CONFIG_NBP_SMP
 // Static passkey used when a peer requests pairing with KEYBOARD_ONLY
 // I/O (we type, they display). Atomically updatable at runtime via
@@ -530,6 +560,7 @@ class ClientCb : public NimBLEClientCallbacks {
       clear_locked(s);
     }
     xSemaphoreGive(g_mutex);
+    record_connect_fail(reason);
     ESP_LOGW(TAG, "onConnectFail %012llx reason=%d",
              static_cast<unsigned long long>(addr_snapshot), reason);
     if (cb_snapshot) {
@@ -544,6 +575,7 @@ class ClientCb : public NimBLEClientCallbacks {
     ConnectCallback cb_snapshot = nullptr;
     uint64_t addr_snapshot = 0;
     OwnerId owner_snapshot = kNoOwner;
+    int64_t connected_us = 0;
     xSemaphoreTake(g_mutex, portMAX_DELAY);
     Slot *s = find_by_client_locked(c);
     if (s != nullptr && s->state == State::Free) s = nullptr;
@@ -551,6 +583,7 @@ class ClientCb : public NimBLEClientCallbacks {
       cb_snapshot = s->cb;
       addr_snapshot = s->address;
       owner_snapshot = s->owner;
+      connected_us = s->connected_us;
       // Drop slot back to free; keep the NimBLEClient* for reuse on
       // the next connect (NimBLEDevice owns it).
       clear_locked(s);
@@ -558,9 +591,14 @@ class ClientCb : public NimBLEClientCallbacks {
     xSemaphoreGive(g_mutex);
 
     if (s != nullptr) {
-      ESP_LOGI(TAG, "onDisconnect %012llx reason=%d owner=%lu",
+      record_disconnect(reason, connected_us);
+      ESP_LOGI(TAG, "onDisconnect %012llx reason=%d owner=%lu up=%lus",
                static_cast<unsigned long long>(addr_snapshot), reason,
-               static_cast<unsigned long>(owner_snapshot));
+               static_cast<unsigned long>(owner_snapshot),
+               connected_us > 0
+                   ? static_cast<unsigned long>(
+                         (esp_timer_get_time() - connected_us) / 1000000)
+                   : 0UL);
       if (cb_snapshot) {
         ConnectionResult r{false, 0, reason};
         cb_snapshot(owner_snapshot, addr_snapshot, r);
@@ -960,6 +998,13 @@ uint8_t free_slots() {
   }
   xSemaphoreGive(g_mutex);
   return n;
+}
+
+DiscStats disc_stats() {
+  taskENTER_CRITICAL(&g_disc_mux);
+  DiscStats d = g_disc;
+  taskEXIT_CRITICAL(&g_disc_mux);
+  return d;
 }
 
 uint8_t in_use_addresses(uint64_t *out, uint8_t cap) {

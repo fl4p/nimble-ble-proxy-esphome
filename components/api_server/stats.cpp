@@ -915,11 +915,11 @@ esp_err_t stats_get(httpd_req_t *req) {
   // The base object is ~280 chars worst case (with heap_largest/heap_min
   // and the capability flags); the optional ap_rx/ap_tx 64-bit byte
   // counters (NAT builds) add ~60 more, the oom counters ~70, the notify
-  // breakdown ~75, the WiFi disconnect fields ~170, the API transmit
-  // figures ~260 + ~70 per client: ~1.1 KB with two clients on a NAT
-  // build. Static: httpd runs one handler at a time, and 1.5 KB is too
-  // much for its task stack.
-  static char buf[1536];
+  // breakdown ~75, the BLE disconnect fields ~250, the WiFi disconnect
+  // fields ~170, the API transmit figures ~260 + ~70 per client: ~1.4 KB
+  // with two clients on a NAT build. Static: httpd runs one handler at a
+  // time, and that much is too much for its task stack.
+  static char buf[1792];
   size_t n = build_stats_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
@@ -1215,6 +1215,33 @@ size_t build_stats_json(char *buf, size_t cap) {
         static_cast<unsigned long>(oom_guard::new_recovered()));
     if (m > 0) n += m;
   }
+#if CONFIG_NBP_BLE
+  // BLE link losses by reason (connection.cpp). ble_disc_timeout is the
+  // supervision timeout (0x208, peer went silent: range, interference,
+  // coex airtime); ble_disc_up_ms is how long the last lost link had been
+  // up. Reasons are NimBLE codes, 0x200 + HCI, in decimal (520 = 0x208).
+  if (static_cast<size_t>(n) < cap) {
+    const auto d = ble_backend::connection::disc_stats();
+    int m = std::snprintf(
+        buf + n, cap - n,
+        ",\"ble_disc\":%lu,\"ble_disc_timeout\":%lu,\"ble_disc_remote\":%lu,"
+        "\"ble_disc_local\":%lu,\"ble_disc_fail_est\":%lu,"
+        "\"ble_disc_other\":%lu,\"ble_disc_reason\":%ld,"
+        "\"ble_disc_up_ms\":%lu,\"ble_conn_fail\":%lu,"
+        "\"ble_conn_fail_reason\":%ld",
+        static_cast<unsigned long>(d.total),
+        static_cast<unsigned long>(d.timeout),
+        static_cast<unsigned long>(d.remote),
+        static_cast<unsigned long>(d.local),
+        static_cast<unsigned long>(d.fail_est),
+        static_cast<unsigned long>(d.other),
+        static_cast<long>(d.last_reason),
+        static_cast<unsigned long>(d.last_up_ms),
+        static_cast<unsigned long>(d.conn_fail),
+        static_cast<long>(d.conn_fail_reason));
+    if (m > 0) n += m;
+  }
+#endif
   // WiFi disconnect counters and the last reasons (wifi_sta).
   if (g_wifi_disc_provider && static_cast<size_t>(n) < cap) {
     int m = g_wifi_disc_provider(buf + n, cap - n);
