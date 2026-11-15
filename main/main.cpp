@@ -50,6 +50,10 @@
 #include "nat_router.h"
 #endif
 
+#if CONFIG_NBP_MODBUS_BRIDGE
+#include "modbus_bridge.h"
+#endif
+
 #include "bench.h"
 
 #include "esp_app_desc.h"
@@ -293,6 +297,11 @@ extern "C" void app_main() {
   // client appears to it as an ordinary TCP client.
   ws_proxy::register_endpoint(ota::handle());
   api_server::stats::set_ws_stats_provider(&ws_proxy::append_stats_json);
+#endif
+#if CONFIG_NBP_MODBUS_BRIDGE
+  modbus_bridge::start();
+  modbus_bridge::register_endpoints(ota::handle());
+  api_server::stats::set_modbus_stats_provider(&modbus_bridge::append_stats_json);
 #endif
 #if CONFIG_NBP_NAT_ROUTER
   // STA is up (start_and_wait_for_ip returned above). Bring up the SoftAP

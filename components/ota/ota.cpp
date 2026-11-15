@@ -169,6 +169,9 @@ void start() {
   // a runtime assert at registration time. Each slot is one pointer of
   // heap (4 B).
   cfg.max_uri_handlers = 44;
+#if CONFIG_NBP_MODBUS_BRIDGE
+  cfg.max_uri_handlers += 2;  // /modbus GET+POST
+#endif
   // CONFIG_LWIP_MAX_SOCKETS=16 leaves the api_server (1 listen + up to
   // 4 clients), mDNS and clone.mirror plenty of room alongside the
   // dashboard. Bumping httpd here to 5 lets a phone + a desktop browser

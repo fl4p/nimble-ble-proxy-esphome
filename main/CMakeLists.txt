@@ -18,4 +18,5 @@ idf_component_register(
         esp_app_format
         oom_guard
         bench
+        modbus_bridge
 )

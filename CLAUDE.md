@@ -930,8 +930,8 @@
 - **Not NimBLE `MEM_ALLOC_MODE_EXTERNAL`**: it allocates PSRAM-only and
   asserts on the first host allocation when PSRAM is absent.
 - **GPIO 33-37 belong to the octal PSRAM** on an S3R8 (26-32 to flash). The
-  firmware drives no GPIO itself (console UART0 on 43/44); a future RS485
-  port must avoid 26-37.
+  firmware drives no GPIO itself except the optional RS485 bridge below
+  (console UART0 on 43/44).
 - **Every heap figure and guard reads internal RAM**
   (`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`), not `esp_get_free_heap_size()` /
   `MALLOC_CAP_DEFAULT`, which include PSRAM once it is in the heap. Without
@@ -962,6 +962,34 @@
   PSRAM data: `esp_flash_write` bounces non-DRAM source buffers, and nothing
   of ours touches heap memory from an ISR (oom_guard's IRAM hook writes
   `DRAM_ATTR` words only).
+
+## RS485 <-> TCP bridge (`NBP_MODBUS_BRIDGE`, `components/modbus_bridge`)
+
+- **Build** (PSRAM unit): `idf.py -B build-psram-mb -DIDF_TARGET=esp32s3
+  -DSDKCONFIG=build-psram-mb/sdkconfig -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.modbus" build`.
+  Default n; the fragment turns it on (UART1, TX 4, RX 5, 115200 8N1, TCP 8899).
+- **Bytes only**, ser2net-style, for HA `modbus` `type: rtuovertcp`: no CRC, no
+  register knowledge. TCP data (segments gathered for 3 ms) goes out as one
+  burst after an RX flush; UART data goes back as one `send()` at line idle
+  (UART RX timeout = Modbus t3.5, 1.75 ms floor). A reply after
+  `NBP_MB_REPLY_TIMEOUT_MS` still reaches the client; it only counts `mb_timeouts`.
+- **Direction pin optional** (`NBP_MB_DE_GPIO`, default -1 = none, for
+  auto-direction modules such as DFRobot DFR0845). With a DE pin
+  (MIKROE-989 R/T = 6): plain UART, *not* `UART_MODE_RS485_HALF_DUPLEX`
+  (received only 0x00 on an S3, `~/dev/kb/esp32/rs485-half-duplex-mode-received-nothing-on-s3.md`);
+  the task raises itself to priority 19, DE high, `uart_write_bytes`,
+  `uart_wait_tx_done`, DE low, flushes RX. DE is low from boot on.
+- **STA side only:** listener on INADDR_ANY, but a connection must arrive on
+  the STA address from the STA subnet (or the one allowlisted IP) and never
+  from the SoftAP subnet; else RST + `mb_refused`. One client; a new one
+  replaces it.
+- `GET /modbus` (config, client, `stack_free` = task stack high-water);
+  `POST /modbus?baud=&parity=n|e|o&allow=<ip>|none&tx=&rx=&de=<gpio>|none|-1`
+  with `X-NBP-Confirm: yes`, NVS namespace `mbridge`. Line settings apply at
+  once, pins after a reboot. `/stats.json`: `mb_client`, `mb_tx_frames`,
+  `mb_rx_frames`, `mb_tx_bytes`, `mb_rx_bytes`, `mb_timeouts`, `mb_refused`.
+- Host check (read-only, FC04 0x3108.. + FC01 coil 0x0F, slave 3):
+  `scripts/modbus_bridge_test.py <ip>`.
 
 ## Liveness watchdog targets (v0.2.4, issue #2)
 

@@ -70,6 +70,7 @@ CloneStatsProvider g_clone_stats_provider = nullptr;
 NatThroughputProvider g_nat_throughput_provider = nullptr;
 StatsAppender g_wifi_disc_provider = nullptr;
 StatsAppender g_ws_stats_provider = nullptr;
+StatsAppender g_modbus_stats_provider = nullptr;
 
 #if CONFIG_NBP_WEB_CONSOLE
 // ---- log ring buffer ----
@@ -1096,6 +1097,7 @@ void set_nat_throughput_provider(NatThroughputProvider fn) {
 
 void set_wifi_disc_provider(StatsAppender fn) { g_wifi_disc_provider = fn; }
 void set_ws_stats_provider(StatsAppender fn) { g_ws_stats_provider = fn; }
+void set_modbus_stats_provider(StatsAppender fn) { g_modbus_stats_provider = fn; }
 
 size_t build_stats_json(char *buf, size_t cap) {
   constexpr uint32_t kInternal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
@@ -1298,6 +1300,11 @@ size_t build_stats_json(char *buf, size_t cap) {
   // WebSocket bridge: live sessions and handshakes refused on Origin.
   if (g_ws_stats_provider && static_cast<size_t>(n) < cap) {
     int m = g_ws_stats_provider(buf + n, cap - n);
+    if (m > 0) n += m;
+  }
+  // RS485 bridge: client connected, frames/bytes each way, timeouts, refusals.
+  if (g_modbus_stats_provider && static_cast<size_t>(n) < cap) {
+    int m = g_modbus_stats_provider(buf + n, cap - n);
     if (m > 0) n += m;
   }
   // API clients and their transmit path. api_txq: [id, lwIP queue heap at

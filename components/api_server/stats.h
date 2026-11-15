@@ -50,6 +50,8 @@ using StatsAppender = int (*)(char *buf, size_t cap);
 void set_wifi_disc_provider(StatsAppender fn);
 // Same, for the WebSocket bridge counters (ws_proxy::append_stats_json).
 void set_ws_stats_provider(StatsAppender fn);
+// Same, for the RS485 bridge counters (modbus_bridge::append_stats_json).
+void set_modbus_stats_provider(StatsAppender fn);
 
 // Build the same JSON body that /stats.json returns into a caller-
 // supplied buffer. Returns bytes written (truncated at cap-1 by

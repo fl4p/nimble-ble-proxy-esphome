@@ -1,0 +1,13 @@
+# RS485 <-> TCP bridge (components/modbus_bridge), layered on the PSRAM build:
+#   idf.py -B build-psram -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-psram/sdkconfig \
+#     -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.modbus" build
+# Pins avoid flash/PSRAM (26-37), straps (0/3/45/46), USB (19/20), console (43/44).
+CONFIG_NBP_MODBUS_BRIDGE=y
+CONFIG_NBP_MB_UART_NUM=1
+CONFIG_NBP_MB_TX_GPIO=4
+CONFIG_NBP_MB_RX_GPIO=5
+# -1: auto-direction transceiver (DFR0845). 6 for a DE pin (MIKROE-989 R/T).
+CONFIG_NBP_MB_DE_GPIO=-1
+CONFIG_NBP_MB_BAUD=115200
+CONFIG_NBP_MB_PARITY=0
+CONFIG_NBP_MB_TCP_PORT=8899
