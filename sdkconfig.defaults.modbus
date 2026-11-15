@@ -11,3 +11,7 @@ CONFIG_NBP_MB_DE_GPIO=-1
 CONFIG_NBP_MB_BAUD=115200
 CONFIG_NBP_MB_PARITY=0
 CONFIG_NBP_MB_TCP_PORT=8899
+# Bridge listener + client on top of the base socket budget.
+CONFIG_LWIP_MAX_SOCKETS=20
+# UART RX keeps running while the flash cache is off (OTA, NVS).
+CONFIG_UART_ISR_IN_IRAM=y

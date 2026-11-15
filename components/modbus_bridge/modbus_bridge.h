@@ -1,7 +1,7 @@
-// Transparent RS485 <-> TCP byte bridge (Modbus RTU over TCP, ser2net-style).
-// Moves bytes only: no CRC, no framing beyond line-idle detection. One TCP
-// client on the STA side; a new connection replaces the old one. Plain UART
-// with the transceiver's direction pin (DE and /RE tied) driven as a GPIO.
+// RS485 <-> TCP bridge (Modbus RTU over TCP, ser2net-style). Requests must
+// be valid RTU frames (length, CRC); replies pass through as bytes, framed by
+// line idle. One TCP client on the STA side. Plain UART with the
+// transceiver's direction pin (DE and /RE tied) driven as a GPIO.
 
 #pragma once
 
@@ -13,8 +13,12 @@
 
 namespace modbus_bridge {
 
-// Load NVS overrides, set up UART + direction pin, spawn the bridge task.
-// Call after the STA is up. Idempotent.
+// Load NVS overrides, drive DE low and pull TX up. Call right after
+// nvs_flash_init, before WiFi. Idempotent.
+void early_init();
+
+// early_init() if not done, set up the UART, spawn the bridge task. Refuses
+// (logs) on disallowed pins. Call after the STA is up. Idempotent.
 void start();
 
 // GET /modbus (config + client) and POST /modbus on the dashboard httpd.

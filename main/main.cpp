@@ -159,6 +159,11 @@ extern "C" void app_main() {
   }
   ESP_ERROR_CHECK(err);
 
+#if CONFIG_NBP_MODBUS_BRIDGE
+  // RS485 DE low and TX idle from here, also in AP provisioning.
+  modbus_bridge::early_init();
+#endif
+
   // Report a panic captured by the previous boot (RTC record, flash core
   // dump) into /log, and give a pre-coredump partition table a coredump
   // region. After install_log_hook so it lands in the web console.

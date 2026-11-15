@@ -968,9 +968,12 @@
 - **Build** (PSRAM unit): `idf.py -B build-psram-mb -DIDF_TARGET=esp32s3
   -DSDKCONFIG=build-psram-mb/sdkconfig -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.modbus" build`.
   Default n; the fragment turns it on (UART1, TX 4, RX 5, 115200 8N1, TCP 8899).
-- **Bytes only**, ser2net-style, for HA `modbus` `type: rtuovertcp`: no CRC, no
-  register knowledge. TCP data (segments gathered for 3 ms) goes out as one
-  burst after an RX flush; UART data goes back as one `send()` at line idle
+- ser2net-style, for HA `modbus` `type: rtuovertcp`, no register knowledge.
+  A request goes to RS485 only as a valid RTU frame (4..256 B, CRC16; FC 1-6
+  = 8 B, FC 15/16 = 9 + byte count, other FCs complete on a matching CRC or a
+  3 ms TCP gap); anything else counts `mb_bad_req`, drops the client and sends
+  nothing. A half-closed client still gets its request sent and the reply.
+  The request goes out as one burst after an RX flush; UART data goes back as one `send()` at line idle
   (UART RX timeout = Modbus t3.5, 1.75 ms floor). A reply after
   `NBP_MB_REPLY_TIMEOUT_MS` still reaches the client; it only counts `mb_timeouts`.
 - **Direction pin optional** (`NBP_MB_DE_GPIO`, default -1 = none, for
@@ -978,16 +981,26 @@
   (MIKROE-989 R/T = 6): plain UART, *not* `UART_MODE_RS485_HALF_DUPLEX`
   (received only 0x00 on an S3, `~/dev/kb/esp32/rs485-half-duplex-mode-received-nothing-on-s3.md`);
   the task raises itself to priority 19, DE high, `uart_write_bytes`,
-  `uart_wait_tx_done`, DE low, flushes RX. DE is low from boot on.
+  `uart_wait_tx_done`, DE low, two character times, flushes RX.
+  `modbus_bridge::early_init()` right after `nvs_flash_init` (before WiFi,
+  also in AP provisioning) drives DE low and pulls TX up, so DE is low from
+  boot on except the ROM/bootloader window. Pins are checked against
+  `esp_gpio_is_reserved()` (flash/PSRAM), the UART0 console and, on the S3,
+  26-37, straps and USB; a disallowed Kconfig/NVS pin set leaves the bridge
+  off (`GET /modbus` `running:false`), never a crash.
+- `CONFIG_UART_ISR_IN_IRAM=y` and `CONFIG_LWIP_MAX_SOCKETS=20` in the fragment.
 - **STA side only:** listener on INADDR_ANY, but a connection must arrive on
   the STA address from the STA subnet (or the one allowlisted IP) and never
   from the SoftAP subnet; else RST + `mb_refused`. One client; a new one
-  replaces it.
+  replaces it only if it is the allowlisted IP or the current client's IP,
+  else it is refused. TCP keepalive (60 s + 3 x 10 s) frees a dead client's slot.
 - `GET /modbus` (config, client, `stack_free` = task stack high-water);
   `POST /modbus?baud=&parity=n|e|o&allow=<ip>|none&tx=&rx=&de=<gpio>|none|-1`
   with `X-NBP-Confirm: yes`, NVS namespace `mbridge`. Line settings apply at
   once, pins after a reboot. `/stats.json`: `mb_client`, `mb_tx_frames`,
-  `mb_rx_frames`, `mb_tx_bytes`, `mb_rx_bytes`, `mb_timeouts`, `mb_refused`.
+  `mb_rx_frames`, `mb_tx_bytes`, `mb_rx_bytes`, `mb_timeouts`, `mb_refused`,
+  `mb_bad_req`. POST applies to RAM only after every NVS write and the commit
+  succeeded.
 - Host check (read-only, FC04 0x3108.. + FC01 coil 0x0F, slave 3):
   `scripts/modbus_bridge_test.py <ip>`.
 

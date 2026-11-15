@@ -923,9 +923,10 @@ esp_err_t stats_get(httpd_req_t *req) {
   // 64-bit byte counters (NAT builds) add ~60 more, the oom counters ~70, the notify
   // breakdown ~75, the BLE disconnect fields ~250, the WiFi disconnect
   // fields ~170, chip ids ~90, the API transmit figures ~260 + ~70 per
-  // client: ~1.5 KB with two clients on a NAT build. Static: httpd runs one
-  // handler at a time, and that much is too much for its task stack.
-  static char buf[1792];
+  // client, the modbus bridge ~150: ~1.8 KB with two clients on a NAT build
+  // and long uptime. Static: httpd runs one handler at a time, and that much
+  // is too much for its task stack.
+  static char buf[2304];
   size_t n = build_stats_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
@@ -1099,7 +1100,9 @@ void set_wifi_disc_provider(StatsAppender fn) { g_wifi_disc_provider = fn; }
 void set_ws_stats_provider(StatsAppender fn) { g_ws_stats_provider = fn; }
 void set_modbus_stats_provider(StatsAppender fn) { g_modbus_stats_provider = fn; }
 
-size_t build_stats_json(char *buf, size_t cap) {
+size_t build_stats_json(char *buf, size_t bufsz) {
+  if (bufsz < 2) return 0;
+  const size_t cap = bufsz - 1;  // one byte kept for the closing brace
   constexpr uint32_t kInternal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
   // BLE-sourced counters. When NBP_BLE is off the backend (scanner +
   // GATT pool) isn't compiled, so these read as zero — the dashboard
@@ -1359,11 +1362,11 @@ size_t build_stats_json(char *buf, size_t cap) {
       if (m > 0) n += m;
     }
   }
-  if (static_cast<size_t>(n) < cap) {
-    int m = std::snprintf(buf + n, cap - n, "}");
-    if (m > 0) n += m;
-  }
-  return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+  size_t len = n < 0 ? 0 : static_cast<size_t>(n);
+  if (len >= cap) len = cap - 1;  // truncated: snprintf stopped at cap - 1
+  buf[len++] = '}';
+  buf[len] = '\0';
+  return len;
 }
 
 #if CONFIG_NBP_WEB_CONSOLE

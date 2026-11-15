@@ -172,10 +172,11 @@ void start() {
 #if CONFIG_NBP_MODBUS_BRIDGE
   cfg.max_uri_handlers += 2;  // /modbus GET+POST
 #endif
-  // CONFIG_LWIP_MAX_SOCKETS=16 leaves the api_server (1 listen + up to
-  // 4 clients), mDNS and clone.mirror plenty of room alongside the
-  // dashboard. Bumping httpd here to 5 lets a phone + a desktop browser
-  // both poll /stats.json in parallel without httpd_accept_conn ENFILE.
+  // httpd takes up to 7 sockets (listen, ctrl, 5 clients) out of
+  // CONFIG_LWIP_MAX_SOCKETS=16, next to the api_server (1 listen + up to
+  // 4 clients), mDNS and clone.mirror; the modbus bridge (listen + client)
+  // raises the limit to 20 in its fragment. 5 clients let a phone + a
+  // desktop browser both poll /stats.json without httpd_accept_conn ENFILE.
   cfg.max_open_sockets = 5;
 
   if (httpd_start(&g_srv, &cfg) != ESP_OK) {

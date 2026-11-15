@@ -3,7 +3,9 @@
 
 Sends FC04 (read input registers 0x3108..0x310F) and FC01 (read coil 0x0F)
 to an EPEVER IP-Plus inverter, raw RTU frames with CRC16, and decodes them.
-Only read function codes are ever built; nothing is written.
+Only read function codes are ever built; nothing is written. A last check
+sends an FC04 frame with a broken CRC and expects the bridge to close the
+connection without putting it on the bus.
 
   scripts/modbus_bridge_test.py <ip> [--port 8899] [--slave 3] [--timeout 2]
 """
@@ -70,6 +72,21 @@ def transact(sock, slave, fc, addr, count, timeout):
     return rep[3:3 + rep[2]]
 
 
+def bad_crc_closes(host, port, slave, timeout):
+    req = bytearray(frame(slave, 0x04, 0x3108, 1))
+    req[-1] ^= 0xFF
+    with socket.create_connection((host, port), timeout=5) as s:
+        s.sendall(bytes(req))
+        s.settimeout(timeout)
+        try:
+            data = s.recv(512)
+        except ConnectionResetError:
+            return True
+        except socket.timeout:
+            return False
+        return data == b""
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("host")
@@ -99,6 +116,12 @@ def main():
         except Exception as e:  # noqa: BLE001
             ok = False
             print(f"  FAIL: {e}")
+    print("bad CRC frame -> connection closed")
+    if bad_crc_closes(a.host, a.port, a.slave, a.timeout):
+        print("  ok")
+    else:
+        ok = False
+        print("  FAIL: connection stayed open or got data")
     sys.exit(0 if ok else 1)
 
 
