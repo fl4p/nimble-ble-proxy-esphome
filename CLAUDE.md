@@ -1084,6 +1084,51 @@ rest:
   A `none` state shows as unknown in HA, so a failed or stale reading never
   carries the last value forward.
 
+## Switch output (`NBP_SWITCH_OUT`, `components/switch_out`)
+
+- **Build** (PSRAM unit): `idf.py -B build-psram-sw -DIDF_TARGET=esp32s3
+  -DSDKCONFIG=build-psram-sw/sdkconfig
+  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.switch" build`.
+  Default n. Builds only so far, not hardware-tested.
+- GPIO14 (`NBP_SWITCH_GPIO`) drives an N-MOSFET gate across the EPEVER
+  IP3000 remote-switch contact: high = closed = inverter on. It feeds a
+  fridge, so the output must not glitch. Checked by `nbp_gpio::allowed()`
+  and claimed first (before the bridge and sensors); a disallowed pin is
+  left untouched (`running:false`, POST 500).
+- `GET /switch` → `{"gpio":14,"on":true,"boot":"last","changes":0,"since_s":12,"running":true}`
+  (`changes` since boot, `since_s` since the last change or boot).
+  `POST /switch?on=0|1` and/or `?boot=off|on|last` with `X-NBP-Confirm: yes`,
+  **STA side only** (request on the STA address from the STA subnet, never
+  from a SoftAP client; IPv6 peers refused; `getsockname`/`getpeername` on
+  `httpd_req_to_sockfd`, IPv4-mapped on the dual-stack listener), else 403.
+  NVS namespace `switch` (`on`, `boot`, u8), written only when a value
+  differs from the stored one, before the pin changes. Default boot policy
+  `last`; no stored state = off. `/stats.json`: `sw_on`, `sw_changes`.
+- **Boot:** `switch_out::early_init()` right after `nvs_flash_init`, before
+  WiFi: level into the output register, `gpio_config` (in+out, no pulls),
+  `gpio_sleep_sel_dis` (startup isolates every pad in light sleep,
+  `sleep_gpio.c:266-275`), then `gpio_hold_dis` + `gpio_hold_en`. A change
+  does the same: register first, then release and re-take the hold.
+- **What the hold covers (IDF 6.0.3 source, S3):** GPIO14 is an RTC pad, so
+  `gpio_hold_en` (`gpio.c:752-754`) sets `RTC_CNTL_TOUCH_PAD14_HOLD` in
+  `RTC_CNTL_PAD_HOLD_REG` (`rtc_io_ll.h:298-301`, `rtc_io_periph.c:81`), an
+  RTC-domain register that only power-on, chip (EN) and RTC resets clear.
+  Startup unholds pads only after a deep-sleep reset (`cpu_start.c:849-852`).
+  - Kept: `esp_restart()` incl. `/reboot`, OTA and liveness reboots
+    (`esp_restart_noos` resets the CPUs, `system_internal.c:153/159`; its
+    1 s RWDT fallback is a system reset, `:83`), panics and task/int WDT
+    (`panic_restart` → `esp_restart_noos`, `panic_handler.c:304-313`; int WDT
+    stage 1 is a system reset, `int_wdt.c:94`), brownout
+    (`esp_rom_software_reset_system`, `brownout.c:80`), light sleep.
+  - Lost (pad at its reset state, so the gate needs an external pull-down to
+    read off): power-on, EN/chip reset, any RTC-WDT RTC reset: bootloader
+    hang > 9 s (`bootloader_init.c:93`), panic handler (core dump) > 10 s
+    (`panic_handler.c:219`, `panic.c:203`), stage 2 of the
+    `esp_restart_noos` RWDT (`system_internal.c:84`). The pin then stays
+    there until `early_init` restores it.
+  - An image without this feature (rollback, older OTA) leaves the pad held
+    at the last level until power-off and cannot change it.
+
 ## Liveness watchdog targets (v0.2.4, issue #2)
 
 - The probe used to hard-code Fab's lab broker `192.168.1.200:1882` as the

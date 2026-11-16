@@ -20,4 +20,5 @@ idf_component_register(
         bench
         modbus_bridge
         env_sensors
+        switch_out
 )

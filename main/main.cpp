@@ -58,6 +58,10 @@
 #include "env_sensors.h"
 #endif
 
+#if CONFIG_NBP_SWITCH_OUT
+#include "switch_out.h"
+#endif
+
 #include "bench.h"
 
 #include "esp_app_desc.h"
@@ -163,6 +167,10 @@ extern "C" void app_main() {
   }
   ESP_ERROR_CHECK(err);
 
+#if CONFIG_NBP_SWITCH_OUT
+  // First: restores the output (inverter on/off) as early as NVS allows.
+  switch_out::early_init();
+#endif
 #if CONFIG_NBP_MODBUS_BRIDGE
   // RS485 DE low and TX idle from here, also in AP provisioning.
   modbus_bridge::early_init();
@@ -320,6 +328,10 @@ extern "C" void app_main() {
   env_sensors::start();
   env_sensors::register_endpoints(ota::handle());
   api_server::stats::set_env_stats_provider(&env_sensors::append_stats_json);
+#endif
+#if CONFIG_NBP_SWITCH_OUT
+  switch_out::register_endpoints(ota::handle());
+  api_server::stats::set_switch_stats_provider(&switch_out::append_stats_json);
 #endif
 #if CONFIG_NBP_NAT_ROUTER
   // STA is up (start_and_wait_for_ip returned above). Bring up the SoftAP

@@ -1,0 +1,8 @@
+# Switched output (components/switch_out): GPIO14 -> N-MOSFET gate across the
+# inverter's remote on/off contact (high = closed = on). Layer on the PSRAM build:
+#   idf.py -B build-psram-sw -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-psram-sw/sdkconfig \
+#     -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.switch" build
+# GPIO14 avoids flash/PSRAM (26-37), straps (0/3/45/46), USB (19/20), console
+# (43/44), JTAG (39-42), the modbus bridge (4-6) and env sensors (7-9).
+CONFIG_NBP_SWITCH_OUT=y
+CONFIG_NBP_SWITCH_GPIO=14

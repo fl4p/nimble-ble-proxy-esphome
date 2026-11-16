@@ -54,6 +54,8 @@ void set_ws_stats_provider(StatsAppender fn);
 void set_modbus_stats_provider(StatsAppender fn);
 // Same, for the env sensor counters (env_sensors::append_stats_json).
 void set_env_stats_provider(StatsAppender fn);
+// Same, for the switch output (switch_out::append_stats_json).
+void set_switch_stats_provider(StatsAppender fn);
 
 // Build the same JSON body that /stats.json returns into a caller-
 // supplied buffer. Returns bytes written (truncated at cap-1 by

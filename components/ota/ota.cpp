@@ -175,6 +175,9 @@ void start() {
 #if CONFIG_NBP_ENV_SENSORS
   cfg.max_uri_handlers += 2;  // /sensors GET+POST
 #endif
+#if CONFIG_NBP_SWITCH_OUT
+  cfg.max_uri_handlers += 2;  // /switch GET+POST
+#endif
   // httpd takes up to 7 sockets (listen, ctrl, 5 clients) out of
   // CONFIG_LWIP_MAX_SOCKETS=16, next to the api_server (1 listen + up to
   // 4 clients), mDNS and clone.mirror; the modbus bridge (listen + client)

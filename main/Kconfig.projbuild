@@ -440,6 +440,27 @@ config NBP_ENV_DS_MAX
 
 endif # NBP_ENV_SENSORS
 
+config NBP_SWITCH_OUT
+    bool "Switched GPIO output (inverter remote on/off)"
+    depends on NBP_WIFI
+    default n
+    help
+        Drives one GPIO (e.g. a MOSFET across an inverter's remote-switch
+        contact; high = closed = on) and holds the pad so the level
+        survives software resets (esp_restart, OTA reboot, panic). Boot
+        state off, on or last commanded (NVS). GET/POST /switch, writes
+        from the STA side only; sw_on/sw_changes in /stats.json.
+        Enabled by sdkconfig.defaults.switch.
+
+if NBP_SWITCH_OUT
+
+config NBP_SWITCH_GPIO
+    int "Switch output GPIO"
+    range 0 48
+    default 14
+
+endif # NBP_SWITCH_OUT
+
 config NBP_BLE
     bool "Enable BLE (NimBLE scanner/proxy + all BLE features)"
     default y
