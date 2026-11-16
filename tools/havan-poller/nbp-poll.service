@@ -1,0 +1,15 @@
+[Unit]
+Description=nimble-proxy health poller (stats.json + wifidisc -> InfluxDB UDP relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10s
+User=fab
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/fab/bin/nbp_poll.py
+
+[Install]
+WantedBy=multi-user.target
