@@ -84,11 +84,17 @@ constexpr UBaseType_t SENDER_PRIO = 6;
 // lwIP while the client's unsent + unacked segments hold the cap, so a
 // stalled peer pins at most the cap plus one send, and the ring.
 //
-// Coalescing: while the client has segments in flight and the ring holds
+// Coalescing: while the client has one segment in flight and the ring holds
 // less than one MSS, api_tx holds the data for up to TX_COALESCE_MS so that
-// the next frames join the same segment. With nothing in flight it sends at
-// once. lwIP's Nagle stays off (TCP_NODELAY): it would hold a lone frame
-// until the peer's ACK (~250 ms on the field links).
+// the next frames join the same segment; with TX_HOLD_SEGS or more queued it
+// holds until an ACK frees one or a full MSS has gathered. With nothing in
+// flight it sends at once. lwIP's Nagle stays off (TCP_NODELAY): it would
+// hold a lone frame until the peer's ACK (~250 ms on the field links).
+// The send MSS is lowered per socket (clamp_send_mss), since every segment
+// is one MSS-sized heap pbuf.
+//
+// Advert batches are refused while the client is congested (api_tx cannot
+// move its ring into lwIP), so the ring keeps its room for notifies.
 //
 // Teardown: the slot's `io_busy` flag is set (under g_clients_mutex) while
 // api_tx does I/O on its fd; unregister_client marks the slot retired and
@@ -99,8 +105,11 @@ constexpr int CLIENT_SEND_DEADLINE_MS = 20000;
 constexpr int RING_WAIT_POLL_MS = 10;
 // api_tx's wake-up period while some ring holds data it could not move.
 constexpr int SENDER_POLL_MS = 10;
-// Longest a small frame waits for company while segments are in flight.
+// Longest a small frame waits for company while one segment is in flight.
 constexpr int TX_COALESCE_MS = 20;
+// With this many segments queued in lwIP (unsent + unacked), less than an
+// MSS waits in the ring until ACKs free a segment or a full one gathers.
+constexpr unsigned TX_HOLD_SEGS = 2;
 // After a protocol close (DisconnectResponse, Hello reject), how long the
 // connection task waits for api_tx to hand the last frame to lwIP.
 constexpr int PROTOCOL_CLOSE_FLUSH_MS = 2000;
@@ -170,6 +179,11 @@ struct ClientEntry {
   // instead of being kept topped up by adverts (on the C3 a 2054 B frame
   // fits only into a near-empty ring).
   bool bulk_waiting = false;
+  // Set by api_tx while it cannot move this client's ring into lwIP (send
+  // queue at the heap cap, no payload room or pbuf slots, or no memory).
+  // Advert batches are refused meanwhile: they would only take ring room
+  // the notifies need until the queue drains.
+  bool congested = false;
   uint32_t peer_ip = 0;  // IPv4, network order, from accept(); for /links
 };
 std::array<ClientEntry, proxy::MAX_API_CLIENTS> g_clients;
@@ -287,6 +301,7 @@ struct TxqCall {
   uint32_t heap;  // heap held by unsent + unacked segments
   uint16_t segs;  // pcb->snd_queuelen (pbufs)
   uint16_t bytes; // TCP_SND_BUF - snd_buf (payload bytes)
+  uint16_t mss;   // pcb->mss: payload of one segment
 };
 
 uint32_t seg_list_heap(const tcp_seg *seg) {
@@ -316,8 +331,77 @@ err_t txq_query_fn(tcpip_api_call_data *c) {
   q->heap = seg_list_heap(pcb->unsent) + seg_list_heap(pcb->unacked);
   q->segs = pcb->snd_queuelen;
   q->bytes = static_cast<uint16_t>(TCP_SND_BUF - pcb->snd_buf);
+  q->mss = pcb->mss;
   q->ok = true;
   return ERR_OK;
+}
+
+// ---- send MSS of API sockets (NBP_API_CLIENT_TX_MSS) ----
+//
+// With LWIP_NETIF_TX_SINGLE_PBUF, tcp_write allocates every new segment as
+// one pbuf of the full send MSS (tcp_out.c tcp_pbuf_prealloc: alloc =
+// max_length), and nearly all API traffic is notifies of 30-150 B. At the
+// default MSS (1440) a segment holding one notify pins ~1.55 KiB until the
+// peer's ACK. The issue #2 C3 hit the 8 KiB cap with 6 such segments and
+// 750 B of payload, stopped sending for 1-2 s while the ACKs came late, and
+// the notifies piling up in the 3 KiB ring reaped its only client. The
+// pbufs also could not be allocated once the largest free block was below
+// 1.5 KiB ("no memory", largest 1472). At 536 a segment is ~0.65 KiB.
+//
+// lwIP has no TCP_MAXSEG socket option. pcb->mss is set once, from the
+// SYN's MSS option, and every later tcp_write reads it, so lowering it in
+// the tcpip thread before the first write is safe; tcp_write asserts that
+// an unsent segment is no longer than the MSS, hence only while the queue
+// is empty (always, right after accept()). The MSS we advertise for our
+// receive side is already sent and unchanged.
+struct MssCall {
+  tcpip_api_call_data base;  // must be first
+  int fd;
+  uint16_t want;
+  uint16_t before;
+  uint16_t after;
+};
+
+err_t mss_clamp_fn(tcpip_api_call_data *c) {
+  auto *m = reinterpret_cast<MssCall *>(c);
+  lwip_sock *sock = lwip_socket_dbg_get_socket(m->fd);
+  if (sock == nullptr || sock->conn == nullptr ||
+      NETCONNTYPE_GROUP(netconn_type(sock->conn)) != NETCONN_TCP) {
+    return ERR_OK;
+  }
+  tcp_pcb *pcb = sock->conn->pcb.tcp;
+  if (pcb == nullptr) return ERR_OK;
+  m->before = m->after = pcb->mss;
+  if (pcb->unsent == nullptr && pcb->unacked == nullptr && m->want < pcb->mss) {
+    pcb->mss = m->want;
+    m->after = m->want;
+  }
+  return ERR_OK;
+}
+
+// Lower `fd`'s send MSS to NBP_API_CLIENT_TX_MSS. Returns the MSS in effect
+// (0 if the socket could not be read).
+//
+// Not for loopback peers (the WS bridge's own lwIP socket): an lwIP
+// receiver queues at most CONFIG_LWIP_TCP_RECVMBOX_SIZE (6) segments, and
+// with 536 B segments that is less than the window, so a reader that falls
+// behind has data refused and retried only on lwIP's 250 ms timer (QEMU:
+// the heap self-test's GetServices burst to a slow lwIP reader stalled and
+// reaped it; with 16 mbox slots it passed). The heap self-test's clients
+// are all loopback, so it clamps them too and raises their mbox
+// (sdkconfig.defaults.heaptest).
+uint16_t clamp_send_mss(int fd, uint32_t peer_be) {
+  if (proxy::API_CLIENT_TX_MSS == 0) return 0;
+#if !NBP_HEAP_SELFTEST
+  if ((ntohl(peer_be) >> 24) == 127) return 0;
+#else
+  (void)peer_be;
+#endif
+  MssCall m{};
+  m.fd = fd;
+  m.want = static_cast<uint16_t>(std::max<size_t>(proxy::API_CLIENT_TX_MSS, 256));
+  if (tcpip_api_call(&mss_clamp_fn, &m.base) != ERR_OK) return 0;
+  return m.after;
 }
 
 // Heap held by `fd`'s send queue, or false if it cannot be read (socket
@@ -366,7 +450,8 @@ void reap_full(const Target &t) {
 // Ring admission. Three levels, so that the frames that must never wait
 // (notifies, connection states from the NimBLE host task) always find room
 // while the client drains at all:
-// - Lossy (advert batches): up to half the ring.
+// - Lossy (advert batches): up to half the ring, and none while api_tx
+//   cannot move the ring into lwIP (`congested`).
 // - Bulk (the client's own connection task: handshake replies, GetServices,
 //   GATT replies; these may wait): up to RING - RESERVE, or anything into
 //   an empty ring. RESERVE holds two max-size notifies, which is what the
@@ -404,7 +489,7 @@ Put ring_put(int slot, uint32_t id, const uint8_t *p, size_t n, bool lossy,
   *cls = lossy ? Cls::Lossy : (c.task == me ? Cls::Bulk : Cls::Strict);
   Ring &r = g_rings[slot];
   const size_t used = r.used.load(std::memory_order_acquire);
-  if ((lossy && c.bulk_waiting) || !fits(used, n, *cls)) {
+  if ((lossy && (c.bulk_waiting || c.congested)) || !fits(used, n, *cls)) {
     xSemaphoreGive(g_clients_mutex);
     return Put::Full;
   }
@@ -564,6 +649,7 @@ TickType_t drain_slot(int i) {
   const int fd = c.fd;
   const char *reap = c.reap_why;
   const bool bulk_waiting = c.bulk_waiting;
+  bool congested = c.congested;
   c.io_busy = true;
   xSemaphoreGive(g_clients_mutex);
 
@@ -590,6 +676,7 @@ TickType_t drain_slot(int i) {
   if (avail == 0) {
     st.pending_since = 0;
     st.last_progress = now;
+    congested = false;
   } else {
     if (st.pending_since == 0) {
       // Data after an idle spell: the stall clock starts now, not at the
@@ -597,7 +684,9 @@ TickType_t drain_slot(int i) {
       st.pending_since = now;
       st.last_progress = now;
     }
-    bool full = false, hold = false, queried = false;
+    bool full = false, hold = false, queried = false, nomem = false;
+    bool hold_untimed = false;
+    size_t whole = 0;  // > 0: send only a multiple of this (the MSS)
     size_t room = avail;
     TxqCall q;
     if (txq_query(fd, &q)) {
@@ -611,10 +700,34 @@ TickType_t drain_slot(int i) {
       full = (proxy::API_CLIENT_TXQ_CAP > 0 &&
               q.heap >= proxy::API_CLIENT_TXQ_CAP) ||
              room == 0 || q.segs + 2u > TCP_SND_QUEUELEN;
-      // No coalescing hold while a bulk producer waits for this ring to
-      // empty.
-      hold = !full && !bulk_waiting && q.segs > 0 && avail < TCP_MSS &&
-             now - st.pending_since < pdMS_TO_TICKS(TX_COALESCE_MS);
+      const size_t mss = q.mss > 0 ? q.mss : TCP_MSS;
+      if (!full) {
+        // Segments one write may add: lwIP fails the whole write (ERR_MEM,
+        // reported as EWOULDBLOCK) if it would pass TCP_SND_QUEUELEN, and
+        // the heap cap should not be overshot by more than a segment.
+        size_t segs_ok = TCP_SND_QUEUELEN - q.segs - 1u;  // >= 1: not full
+        if (proxy::API_CLIENT_TXQ_CAP > 0) {
+          const size_t per_seg = q.segs > 0 ? q.heap / q.segs : mss + 128;
+          const size_t by_cap =
+              (proxy::API_CLIENT_TXQ_CAP - q.heap) / std::max<size_t>(per_seg, 1) + 1;
+          segs_ok = std::min(segs_ok, by_cap);
+        }
+        room = std::min(room, segs_ok * mss);
+      }
+      // Coalescing (no hold while a bulk producer waits for this ring to
+      // empty, and never on a full segment's worth). One segment in
+      // flight: hold up to TX_COALESCE_MS. TX_HOLD_SEGS or more: hold until
+      // ACKs free some or a full segment has gathered (Nagle, but with
+      // TX_HOLD_SEGS small segments in flight instead of one), so a slow
+      // ACK clock costs latency in the static ring, not a heap pbuf per
+      // notify.
+      if (!full && !bulk_waiting && q.segs > 0 && avail < mss) {
+        hold_untimed = q.segs >= TX_HOLD_SEGS;
+        hold = hold_untimed ||
+               now - st.pending_since < pdMS_TO_TICKS(TX_COALESCE_MS);
+      }
+      // In the same state, send whole segments only; the rest waits too.
+      if (!full && !bulk_waiting && q.segs >= TX_HOLD_SEGS) whole = mss;
       if (full) {
         if (!st.over) {
           st.over = true;
@@ -642,8 +755,13 @@ TickType_t drain_slot(int i) {
         st.over_since = 0;
       }
     }
+    size_t n = 0;
     if (!full && !hold) {
-      const size_t n = std::min(avail, room);
+      // Whole segments' worth of the ring, but what lwIP has room for even
+      // if that is less (never wait on a partial window).
+      n = std::min(whole > 0 ? avail / whole * whole : avail, room);
+    }
+    if (n > 0) {
       iovec iov[2];
       const size_t first = std::min(n, RING - r.tail);
       iov[0].iov_base = r.buf + r.tail;
@@ -671,6 +789,7 @@ TickType_t drain_slot(int i) {
       } else if (w < 0) {
         const int e = errno;
         if (e == ENOMEM || e == ENOBUFS || e == EAGAIN || e == EWOULDBLOCK) {
+          nomem = true;
           // With MSG_DONTWAIT lwIP reports tcp_write's ERR_MEM as
           // EWOULDBLOCK, whatever its cause. The query just showed payload
           // room and pbuf slots (not `full`), so here it was a failed
@@ -702,16 +821,19 @@ TickType_t drain_slot(int i) {
         ESP_LOGW(TAG, "fd=%d: %u B queued, nothing sent for %d ms", fd,
                  static_cast<unsigned>(avail), CLIENT_SEND_DEADLINE_MS);
         new_reap = WHY_STALLED;
-      } else if (hold) {
+      } else if (hold && !hold_untimed) {
         const TickType_t left =
             pdMS_TO_TICKS(TX_COALESCE_MS) - (now - st.pending_since);
         next = std::max<TickType_t>(left, 1);
       } else {
+        // Over the cap / no memory / waiting for ACKs: look again soon.
         next = std::max<TickType_t>(pdMS_TO_TICKS(SENDER_POLL_MS), 1);
       }
     }
+    if (queried) congested = full || nomem;
   }
   xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
+  c.congested = congested;
   if (new_reap != nullptr) {
     mark_reaped_locked(c, new_reap);
     next = 0;  // shut it down on the next pass
@@ -1010,8 +1132,10 @@ void listener_task(void *) {
     // Visibility: print the moment accept() returns, before any task
     // scheduling delay. If "accepted fd=X" appears with no matching
     // "client connected" later, xTaskCreate was the holdup.
-    ESP_LOGI(TAG, "accepted fd=%d peer=%s:%u", client_fd,
-             inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
+    // Before anything is written (see clamp_send_mss).
+    const uint16_t mss = clamp_send_mss(client_fd, peer.sin_addr.s_addr);
+    ESP_LOGI(TAG, "accepted fd=%d peer=%s:%u mss=%u", client_fd,
+             inet_ntoa(peer.sin_addr), ntohs(peer.sin_port), mss);
     // api_tx coalesces (see the transmit-path comment); lwIP's Nagle would
     // only add an ACK wait on top.
     ::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
@@ -1152,6 +1276,7 @@ TxqStats txq_stats() {
     c.max = g_txq[i].max;
     c.ring = static_cast<uint32_t>(g_rings[i].used.load(std::memory_order_relaxed));
     c.ring_max = static_cast<uint32_t>(g_rings[i].hwm);
+    c.congested = g_clients[i].congested;
   }
   xSemaphoreGive(g_clients_mutex);
   return out;

@@ -18,6 +18,12 @@ endif()
 # that fakes a stalled peer. Never in a firmware build.
 if(NBP_HEAP_SELFTEST)
     idf_build_set_property(COMPILE_DEFINITIONS "NBP_HEAP_SELFTEST=1" APPEND)
+    # Its test clients are lwIP sockets standing in for Linux clients; give
+    # them a Linux-like receive queue (see sdkconfig.defaults.heaptest). Read
+    # when the build dir's sdkconfig is created: use a fresh build dir.
+    if(NOT SDKCONFIG_DEFAULTS)
+        set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.heaptest")
+    endif()
 endif()
 
 # QEMU static-lease self-test only (idf.py -B build-qemu-dhcps

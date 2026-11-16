@@ -38,6 +38,6 @@ CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
 # notifies (2 x 538 B) that the host task may queue behind it.
 CONFIG_NBP_API_CLIENT_TX_RING=3136
 # Send-queue heap cap 16 -> 8 KiB per client: api_tx packs frames into full
-# segments, so 8 KiB carries ~5 full-MSS segments, and 2 x 16 KiB would
-# exceed the C3's whole steady-state free heap.
+# 536 B segments (NBP_API_CLIENT_TX_MSS), so 8 KiB carries ~5.7 KiB of
+# frames, and 2 x 16 KiB would exceed the C3's whole steady-state free heap.
 CONFIG_NBP_API_CLIENT_TXQ_CAP=8192

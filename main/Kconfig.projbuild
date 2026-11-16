@@ -158,13 +158,31 @@ config NBP_API_CLIENT_TXQ_CAP
         regularly holds 6 segments (9.3 KiB for ~200 B of notifies; the
         ACKs come back ~250 ms late), so 8 KiB was hit several times a
         second. That was before the TX ring: api_tx now packs queued
-        frames into one segment. S3 bench (2026-11-13,
+        frames into one segment, holds small frames in the ring while 2
+        segments are in flight, and sends with a 536 B MSS
+        (NBP_API_CLIENT_TX_MSS), so 8 KiB takes ~5.7 KiB of frames. S3 bench (2026-11-13,
         docs/bench-api-tx-ring-s3.md), one healthy client plus one
         stalled: 8 KiB lost no notifies and reaped no healthy client, and
         kept heap_min at 14.9 KB vs 11.5 KB with 16 KiB. Uncapped, a
         stalled peer pins 16 segments, ~25 KiB.
         /stats.json reports the per-client high-water mark (api_txq_max)
         and the drops (api_txq_drops) / reaps (api_txq_reaps).
+
+config NBP_API_CLIENT_TX_MSS
+    int "API: send MSS of API client sockets (bytes, 0 = lwIP's)"
+    depends on NBP_WIFI
+    range 0 1460
+    default 536
+    help
+        Every API socket's send MSS is lowered to this right after
+        accept(). With LWIP_NETIF_TX_SINGLE_PBUF each TCP segment is one
+        MSS-sized heap pbuf however small the data, and API traffic is
+        mostly small notifies: at 1440 a segment holding one 40 B notify
+        pins ~1.55 KiB until it is ACKed, at 536 ~0.65 KiB. Values below
+        256 are raised to 256. 0 keeps lwIP's MSS (CONFIG_LWIP_TCP_MSS).
+        Only the API sockets are affected (HTTP and OTA keep the full
+        MSS); bulk API frames (GetServices, 2 KiB) take a few more
+        segments.
 
 config NBP_API_CLIENT_TX_RING
     int "API: per-client TX ring (bytes, static)"

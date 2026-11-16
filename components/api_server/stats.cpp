@@ -129,7 +129,66 @@ void log_ring_append(const char *data, size_t len) {
   xSemaphoreGive(g_log_mutex);
 }
 
+// Rate limit for NimBLE-cpp's "NimBLEClient: unknown handle: N". It logs one
+// WARN per notification whose handle is not in the link's attribute cache,
+// on the NimBLE host task. A JK BMS notifies right after connect, before
+// discovery has filled the cache, ~6-10 per second (issue #2: 1158 by the
+// evening, mostly in runs right after each reconnect), and those lines crowd
+// the 4 KiB /log ring and the console. Every one is still counted
+// (/stats.json notify_unknown, ble_backend's GAP listener); the log keeps
+// the first line of each UNKNOWN_HANDLE_LOG_US window and says how many were
+// left out.
+constexpr int64_t UNKNOWN_HANDLE_LOG_US = 5 * 1000 * 1000;
+std::atomic<int64_t> g_unknown_log_us{0};
+std::atomic<uint32_t> g_unknown_suppressed{0};
+
+int old_printf(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  const int r = g_old_vprintf ? g_old_vprintf(fmt, ap) : std::vprintf(fmt, ap);
+  va_end(ap);
+  return r;
+}
+
+// One extra line to both the console and the /log ring, from inside the
+// hook (an ESP_LOGx here would re-enter it).
+void log_emit(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void log_emit(const char *fmt, ...) {
+  char buf[128];
+  va_list ap;
+  va_start(ap, fmt);
+  const int n = std::vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  if (n <= 0) return;
+  log_ring_append(buf, std::min(static_cast<size_t>(n), sizeof(buf) - 1));
+  old_printf("%s", buf);
+}
+
+// True: drop this line (an "unknown handle" line inside the window).
+bool unknown_handle_suppressed(const char *fmt) {
+  if (std::strstr(fmt, "unknown handle: ") == nullptr) return false;
+  const int64_t now = esp_timer_get_time();
+  const int64_t last = g_unknown_log_us.load(std::memory_order_relaxed);
+  if (last != 0 && now - last < UNKNOWN_HANDLE_LOG_US) {
+    g_unknown_suppressed.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+  g_unknown_log_us.store(now, std::memory_order_relaxed);
+  return false;
+}
+
 int log_vprintf(const char *fmt, va_list argptr) {
+  if (unknown_handle_suppressed(fmt)) return 0;
+  const uint32_t skipped =
+      std::strstr(fmt, "unknown handle: ") != nullptr
+          ? g_unknown_suppressed.exchange(0, std::memory_order_relaxed)
+          : 0;
+  if (skipped > 0) {
+    log_emit("(%lu more 'unknown handle' lines not logged, at most one per "
+             "%d s; notify_unknown counts all)\n",
+             static_cast<unsigned long>(skipped),
+             static_cast<int>(UNKNOWN_HANDLE_LOG_US / 1000000));
+  }
   // va_copy before consuming argptr in old_vprintf; vsnprintf into a
   // stack scratch — accept truncation for lines >sizeof(buf), no malloc
   // in a logging path.
@@ -1330,7 +1389,8 @@ size_t build_stats_json(char *buf, size_t bufsz) {
   // TX ring, ring high-water] (NBP_API_CLIENT_TX_RING). Reaps by reason:
   // api_txq_reaps = nothing sent for 20 s, api_ring_reaps = a frame that
   // must not be lost did not fit. api_txq_drops = advert batches dropped
-  // (ring half full). api_tx_frames / api_tx_sends = frames per send() (the
+  // (ring half full, or the client's send queue full). api_tx_mss = send MSS
+  // of API sockets (0 = lwIP's). api_tx_frames / api_tx_sends = frames per send() (the
   // coalescing); api_enq_us_max = longest send call that did not wait;
   // api_tx_stack_free = the api_tx task's stack high-water (bytes unused).
   if (static_cast<size_t>(n) < cap) {
@@ -1342,7 +1402,7 @@ size_t build_stats_json(char *buf, size_t bufsz) {
         "\"api_txq_reaps\":%lu,\"api_txq_busy\":%s,"
         "\"api_ring_size\":%lu,\"api_ring_reaps\":%lu,\"api_tx_frames\":%lu,"
         "\"api_tx_sends\":%lu,\"api_enq_us_max\":%lu,\"api_tx_stack_free\":%lu,"
-        "\"api_txq\":[",
+        "\"api_tx_mss\":%u,\"api_txq\":[",
         t.n_clients, proxy::MAX_API_CLIENTS,
         static_cast<unsigned long>(t.refused),
         static_cast<unsigned long>(t.cap), static_cast<unsigned long>(t.max_all),
@@ -1351,7 +1411,8 @@ size_t build_stats_json(char *buf, size_t bufsz) {
         static_cast<unsigned long>(t.ring_reaps),
         static_cast<unsigned long>(t.frames), static_cast<unsigned long>(t.sends),
         static_cast<unsigned long>(t.enq_us_max),
-        static_cast<unsigned long>(t.tx_stack_free));
+        static_cast<unsigned long>(t.tx_stack_free),
+        static_cast<unsigned>(proxy::API_CLIENT_TX_MSS));
     if (m > 0) n += m;
     for (uint8_t i = 0; i < t.n_clients && static_cast<size_t>(n) < cap; ++i) {
       m = std::snprintf(buf + n, cap - n, "%s[%lu,%lu,%lu]", i ? "," : "",

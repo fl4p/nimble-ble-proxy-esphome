@@ -1,0 +1,11 @@
+# QEMU heap self-test builds only (-DNBP_HEAP_SELFTEST=1 adds this file; the
+# target overlay, e.g. sdkconfig.defaults.esp32c3, still applies on top).
+#
+# The self-test's clients are lwIP sockets on loopback, standing in for HA /
+# batmon on Linux. An lwIP receiver queues at most TCP_RECVMBOX_SIZE segments
+# (6 by default) and refuses the rest until its 250 ms timer; with the API
+# sockets' 536 B send MSS that is less than the 5760 B window, so a slow test
+# reader stalls where a Linux reader (a socket buffer of 100+ KiB) would not.
+# 16 x 536 B covers the window. The firmware keeps 6 (it only affects
+# sockets the firmware receives on).
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=16

@@ -11,8 +11,10 @@
 //                 notifications to client B: B keeps receiving, A's queue
 //                 stays at the cap, A is reaped, the heap stays bounded.
 //   stall_strict  the same with non-lossy frames to the stalled client: they
-//                 queue in its TX ring until it is full, then the client is
-//                 reaped (the producer never waits).
+//                 queue in lwIP and then its TX ring until it is full, then
+//                 the client is reaped (the producer never waits). Under an
+//                 8 KiB cap lwIP must take >= 4 KiB of the small frames
+//                 (packed segments, not one heap pbuf per frame).
 //   stall_isolation  one client stalled, one healthy, notifies to both from
 //                 one task: every send call stays short, the healthy client
 //                 gets all of its frames, only the stalled one is reaped.
@@ -42,8 +44,9 @@
 //                 half the ring) and the burst waits. Advert batches
 //                 broadcast now must be refused for W (ring unchanged) and
 //                 still reach B; after the stall ends the burst completes.
-//   coalesce      frames per send() / per TCP segment for a burst and a
-//                 paced stream of notify-sized frames.
+//   coalesce      frames per send() / per TCP segment and the lwIP queue's
+//                 heap high-water for a burst and a paced stream of
+//                 notify-sized frames.
 // Every step prints `HEAP-SELFTEST <name>: PASS|FAIL <detail>`; numbers are
 // printed as `HEAP-MEASURE <what> <value>`. Build with
 // -DNBP_API_CLIENT_TXQ_CAP=0 in sdkconfig to measure the uncapped behaviour.
@@ -411,12 +414,22 @@ void step_stall_strict() {
   const int64_t t0 = esp_timer_get_time();
   int64_t failed_ms = -1;
   int sent = 0;
+  // Bytes api_tx moved into lwIP for A2 (the only client with traffic in
+  // this step) and A2's lwIP queue heap, last seen before the reap.
+  uint32_t lwip_bytes = 0, q_heap = 0;
   for (int i = 0; i < 600 && failed_ms < 0; ++i) {
     if (api_server::send_to(id_a2, proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE,
                             &encode_fill, &kNotifyBytes)) {
       ++sent;
     } else {
       failed_ms = (esp_timer_get_time() - t0) / 1000;
+    }
+    const api_server::TxqStats si = api_server::txq_stats();
+    for (uint8_t k = 0; k < si.n_clients; ++k) {
+      if (si.clients[k].id == id_a2) {
+        lwip_bytes = si.bytes - s0.bytes;
+        q_heap = si.clients[k].last;
+      }
     }
     sample();
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -427,19 +440,32 @@ void step_stall_strict() {
   measure("stall_strict_heap_drop", drop);
   measure("stall_strict_frames_before_fail", sent);
   measure("stall_strict_failed_after_ms", static_cast<long>(failed_ms));
+  measure("stall_strict_lwip_bytes", static_cast<long>(lwip_bytes));
+  measure("stall_strict_lwip_heap", static_cast<long>(q_heap));
   const long bound = static_cast<long>(proxy::API_CLIENT_TXQ_CAP) + 6 * 1024;
   const bool capped = proxy::API_CLIENT_TXQ_CAP > 0;
+  // Small frames must be packed into lwIP's segments, not one heap pbuf
+  // each: under the cap lwIP holds at least 4 KiB of them (issue #2: 6
+  // one-notify segments of ~1.55 KiB filled the 8 KiB cap with ~750 B, so
+  // the ring alone, ~1.5 s of notifies, rode out a late ACK). Known-bad:
+  // the sender before TX_HOLD_SEGS and the MSS clamp (10a78d6), on the C3:
+  // 55 frames before the reap, 378 B of them in lwIP in 9316 B of heap.
+  const bool packed = !capped || proxy::API_CLIENT_TXQ_CAP < 8192 ||
+                      lwip_bytes >= 4096;
   // The frames queue in lwIP (up to the cap / TCP_SND_BUF) and then in the
   // ring; the first that does not fit reaps the client at once, well before
   // the 20 s stall deadline.
   result("stall_strict",
          c == 2 && id_a2 != 0 && failed_ms > 0 && failed_ms < 20000 &&
              s1.n_clients == 1 && s1.ring_reaps == s0.ring_reaps + 1 &&
-             (!capped || drop <= bound),
+             (!capped || drop <= bound) && packed,
          "client %lu: %d frames sent, send_to failed after %lld ms; clients "
-         "%u; heap drop %ld (bound %ld)",
+         "%u; heap drop %ld (bound %ld); lwIP took %lu B in %lu B of heap "
+         "(packed: >= 4096 B)",
          static_cast<unsigned long>(id_a2), sent,
-         static_cast<long long>(failed_ms), s1.n_clients, drop, bound);
+         static_cast<long long>(failed_ms), s1.n_clients, drop, bound,
+         static_cast<unsigned long>(lwip_bytes),
+         static_cast<unsigned long>(q_heap));
   g_drop_port.store(0);
   ::close(fd);
 }
@@ -914,11 +940,15 @@ void step_bulk_adverts() {
   wait_gone(id_w, 3000);
 }
 
-uint32_t ring_of(uint32_t id) {
+uint32_t ring_of(uint32_t id, bool *congested = nullptr) {
   const api_server::TxqStats s = api_server::txq_stats();
   for (uint8_t i = 0; i < s.n_clients; ++i) {
-    if (s.clients[i].id == id) return s.clients[i].ring;
+    if (s.clients[i].id == id) {
+      if (congested != nullptr) *congested = s.clients[i].congested;
+      return s.clients[i].ring;
+    }
   }
+  if (congested != nullptr) *congested = false;
   return 0;
 }
 
@@ -951,20 +981,22 @@ void step_bulk_gate() {
   xTaskCreate(&reader_w, "reader_w", 3072, nullptr, 5, nullptr);
   g_drop_port.store(local_port_net(g_fd_w));
   // Notifies until lwIP is full and the ring holds more than bulk_thr.
+  // api_tx's coalescing holds up to an MSS in the ring while segments are
+  // in flight, so the ring alone does not say lwIP is full: wait for the
+  // congested mark too.
   int notifies = 0;
   uint32_t ring = 0;
-  for (int i = 0; i < 1000 && ring <= bulk_thr; ++i) {
+  bool full = false;
+  for (int i = 0; i < 1000 && !(full && ring > bulk_thr); ++i) {
     if (api_server::send_to(id_w, proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE,
                             &encode_fill, &kNotifyBytes)) {
       ++notifies;
     }
     vTaskDelay(pdMS_TO_TICKS(10));
-    ring = ring_of(id_w);
-    // Past api_tx's 20 ms coalescing hold: what is left is held by lwIP
-    // being full, not by the hold.
-    if (ring > bulk_thr) {
+    ring = ring_of(id_w, &full);
+    if (full && ring > bulk_thr) {
       vTaskDelay(pdMS_TO_TICKS(100));
-      ring = ring_of(id_w);
+      ring = ring_of(id_w, &full);
     }
   }
   const bool req_sent = send_get_services(g_fd_w, kBulkAddress);
@@ -1034,17 +1066,30 @@ void step_coalesce() {
   };
   const Run runs[] = {{"burst", 50, 0}, {"paced_5ms", 50, 5}, {"paced_50ms", 20, 50}};
   bool ok = true;
+  char what_q[64];
   for (const Run &r : runs) {
     vTaskDelay(pdMS_TO_TICKS(500));
     const api_server::TxqStats s0 = api_server::txq_stats();
     const uint32_t b0 = g_b_notifies.load();
     const uint32_t seg0 = g_count_segs.load(), by0 = g_count_bytes.load();
+    // B's lwIP queue heap, sampled after each frame: what the late ACKs of
+    // loopback's delayed-ACK timer make a small-frame stream pin.
+    uint32_t q_max = 0;
+    auto sample_q = [&]() {
+      const api_server::TxqStats sq = api_server::txq_stats();
+      for (uint8_t k = 0; k < sq.n_clients; ++k) {
+        if (sq.clients[k].id == id_b) q_max = std::max(q_max, sq.clients[k].last);
+      }
+    };
     for (int i = 0; i < r.frames; ++i) {
       api_server::send_to(id_b, proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE,
                           &encode_fill, &kNotifyBytes);
       if (r.gap_ms > 0) vTaskDelay(pdMS_TO_TICKS(r.gap_ms));
+      sample_q();
     }
     vTaskDelay(pdMS_TO_TICKS(500));
+    std::snprintf(what_q, sizeof(what_q), "coalesce_%s_txq_heap_max", r.name);
+    measure(what_q, static_cast<long>(q_max));
     const api_server::TxqStats s1 = api_server::txq_stats();
     const uint32_t frames = s1.frames - s0.frames;
     const uint32_t sends = s1.sends - s0.sends;

@@ -59,6 +59,7 @@ struct TxqClient {
   uint32_t max;       // its high-water mark this connection
   uint32_t ring;      // bytes in the ring now
   uint32_t ring_max;  // ring high-water mark this connection
+  bool congested;     // api_tx cannot move its ring into lwIP right now
 };
 struct TxqStats {
   uint32_t cap;        // 0 = no cap

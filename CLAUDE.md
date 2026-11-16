@@ -605,9 +605,12 @@
   `unregister_client` marks the slot retired and waits for `api_tx`'s
   per-slot `io_busy`, so a reissued fd never gets the old client's bytes
   (QEMU `fd_reuse`; the ring is reset at reap, unregister and register, and
-  any one of the three alone passes it). Coalescing: with segments in
+  any one of the three alone passes it). Coalescing: with one segment in
   flight and < 1 MSS queued, `api_tx` holds data up to 20 ms
-  (`TX_COALESCE_MS`); lwIP's Nagle stays off.
+  (`TX_COALESCE_MS`); with `TX_HOLD_SEGS` (2) or more queued in lwIP it
+  holds until an ACK frees one or a full MSS has gathered, and then sends
+  whole segments only; lwIP's Nagle stays off. API sockets send with a
+  536 B MSS (`NBP_API_CLIENT_TX_MSS`). See "API send path on the C3" below.
 - **The disconnect log line says why** (`reason=peer closed | read error |
   send failed | TX ring full (reaped) | send stalled 20 s (reaped) | send
   failed (reaped) | closed by protocol`, plus peer IP). A protocol close
@@ -653,7 +656,9 @@
   with the threshold at 400 KiB returned 503 on all three). A handler
   registered past the 56 slots is registered unwrapped (logged).
 - **`NimBLEClient: unknown handle: N` is a dropped notification, not noise —
-  don't mute it.** The proxy forwards notifications via
+  don't mute it.** (It is rate-limited in the `/log` hook to one line per
+  5 s plus a count of the lines left out; `notify_unknown` counts every
+  one.) The proxy forwards notifications via
   `chr->setNotifyCallback` on NimBLEClient's own attribute cache
   (`bt_handlers.cpp`); the GAP listener in `ble_backend.cpp` only counts.
   NimBLE-cpp returns before any callback when the handle isn't in that
@@ -661,6 +666,52 @@
   during discovery). Open question: why is the handle missing (notifies
   arriving before discovery finishes, or HA skipping discovery with cached
   services)?
+
+## API send path on the C3 under notify load (2026-11-16, issue #2 / batmon-ha #391)
+
+- **Symptom (v0.2.5, reporter's C3, batmon + two JK BMS, ~15 notifies/s):**
+  `send queue full: 9320 B heap (6 segs, 751 B unacked or unsent), cap 8192`
+  about every second, then `TX ring full (reaped)` every 20-60 s, both BMS
+  links released; heap_min 656, 255 failed 1700 B allocations (WiFi
+  buffers), `send … no memory (… largest 1472)`.
+- **Cause:** `api_tx` sent each notify as soon as the 20 ms coalescing hold
+  ran out, so a notify stream became one TCP segment per notify (or burst),
+  and every segment is a full-MSS heap pbuf (`LWIP_NETIF_TX_SINGLE_PBUF`,
+  `tcp_out.c` `tcp_pbuf_prealloc`: alloc = max_length): ~1.55 KiB for 40-150
+  B. With ACKs ~250 ms late, 6 segments in flight hit the 8 KiB cap with
+  < 2 KB of payload, `api_tx` then moved nothing, and the 3136 B ring was the
+  only buffer left: ~1.5-2 s of notifies. Any ACK gap longer than that (an
+  RTO after a lost ACK; the WiFi RX buffers fail to allocate at this heap
+  level) reaped the client. The pbufs themselves pushed the heap to the edge
+  and could not be allocated once the largest block was < 1.5 KiB.
+- **Fix (api_server.cpp):** (1) with `TX_HOLD_SEGS` (2) or more segments
+  queued in lwIP, `api_tx` holds less than an MSS in the ring until an ACK
+  frees a segment, and sends only whole segments (a window or cap limit may
+  still cut a write short); (2) API sockets send with a 536 B MSS
+  (`NBP_API_CLIENT_TX_MSS`, `pcb->mss` lowered in the tcpip thread right
+  after `accept()`; lwIP has no TCP_MAXSEG), ~0.65 KiB per segment;
+  loopback peers (the WS bridge) keep lwIP's MSS, see below; (3) a write is
+  bounded by the pbuf slots left (lwIP fails the whole write past
+  `TCP_SND_QUEUELEN`) and by the cap; (4) advert batches are refused while
+  the client is `congested` (queue full or no memory) so the ring keeps its
+  room for notifies; (5) the "unknown handle" log is rate-limited (above).
+- **Evidence (QEMU C3 heap self-test, `stall_strict`, stalled peer, 63 B
+  notifies every 50 ms):** before (10a78d6) 55 frames / 2.8 s until the
+  reap, 378 B of them in lwIP in 9316 B of heap; after: 141 frames / 7.1 s,
+  5760 B in lwIP in 8528 B. The step now fails unless lwIP holds >= 4 KiB
+  under an 8 KiB cap; known-bad: the 10a78d6 sender fails it. With the MSS
+  clamp off (`NBP_API_CLIENT_TX_MSS=0`) the hold alone passes it too
+  (5760 B in 9312 B). Not tested on C3 hardware or against batmon/HA.
+- **lwIP receivers and a small MSS:** an lwIP socket queues at most
+  `TCP_RECVMBOX_SIZE` (6) segments and refuses the rest until its 250 ms
+  timer; 6 x 536 B is less than the 5760 B window, so a slow lwIP reader
+  stalls. In QEMU this reaped the `bulk_wait` client (GetServices burst to
+  a slow reader); with 16 mbox slots it passed (218 ms burst, 377 ms
+  before the change). Hence the loopback exemption in firmware, and
+  `sdkconfig.defaults.heaptest` (`TCP_RECVMBOX_SIZE=16`), which the root
+  CMakeLists adds to every `-DNBP_HEAP_SELFTEST=1` build: its clients are
+  loopback lwIP sockets standing in for Linux ones. It is read when the
+  build dir's sdkconfig is created, so use a fresh build dir.
 
 ## Crash capture: panic info and core dumps over HTTP (`components/crash_capture`)
 
@@ -837,7 +888,7 @@
   the ring); `api_tx` now packs queued frames into one segment. An over-cap
   episode is logged only after 1 s. `/stats.json`: `api_txq` ([id, last,
   max] per client), `api_txq_max`, `api_txq_drops` (advert batches dropped,
-  ring half full), `api_txq_reaps` (20 s stall), `api_ring_reaps` (a frame
+  ring half full or the send queue full), `api_tx_mss`, `api_txq_reaps` (20 s stall), `api_ring_reaps` (a frame
   that must not be lost did not fit), `api_ring` ([id, fill, high-water]),
   `api_ring_size`, `api_tx_frames`/`api_tx_sends` (frames per send),
   `api_enq_us_max` (longest send call that did not wait), `api_refused`.

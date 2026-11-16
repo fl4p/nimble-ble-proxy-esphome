@@ -142,6 +142,15 @@ inline constexpr size_t API_CLIENT_TXQ_CAP = CONFIG_NBP_API_CLIENT_TXQ_CAP;
 inline constexpr size_t API_CLIENT_TXQ_CAP = 0;
 #endif
 
+// Send MSS of API sockets, set after accept() (0 = lwIP's TCP_MSS). Every
+// segment is one MSS-sized heap pbuf, so this sets the heap a small frame
+// pins until it is ACKed.
+#ifdef CONFIG_NBP_API_CLIENT_TX_MSS
+inline constexpr size_t API_CLIENT_TX_MSS = CONFIG_NBP_API_CLIENT_TX_MSS;
+#else
+inline constexpr size_t API_CLIENT_TX_MSS = 0;
+#endif
+
 // Per-client TX ring (static). Producers copy whole frames in; one sender
 // task drains it into the socket.
 #ifdef CONFIG_NBP_API_CLIENT_TX_RING
