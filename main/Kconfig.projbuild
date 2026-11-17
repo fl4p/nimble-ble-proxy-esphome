@@ -187,7 +187,7 @@ config NBP_API_CLIENT_TX_MSS
 config NBP_API_CLIENT_TX_RING
     int "API: per-client TX ring (bytes, static)"
     depends on NBP_WIFI
-    range 3136 16384
+    range 3296 16384
     default 4096
     help
         Every frame for an API client is copied into this client's ring
@@ -195,13 +195,15 @@ config NBP_API_CLIENT_TX_RING
         moves it into the socket, many frames per send(). No producer, in
         particular the NimBLE host task, ever blocks on the network.
         Admission: advertisement batches may fill half the ring (dropped
-        beyond); frames from the client's own connection task (handshake,
-        GetServices, GATT replies) fill it up to two max-size notifies
-        (1076 B) short of full and otherwise wait for room, up to the 20 s
-        send deadline; any other frame (notifies, connection states) may
-        fill it and reaps the client if it does not fit. The minimum 3136
-        holds a max-size frame (2054 B) plus that reserve; half of it holds
-        a full advert batch (1430 B). Both are static_asserts.
+        beyond); GATT notifications fill it up to a 160 B control reserve
+        (dropped beyond, the client stays); frames from the client's own
+        connection task (handshake, GetServices, GATT replies) fill it up
+        to two max-size notifies (1076 B) below that and otherwise wait for
+        room, up to the 20 s send deadline; any other frame (connection
+        states, ConnectionsFree, GATT errors) may fill it and reaps the
+        client if it does not fit. The minimum 3296 holds a max-size frame
+        (2060 B) plus both reserves; half of it holds a full advert batch
+        (1430 B). Both are static_asserts.
 
 config NBP_WS_PROXY
     bool "WebSocket bridge: aioesphomeapi over ws://<host>/api (browser clients)"

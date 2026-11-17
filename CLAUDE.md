@@ -572,16 +572,21 @@
   without it).
 - **No socket I/O on the NimBLE host task (TX ring + `api_tx`).** Every
   frame to a client is encoded once into `g_tx_buf` (`g_tx_mutex`) and copied
-  whole into that client's static ring (`NBP_API_CLIENT_TX_RING`, 4096; 3136
+  whole into that client's static ring (`NBP_API_CLIENT_TX_RING`, 4096; 3296
   on the C3, the minimum). The `api_tx` task (prio 6, 2.5 KiB stack; QEMU
-  high-water ~1.7 KiB incl. the no-memory log) drains every ring with
+  high-water ~1.7 KiB incl. the no-memory log, 868 B free on the S3 and
+  1416 B on the C3 in QEMU on 2026-11-17) drains every ring with
   `MSG_DONTWAIT` `sendmsg()`, many frames per call, gated by the heap cap
-  below. Ring admission has three levels: advert batches up to half the
-  ring (dropped beyond); frames from the client's **own** connection task
-  (handshake, GetServices, GATT replies) up to `RING - RING_RESERVE` (two
-  max-size notifies, 1076 B) and otherwise they wait; everything else
-  (host-task notifies, connection states, other clients' broadcasts) up to
-  the whole ring, else the client is marked reaped (`TX ring full`). The
+  below. Ring admission has four levels: advert batches up to half the
+  ring (dropped beyond); GATT notifications up to `RING - RING_CTRL_RESERVE`
+  (160 B, four max-size control frames), **dropped beyond, client kept**
+  (`api_notify_drops`, see "API send path on the C3"); frames from the
+  client's **own** connection task (handshake, GetServices, GATT replies) up
+  to the notify limit minus `RING_RESERVE` (two max-size notifies, 1076 B)
+  and otherwise they wait; everything else (connection states,
+  ConnectionsFree, GATT errors and pairing replies from the host task, other
+  clients' broadcasts) up to the whole ring, else the client is marked
+  reaped (`TX ring full`). The
   reserve is what keeps a GetServices burst on link 2 from reaping the
   client over link 1's notifies (batmon #391); it holds two notifies, so it
   assumes `api_tx` gets data into lwIP at least every ~100 ms while notifies
@@ -590,8 +595,8 @@
   so every `EncodeFn` must be a pure function of its ctx. While it waits,
   the slot is marked `bulk_waiting`: advert batches for that client are
   refused (counted in `api_txq_drops`) and `api_tx` skips its coalescing
-  hold, so the ring actually empties. On the C3 a 2054 B frame fits only
-  an (almost) empty ring (bulk limit 3136 − 1076 = 2060 B); without the mark,
+  hold, so the ring actually empties. On the C3 a 2060 B frame fits only
+  an (almost) empty ring (bulk limit 3296 − 160 − 1076 = 2060 B); without the mark,
   adverts kept it non-empty and the waiter reaped a healthy client at the
   20 s deadline. A connection task never waits on another client's ring. Producers never `shutdown()`: they
   mark the slot and `api_tx` does the abortive shutdown and discards the
@@ -712,6 +717,44 @@
   CMakeLists adds to every `-DNBP_HEAP_SELFTEST=1` build: its clients are
   loopback lwIP sockets standing in for Linux ones. It is read when the
   build dir's sdkconfig is created, so use a fresh build dir.
+
+- **v0.2.6 still reaped (reporter's C3, 2026-11-17):** `send queue full:
+  7244 B heap (11 segs, 5760 B unacked or unsent), cap 8192, for 1000 ms;
+  1494 B wait in its ring`, ~1 s later `TX ring full (reaped); 3037 B
+  dropped`; `api_ring_reaps` 15, oom 5 (was 255), heap_min 3356 (was 656).
+  Packing worked; the limit hit is `TCP_SND_BUF` (5760 B in flight), not the
+  cap. The ring filled at ~1.5 KB/s (1494 B in the first 1000 ms, 1543 B in
+  the next 1010 ms), so it bridged ~2 s. Filling 5760 B of in-flight data
+  at that rate takes ~3-4 s with (almost) no cumulative ACK, so the ACK
+  clock was stopped for **≥ 5 s**, more than one RTO: lwIP's RTO on a LAN
+  sits at 3-4 slow ticks (1.5-2 s; `LWIP_TCP_RTO_TIME` 1500 seeds `sv` = 3
+  ticks and `m - (sv >> 2)` never lowers it with 0-tick RTT samples,
+  `tcp_in.c` RTT estimator; the timer fires on the 500 ms slow tick) and
+  doubles per retransmission (`tcp.c` `tcp_slowtmr`,
+  `tcp_backoff`), so ≥ 5 s means a lost retransmission too, or a multi-
+  second WiFi/coex outage. Not the peer application: the host kernel ACKs
+  5.7 KB whatever batmon does. Either way the proxy cannot shorten it.
+- **Fix (2026-11-17): drop notifications instead of reaping.** A
+  notification that does not fit under `RING - RING_CTRL_RESERVE` is
+  dropped (`api_notify_drops` in `/stats.json`, `fd=N ring at notify
+  limit: K notifications (B B) dropped, client kept`, once at the start and then at
+  most every 5 s per client); frames that must not be lost still reap when
+  the whole ring is full. The newest frame is dropped (tail drop): the
+  oldest is often half in lwIP and `api_tx` reads the ring outside the lock,
+  so evicting old frames needs an index and compaction for no gain; tail
+  drop keeps "a frame is queued whole or not at all", so the wire stays
+  framed. The `send queue full` log line also prints lwIP's `rto`,
+  retransmit count, `cwnd` and peer window, to tell an RTO backoff from a
+  closed window in the next field log. QEMU `notify_stall`: 2 s stall
+  under ~6 KB/s of notifies, S kept, 36 notifies dropped, connection state
+  and PingResponse delivered, stream framed and in order; known-bad (the
+  0.2.6 sender): S reaped, connection state refused, ping reply lost.
+- **Not done, deliberately:** a bigger C3 ring (2 s at 2 KB/s = 4 KiB would
+  cost 2 × 960 B of static RAM against heap_min 3356 B with 1700 B WiFi RX
+  allocations already failing, and still not cover a ≥ 5 s gap) and a lower
+  RTO floor (`LWIP_TCP_RTO_TIME` 1000 gives `sv` 2 ticks, first retransmit
+  after 0.5-1 s instead of 1-1.5 s; global to every TCP socket and needs a
+  hardware check; decide after a field log with the rto/retransmit fields).
 
 ## Crash capture: panic info and core dumps over HTTP (`components/crash_capture`)
 
@@ -930,7 +973,9 @@
   `bulk_waiting` mark on loopback, only slower), `bulk_gate` (deterministic:
   W stalled with a few notifies in its ring and the burst waiting; adverts
   broadcast then must leave W's ring unchanged and still reach B; fails with
-  the mark disabled on S3 and C3), coalescing,
+  the mark disabled on S3 and C3), `notify_stall` (2 s stall under notify
+  load: notifies dropped, client kept, control replies delivered; fails on
+  the 0.2.6 sender), coalescing,
   and `HEAP-MEASURE` numbers. Known-bad calibrations (2026-11-13):
   `RING_RESERVE = 0` fails `bulk_reserve` on S3 and C3 (`bulk_wait` is
   timing-dependent: with the reserve at 0 it failed in 3 of 4 runs and passed

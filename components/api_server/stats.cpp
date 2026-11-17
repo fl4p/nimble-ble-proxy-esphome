@@ -983,8 +983,8 @@ esp_err_t stats_get(httpd_req_t *req) {
   // psram_free/psram_min and the capability flags); the optional ap_rx/ap_tx
   // 64-bit byte counters (NAT builds) add ~60 more, the oom counters ~70, the notify
   // breakdown ~75, the BLE disconnect fields ~250, the WiFi disconnect
-  // fields ~170, chip ids ~90, the API transmit figures ~260 + ~70 per
-  // client, the modbus bridge ~150, the env sensors ~100, the switch ~35: ~1.95 KB with two
+  // fields ~170, chip ids ~90, the API transmit figures ~290 + ~70 per
+  // client, the modbus bridge ~150, the env sensors ~100, the switch ~35: ~1.98 KB with two
   // clients on a NAT build and long uptime. Static: httpd runs one handler at a time, and that much
   // is too much for its task stack.
   static char buf[2304];
@@ -1389,7 +1389,9 @@ size_t build_stats_json(char *buf, size_t bufsz) {
   // TX ring, ring high-water] (NBP_API_CLIENT_TX_RING). Reaps by reason:
   // api_txq_reaps = nothing sent for 20 s, api_ring_reaps = a frame that
   // must not be lost did not fit. api_txq_drops = advert batches dropped
-  // (ring half full, or the client's send queue full). api_tx_mss = send MSS
+  // (ring half full, or the client's send queue full); api_notify_drops =
+  // GATT notifications dropped (ring at its notify limit; the client is
+  // kept). api_tx_mss = send MSS
   // of API sockets (0 = lwIP's). api_tx_frames / api_tx_sends = frames per send() (the
   // coalescing); api_enq_us_max = longest send call that did not wait;
   // api_tx_stack_free = the api_tx task's stack high-water (bytes unused).
@@ -1399,14 +1401,16 @@ size_t build_stats_json(char *buf, size_t bufsz) {
         buf + n, cap - n,
         ",\"api_clients\":%u,\"api_max_clients\":%u,\"api_refused\":%lu,"
         "\"api_txq_cap\":%lu,\"api_txq_max\":%lu,\"api_txq_drops\":%lu,"
-        "\"api_txq_reaps\":%lu,\"api_txq_busy\":%s,"
+        "\"api_notify_drops\":%lu,\"api_txq_reaps\":%lu,\"api_txq_busy\":%s,"
         "\"api_ring_size\":%lu,\"api_ring_reaps\":%lu,\"api_tx_frames\":%lu,"
         "\"api_tx_sends\":%lu,\"api_enq_us_max\":%lu,\"api_tx_stack_free\":%lu,"
         "\"api_tx_mss\":%u,\"api_txq\":[",
         t.n_clients, proxy::MAX_API_CLIENTS,
         static_cast<unsigned long>(t.refused),
         static_cast<unsigned long>(t.cap), static_cast<unsigned long>(t.max_all),
-        static_cast<unsigned long>(t.drops), static_cast<unsigned long>(t.reaps),
+        static_cast<unsigned long>(t.drops),
+        static_cast<unsigned long>(t.notify_drops),
+        static_cast<unsigned long>(t.reaps),
         t.busy ? "true" : "false", static_cast<unsigned long>(t.ring_size),
         static_cast<unsigned long>(t.ring_reaps),
         static_cast<unsigned long>(t.frames), static_cast<unsigned long>(t.sends),

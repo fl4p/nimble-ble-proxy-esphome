@@ -64,15 +64,20 @@ constexpr UBaseType_t SENDER_PRIO = 6;
 // Ring full (the client is not draining):
 // - advert batches (lossy) are only admitted while the ring is under half
 //   full, so they never crowd out frames that must not be lost;
+// - GATT notifications are admitted up to RING - RING_CTRL_RESERVE and
+//   dropped beyond (counted, logged rate-limited); the client stays;
 // - frames from the client's own connection task (handshake replies,
-//   GetServices, GATT replies) are admitted up to RING - RING_RESERVE and
-//   otherwise wait for room (bounded by the send deadline), re-encoding
-//   from the caller's ctx afterwards;
-// - anything else that must not be lost (NimBLE host task, timers, another
-//   client's task) may use the whole ring; if it does not fit, the client
-//   is marked reaped. A producer never shuts a socket down itself: it marks the slot
-//   and wakes api_tx, which does the abortive shutdown.
-// A frame is queued whole or not at all; a reap discards the ring.
+//   GetServices, GATT replies) are admitted up to the notify limit minus
+//   RING_RESERVE and otherwise wait for room (bounded by the send deadline),
+//   re-encoding from the caller's ctx afterwards;
+// - anything else that must not be lost (connection states, ConnectionsFree,
+//   pairing and GATT error replies from the NimBLE host task, timers,
+//   another client's task) may use the whole ring; if it does not fit, the
+//   client is marked reaped. A producer never shuts a socket down itself: it
+//   marks the slot and wakes api_tx, which does the abortive shutdown.
+// A frame is queued whole or not at all, and nothing leaves the ring except
+// through sendmsg() at its tail, so a dropped frame never leaves a partial
+// one on the wire; a reap discards the ring.
 //
 // Stall: a ring that holds data while its tail has not moved for
 // CLIENT_SEND_DEADLINE_MS (lwIP full, over the heap cap, or no memory) gets
@@ -118,6 +123,8 @@ constexpr int PROTOCOL_CLOSE_FLUSH_MS = 2000;
 constexpr int NOMEM_LOG_MS = 5000;
 // An over-cap episode is logged once it has lasted this long.
 constexpr int TXQ_LOG_AFTER_MS = 1000;
+// Dropped notifications: logged per client at most this often.
+constexpr int NOTIFY_DROP_LOG_MS = 5000;
 
 // TCP keepalive so a half-open client (host crashed or lost power, no
 // FIN/RST) is detected even when we send it nothing: ~30 s idle + 3 × 10 s
@@ -136,12 +143,27 @@ constexpr size_t MAX_NOTIFY_FRAME =
     frame_codec::MAX_HEADER_LEN + proxyapi_BluetoothGATTNotifyDataResponse_size;
 constexpr size_t MAX_ADV_FRAME = frame_codec::MAX_HEADER_LEN +
                                  proxyapi_BluetoothLERawAdvertisementsResponse_size;
-// Ring room that frames from a waiting (bulk) producer leave free: two
-// max-size notifies (see fits()).
+// Largest frame that must not be lost and comes from outside the client's
+// own connection task (so it cannot wait): connection state, ConnectionsFree,
+// GATT error, pairing / unpairing / clear-cache replies.
+constexpr size_t MAX_CTRL_FRAME =
+    frame_codec::MAX_HEADER_LEN +
+    std::max({proxyapi_BluetoothConnectionsFreeResponse_size,
+              proxyapi_BluetoothDeviceConnectionResponse_size,
+              proxyapi_BluetoothGATTErrorResponse_size,
+              proxyapi_BluetoothDevicePairingResponse_size,
+              proxyapi_BluetoothDeviceUnpairingResponse_size,
+              proxyapi_BluetoothDeviceClearCacheResponse_size});
+// Ring room notifications leave free for those frames (see fits()): four,
+// one connection state plus one ConnectionsFree for each of two links that
+// change state while the client is stalled. 160 B.
+constexpr size_t RING_CTRL_RESERVE = 4 * MAX_CTRL_FRAME;
+// Ring room that frames from a waiting (bulk) producer leave free below the
+// notify limit: two max-size notifies (see fits()).
 constexpr size_t RING_RESERVE = 2 * MAX_NOTIFY_FRAME;
-static_assert(RING >= MAX_FRAME + RING_RESERVE,
+static_assert(RING >= MAX_FRAME + RING_RESERVE + RING_CTRL_RESERVE,
               "NBP_API_CLIENT_TX_RING must hold a max-size frame plus two "
-              "max-size notifies");
+              "max-size notifies plus the control reserve");
 static_assert(RING / 2 >= MAX_ADV_FRAME,
               "NBP_API_CLIENT_TX_RING / 2 must hold a full advert batch");
 
@@ -185,6 +207,10 @@ struct ClientEntry {
   // Advert batches are refused meanwhile: they would only take ring room
   // the notifies need until the queue drains.
   bool congested = false;
+  // Notifications dropped for this connection (ring at the notify limit)
+  // and their bytes. api_tx logs them rate-limited.
+  uint32_t notify_drops = 0;
+  uint32_t notify_drop_bytes = 0;
   uint32_t peer_ip = 0;  // IPv4, network order, from accept(); for /links
 };
 std::array<ClientEntry, proxy::MAX_API_CLIENTS> g_clients;
@@ -219,6 +245,10 @@ struct TxqState {
   bool nomem_logged = false;
   uint32_t last = 0;  // heap the lwIP queue held at the last look
   uint32_t max = 0;   // high-water mark for this connection
+  // Notify drops already logged, and when (0 = never).
+  uint32_t drops_logged = 0;
+  uint32_t drop_bytes_logged = 0;
+  TickType_t drop_log_at = 0;
 };
 std::array<TxqState, proxy::MAX_API_CLIENTS> g_txq;
 static_assert(proxy::MAX_API_CLIENTS <= sizeof(TxqStats::clients) /
@@ -227,6 +257,7 @@ static_assert(proxy::MAX_API_CLIENTS <= sizeof(TxqStats::clients) /
 // Since boot, all clients.
 uint32_t g_txq_max_all = 0;
 std::atomic<uint32_t> g_ring_drops{0};   // lossy frames: ring half full
+std::atomic<uint32_t> g_notify_drops{0}; // notifications: ring at the notify limit
 std::atomic<uint32_t> g_ring_reaps{0};   // a frame that must not be lost did not fit
 std::atomic<uint32_t> g_txq_reaps{0};    // ring stalled for the deadline
 std::atomic<uint32_t> g_tx_frames{0};    // frames queued
@@ -308,6 +339,12 @@ struct TxqCall {
   uint16_t segs;  // pcb->snd_queuelen (pbufs)
   uint16_t bytes; // TCP_SND_BUF - snd_buf (payload bytes)
   uint16_t mss;   // pcb->mss: payload of one segment
+  // Retransmission state, for the "send queue full" log: whether a stall is
+  // lwIP waiting out an RTO (nrtx > 0, rto doubled) or a closed window.
+  uint32_t rto_ms;   // current retransmission timeout
+  uint8_t nrtx;      // retransmissions of the oldest unacked segment
+  uint32_t cwnd;     // congestion window
+  uint32_t snd_wnd;  // peer's receive window
 };
 
 uint32_t seg_list_heap(const tcp_seg *seg) {
@@ -338,6 +375,10 @@ err_t txq_query_fn(tcpip_api_call_data *c) {
   q->segs = pcb->snd_queuelen;
   q->bytes = static_cast<uint16_t>(TCP_SND_BUF - pcb->snd_buf);
   q->mss = pcb->mss;
+  q->rto_ms = static_cast<uint32_t>(pcb->rto) * TCP_SLOW_INTERVAL;
+  q->nrtx = pcb->nrtx;
+  q->cwnd = pcb->cwnd;
+  q->snd_wnd = pcb->snd_wnd;
   q->ok = true;
   return ERR_OK;
 }
@@ -425,6 +466,14 @@ bool is_lossy(uint16_t msg_type) {
   return msg_type == proxyapi::MSG_BLUETOOTH_LE_RAW_ADVERTISEMENTS_RESPONSE;
 }
 
+// GATT notifications may be dropped when the ring is at the notify limit:
+// a BMS client re-reads the next frame (they stream or are polled), while a
+// reap costs the client every BLE link it owns. Everything else answers a
+// request or reports a state change and must arrive.
+bool is_notify(uint16_t msg_type) {
+  return msg_type == proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE;
+}
+
 void raise_max(std::atomic<uint32_t> &a, uint32_t v) {
   uint32_t cur = a.load(std::memory_order_relaxed);
   while (v > cur && !a.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {
@@ -453,26 +502,37 @@ void reap_full(const Target &t) {
   g_ring_reaps.fetch_add(1, std::memory_order_relaxed);
 }
 
-// Ring admission. Three levels, so that the frames that must never wait
-// (notifies, connection states from the NimBLE host task) always find room
-// while the client drains at all:
+// Ring admission. Four levels, so that the frames that must never wait
+// (connection states from the NimBLE host task) always find room while the
+// client drains at all, and a stall costs notifications, not the client:
 // - Lossy (advert batches): up to half the ring, and none while api_tx
 //   cannot move the ring into lwIP (`congested`).
+// - Notify (GATT notifications; never wait, dropped on no room): up to
+//   RING - CTRL_RESERVE. Dropping the frame that does not fit (the newest)
+//   rather than the oldest keeps the ring a plain byte stream: the oldest
+//   frame is often half in lwIP already (api_tx sends whole segments, not
+//   whole frames) and api_tx reads the ring outside the lock, so removing
+//   queued frames would need a frame index and compaction against a live
+//   reader for no gain: the same number of notifies is lost either way, and
+//   a BMS repeats its full state within a second (issue #2 / batmon #391:
+//   an ACK gap of > 5 s on the C3 reaped batmon and both JK links).
 // - Bulk (the client's own connection task: handshake replies, GetServices,
-//   GATT replies; these may wait): up to RING - RESERVE, or anything into
-//   an empty ring. RESERVE holds two max-size notifies, which is what the
-//   host task may queue between two api_tx passes while a bulk producer
-//   keeps the rest topped up (issue #2 / batmon #391: GetServices of link 2
+//   GATT replies; these may wait): up to the notify limit - RESERVE, or
+//   anything into an empty ring. RESERVE holds two max-size notifies, which
+//   is what the host task may queue between two api_tx passes while a bulk
+//   producer keeps the rest topped up (batmon #391: GetServices of link 2
 //   while link 1 notifies).
 // - Strict (everyone else; never waits, reaps on no room): up to RING.
-enum class Cls { Lossy, Bulk, Strict };
+enum class Cls { Lossy, Notify, Bulk, Strict };
 
 bool fits(size_t used, size_t n, Cls cls) {
   switch (cls) {
     case Cls::Lossy:
       return used + n <= RING / 2;
+    case Cls::Notify:
+      return used + n <= RING - RING_CTRL_RESERVE;
     case Cls::Bulk:
-      return used == 0 || used + n <= RING - RING_RESERVE;
+      return used == 0 || used + n <= RING - RING_CTRL_RESERVE - RING_RESERVE;
     case Cls::Strict:
     default:
       return used + n <= RING;
@@ -482,9 +542,9 @@ bool fits(size_t used, size_t n, Cls cls) {
 enum class Put { Ok, Full, Gone };
 
 // Copy a whole frame into the ring of client (slot, id), or nothing.
-// `me`: the calling task; a frame from the client's own connection task is
-// Bulk. *cls gets the class used.
-Put ring_put(int slot, uint32_t id, const uint8_t *p, size_t n, bool lossy,
+// `kind`: Lossy or Notify by message type, else Strict; a Strict frame from
+// the client's own connection task is Bulk. *cls gets the class used.
+Put ring_put(int slot, uint32_t id, const uint8_t *p, size_t n, Cls kind,
              TaskHandle_t me, Cls *cls) {
   xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
   ClientEntry &c = g_clients[slot];
@@ -492,10 +552,15 @@ Put ring_put(int slot, uint32_t id, const uint8_t *p, size_t n, bool lossy,
     xSemaphoreGive(g_clients_mutex);
     return Put::Gone;
   }
-  *cls = lossy ? Cls::Lossy : (c.task == me ? Cls::Bulk : Cls::Strict);
+  *cls = kind == Cls::Strict && c.task == me ? Cls::Bulk : kind;
   Ring &r = g_rings[slot];
   const size_t used = r.used.load(std::memory_order_acquire);
-  if ((lossy && (c.bulk_waiting || c.congested)) || !fits(used, n, *cls)) {
+  if ((kind == Cls::Lossy && (c.bulk_waiting || c.congested)) ||
+      !fits(used, n, *cls)) {
+    if (*cls == Cls::Notify) {
+      ++c.notify_drops;
+      c.notify_drop_bytes += static_cast<uint32_t>(n);
+    }
     xSemaphoreGive(g_clients_mutex);
     return Put::Full;
   }
@@ -570,18 +635,24 @@ int deliver(const Target *t, int k, const Encoder &enc, bool *waited) {
     const size_t start = frame_codec::prepend_header(g_tx_buf, type, plen);
     const uint8_t *frame = g_tx_buf + start;
     const size_t n = (frame_codec::MAX_HEADER_LEN - start) + plen;
-    const bool lossy = is_lossy(type);
+    const Cls kind = is_lossy(type)    ? Cls::Lossy
+                     : is_notify(type) ? Cls::Notify
+                                       : Cls::Strict;
     Target wait_for{-1, 0};
     bool kick = false;
     for (int i = 0; i < np; ++i) {
       Cls cls = Cls::Strict;
-      const Put p = ring_put(pend[i].slot, pend[i].id, frame, n, lossy, me, &cls);
+      const Put p = ring_put(pend[i].slot, pend[i].id, frame, n, kind, me, &cls);
       if (p == Put::Ok) {
         ++ok;
         kick = true;
       } else if (p == Put::Full) {
         if (cls == Cls::Lossy) {
           g_ring_drops.fetch_add(1, std::memory_order_relaxed);
+        } else if (cls == Cls::Notify) {
+          // Dropped (counted in ring_put); api_tx logs it.
+          g_notify_drops.fetch_add(1, std::memory_order_relaxed);
+          kick = true;
         } else if (cls == Cls::Bulk) {
           wait_for = pend[i];  // own slot: at most one
         } else {
@@ -656,6 +727,8 @@ TickType_t drain_slot(int i) {
   const char *reap = c.reap_why;
   const bool bulk_waiting = c.bulk_waiting;
   bool congested = c.congested;
+  const uint32_t ndrops = c.notify_drops;
+  const uint32_t ndrop_bytes = c.notify_drop_bytes;
   c.io_busy = true;
   xSemaphoreGive(g_clients_mutex);
 
@@ -745,10 +818,14 @@ TickType_t drain_slot(int i) {
           st.logged = true;
           ESP_LOGW(TAG, "fd=%d send queue full: %lu B heap (%u segs, %u B "
                    "unacked or unsent), cap %u, for %d ms; %u B wait in its "
-                   "ring",
+                   "ring; rto %lu ms, %u retransmits, cwnd %lu, peer window "
+                   "%lu",
                    fd, static_cast<unsigned long>(q.heap), q.segs, q.bytes,
                    static_cast<unsigned>(proxy::API_CLIENT_TXQ_CAP),
-                   TXQ_LOG_AFTER_MS, static_cast<unsigned>(avail));
+                   TXQ_LOG_AFTER_MS, static_cast<unsigned>(avail),
+                   static_cast<unsigned long>(q.rto_ms), q.nrtx,
+                   static_cast<unsigned long>(q.cwnd),
+                   static_cast<unsigned long>(q.snd_wnd));
         }
       } else {
         if (st.logged) {
@@ -837,6 +914,19 @@ TickType_t drain_slot(int i) {
       }
     }
     if (queried) congested = full || nomem;
+  }
+  // Dropped notifications: the first of an episode at once, then at most
+  // every NOTIFY_DROP_LOG_MS, each line with what was dropped since the last.
+  if (ndrops != st.drops_logged &&
+      (st.drop_log_at == 0 || now - st.drop_log_at >= pdMS_TO_TICKS(NOTIFY_DROP_LOG_MS))) {
+    ESP_LOGW(TAG, "fd=%d ring at notify limit: %lu notifications (%lu B) "
+             "dropped, client kept; %lu this connection",
+             fd, static_cast<unsigned long>(ndrops - st.drops_logged),
+             static_cast<unsigned long>(ndrop_bytes - st.drop_bytes_logged),
+             static_cast<unsigned long>(ndrops));
+    st.drops_logged = ndrops;
+    st.drop_bytes_logged = ndrop_bytes;
+    st.drop_log_at = now != 0 ? now : 1;
   }
   xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
   c.congested = congested;
@@ -1276,6 +1366,8 @@ TxqStats txq_stats() {
   out.cap = static_cast<uint32_t>(proxy::API_CLIENT_TXQ_CAP);
   out.ring_size = static_cast<uint32_t>(RING);
   out.drops = g_ring_drops.load(std::memory_order_relaxed);
+  out.notify_drops = g_notify_drops.load(std::memory_order_relaxed);
+  out.ctrl_reserve = static_cast<uint32_t>(RING_CTRL_RESERVE);
   out.ring_reaps = g_ring_reaps.load(std::memory_order_relaxed);
   out.reaps = g_txq_reaps.load(std::memory_order_relaxed);
   out.refused = g_refused.load(std::memory_order_relaxed);
@@ -1299,6 +1391,7 @@ TxqStats txq_stats() {
     c.ring = static_cast<uint32_t>(g_rings[i].used.load(std::memory_order_relaxed));
     c.ring_max = static_cast<uint32_t>(g_rings[i].hwm);
     c.congested = g_clients[i].congested;
+    c.notify_drops = g_clients[i].notify_drops;
   }
   xSemaphoreGive(g_clients_mutex);
   return out;

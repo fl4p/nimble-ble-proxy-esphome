@@ -10,7 +10,8 @@
 //                 on a stalled WiFi link) while advert batches go to all and
 //                 notifications to client B: B keeps receiving, A's queue
 //                 stays at the cap, A is reaped, the heap stays bounded.
-//   stall_strict  the same with non-lossy frames to the stalled client: they
+//   stall_strict  the same with frames that must not be lost (connection
+//                 states, kStrictType) to the stalled client: they
 //                 queue in lwIP and then its TX ring until it is full, then
 //                 the client is reaped (the producer never waits). Under an
 //                 8 KiB cap lwIP must take >= 4 KiB of the small frames
@@ -44,6 +45,14 @@
 //                 half the ring) and the burst waits. Advert batches
 //                 broadcast now must be refused for W (ring unchanged) and
 //                 still reach B; after the stall ends the burst completes.
+//   notify_stall  W stalls for 2 s (input hook) under ~6 KB/s of
+//                 notifications from host priority, so lwIP and then the
+//                 ring fill and lwIP's RTO stretches the gap: notifications
+//                 that do not fit are dropped and counted, W stays, a
+//                 connection state sent mid-stall and the PingResponse to a
+//                 ping sent mid-stall both arrive, the stream stays framed
+//                 and in order, and every notify is delivered or counted as
+//                 dropped (batmon #391: v0.2.6 reaped the client instead).
 //   coalesce      frames per send() / per TCP segment and the lwIP queue's
 //                 heap high-water for a burst and a paced stream of
 //                 notify-sized frames.
@@ -141,7 +150,7 @@ int g_fail = 0;
 void result(const char *name, bool ok, const char *fmt = "", ...)
     __attribute__((format(printf, 3, 4)));
 void result(const char *name, bool ok, const char *fmt, ...) {
-  char detail[200];
+  static char detail[360];  // static: main's stack is small
   va_list ap;
   va_start(ap, fmt);
   std::vsnprintf(detail, sizeof(detail), fmt, ap);
@@ -235,6 +244,10 @@ size_t encode_fill(void *ctx, uint8_t *buf, size_t cap) {
 
 size_t kAdvBytes = 600;    // a typical 8-10 advert batch
 size_t kNotifyBytes = 60;  // a BMS notification frame
+// A frame that must not be lost, sent from outside the client's own task
+// (as the NimBLE host task sends connection states): reaps on a full ring.
+// Notifications are dropped instead (notify_stall). Payload arbitrary.
+constexpr uint16_t kStrictType = proxyapi::MSG_BLUETOOTH_DEVICE_CONNECTION_RESPONSE;
 
 // Heap low-water tracking across a phase (sampled, plus the send calls).
 size_t g_phase_min = SIZE_MAX;
@@ -418,8 +431,7 @@ void step_stall_strict() {
   // this step) and A2's lwIP queue heap, last seen before the reap.
   uint32_t lwip_bytes = 0, q_heap = 0;
   for (int i = 0; i < 600 && failed_ms < 0; ++i) {
-    if (api_server::send_to(id_a2, proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE,
-                            &encode_fill, &kNotifyBytes)) {
+    if (api_server::send_to(id_a2, kStrictType, &encode_fill, &kNotifyBytes)) {
       ++sent;
     } else {
       failed_ms = (esp_timer_get_time() - t0) / 1000;
@@ -518,8 +530,7 @@ void step_stall_isolation() {
   for (int i = 0; i < 2000; ++i) {
     const int64_t ts = esp_timer_get_time();
     const bool a_ok = failed_ms < 0 &&
-        api_server::send_to(id_a3, proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE,
-                            &encode_fill, &kNotifyBytes);
+        api_server::send_to(id_a3, kStrictType, &encode_fill, &kNotifyBytes);
     const int64_t ta = esp_timer_get_time() - ts;
     const int64_t tb0 = esp_timer_get_time();
     if (api_server::send_to(id_b, proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE,
@@ -575,7 +586,7 @@ bool send_hello(int fd) {
 
 // Phase (known-bad check for the ring reset): X stalls with a full ring and
 // is reaped; Y connects, gets X's fd, and must see its HelloResponse first,
-// not X's leftover notifies.
+// not X's leftover frames.
 void step_fd_reuse() {
   const uint32_t id_b = 2;
   vTaskDelay(pdMS_TO_TICKS(500));
@@ -587,8 +598,7 @@ void step_fd_reuse() {
   g_drop_port.store(local_port_net(fx));
   int queued = 0;
   for (int i = 0; i < 2000; ++i) {
-    if (!api_server::send_to(id_x, proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE,
-                             &encode_fill, &kNotifyBytes)) {
+    if (!api_server::send_to(id_x, kStrictType, &encode_fill, &kNotifyBytes)) {
       break;
     }
     ++queued;
@@ -840,7 +850,8 @@ void step_bulk_reserve() {
   bool w_there = false;
   for (uint8_t i = 0; i < s1.n_clients; ++i) w_there = w_there || s1.clients[i].id == id_w;
   const uint32_t bulk_limit = static_cast<uint32_t>(
-      proxy::API_CLIENT_TX_RING - 2 * (frame_codec::MAX_HEADER_LEN + kMaxNotifyBytes));
+      proxy::API_CLIENT_TX_RING - s1.ctrl_reserve -
+      2 * (frame_codec::MAX_HEADER_LEN + kMaxNotifyBytes));
   measure("bulk_reserve_ring_while_waiting", static_cast<long>(ring));
   result("bulk_reserve",
          c == 2 && req_sent && waiting && ring > 0 && ring <= bulk_limit && n1 && n2 &&
@@ -965,10 +976,11 @@ void step_bulk_gate() {
   constexpr int kFrames = 4;
   g_bulk_n.store(kFrames);
   g_bulk_bytes = proxy::MAX_MESSAGE_SIZE;
-  // A bulk frame (2054 B) waits while the ring holds more than this; an
+  // A bulk frame (2060 B) waits while the ring holds more than this; an
   // advert batch (606 B) fits while it holds at most half the ring minus it.
   const uint32_t bulk_thr = static_cast<uint32_t>(
-      proxy::API_CLIENT_TX_RING - 2 * (frame_codec::MAX_HEADER_LEN + kMaxNotifyBytes) -
+      proxy::API_CLIENT_TX_RING - api_server::txq_stats().ctrl_reserve -
+      2 * (frame_codec::MAX_HEADER_LEN + kMaxNotifyBytes) -
       (frame_codec::MAX_HEADER_LEN + proxy::MAX_MESSAGE_SIZE));
   const uint32_t adv_frame = static_cast<uint32_t>(frame_codec::MAX_HEADER_LEN + kAdvBytes);
   const uint32_t adv_thr = static_cast<uint32_t>(proxy::API_CLIENT_TX_RING / 2) - adv_frame;
@@ -1050,6 +1062,224 @@ void step_bulk_gate() {
   ::close(g_fd_w);
   g_fd_w = -1;
   wait_gone(id_w, 3000);
+}
+
+// ---- notify_stall ----
+// Client S's reader: parses every frame, checks the framing and that the
+// sequence numbers in notify payloads only go up, and counts the frames a
+// stall must not lose.
+int g_fd_s = -1;
+std::atomic<bool> g_s_run{false};
+std::atomic<uint32_t> g_s_notifies{0}, g_s_ctrl{0}, g_s_pong{0}, g_s_bad{0},
+    g_s_order_bad{0}, g_s_other{0};
+
+void reader_s(void *) {
+  static uint8_t buf[4096];
+  size_t have = 0;
+  uint32_t last_seq = 0;
+  bool any = false;
+  while (g_s_run.load()) {
+    const ssize_t r = ::recv(g_fd_s, buf + have, sizeof(buf) - have, 0);
+    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+    if (r <= 0) break;
+    have += static_cast<size_t>(r);
+    size_t off = 0;
+    while (off < have) {
+      size_t pos = off;
+      uint32_t len = 0, type = 0;
+      if (buf[pos++] != 0) {
+        g_s_bad.fetch_add(1);
+        have = off = 0;
+        break;
+      }
+      if (!parse_varint(buf, have, &pos, &len) || !parse_varint(buf, have, &pos, &type) ||
+          pos + len > have) {
+        break;  // incomplete
+      }
+      if (type == proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE) {
+        uint32_t seq = 0;
+        if (len >= sizeof(seq)) std::memcpy(&seq, buf + pos, sizeof(seq));
+        if (len < sizeof(seq) || (any && seq <= last_seq)) g_s_order_bad.fetch_add(1);
+        last_seq = seq;
+        any = true;
+        g_s_notifies.fetch_add(1);
+      } else if (type == kStrictType) {
+        g_s_ctrl.fetch_add(1);
+      } else if (type == proxyapi::MSG_PING_RESPONSE) {
+        g_s_pong.fetch_add(1);
+      } else {
+        g_s_other.fetch_add(1);
+      }
+      off = pos + len;
+    }
+    std::memmove(buf, buf + off, have - off);
+    have -= off;
+  }
+  vTaskDelete(nullptr);
+}
+
+// A notify payload of `n` bytes that starts with its sequence number.
+struct SeqNotify {
+  uint32_t seq;
+  size_t n;
+};
+size_t encode_seq(void *ctx, uint8_t *buf, size_t cap) {
+  const auto *q = static_cast<const SeqNotify *>(ctx);
+  const size_t n = std::min(q->n, cap);
+  std::memset(buf, 0x5A, n);
+  std::memcpy(buf, &q->seq, std::min(n, sizeof(q->seq)));
+  return n;
+}
+
+bool send_ping(int fd) {
+  uint8_t buf[frame_codec::MAX_HEADER_LEN];
+  const size_t start = frame_codec::prepend_header(buf, proxyapi::MSG_PING_REQUEST, 0);
+  const size_t total = frame_codec::MAX_HEADER_LEN - start;
+  return ::send(fd, buf + start, total, 0) == static_cast<ssize_t>(total);
+}
+
+// Phase: S stalls for 2 s under notify load. lwIP's queue and then S's ring
+// fill; the stall itself and lwIP's retransmission backoff after it (the
+// retransmit inside the stall is eaten too) keep S silent for several
+// seconds, as an ACK gap on the reporter's C3 did (batmon #391). The notifies
+// that do not fit must be dropped, S must stay, and the frames that must
+// not be lost must arrive: a connection state from host priority (sent once
+// the ring is at its notify limit) and the PingResponse to a ping S sends
+// in the stall (from S's own connection task, which waits for room).
+void step_notify_stall() {
+  const uint32_t id_b = 2;
+  vTaskDelay(pdMS_TO_TICKS(500));
+  g_s_notifies.store(0);
+  g_s_ctrl.store(0);
+  g_s_pong.store(0);
+  g_s_bad.store(0);
+  g_s_order_bad.store(0);
+  g_s_other.store(0);
+  g_fd_s = connect_loopback();
+  const uint8_t c = wait_clients(2, 2000);
+  vTaskDelay(pdMS_TO_TICKS(200));
+  const uint32_t id_s = other_id(id_b);
+  set_rcv_timeout(g_fd_s, 100);
+  g_s_run.store(true);
+  xTaskCreate(&reader_s, "reader_s", 3072, nullptr, 5, nullptr);
+  const api_server::TxqStats s0 = api_server::txq_stats();
+  // 120 B notifies (a JK BMS at MTU 131 sends 128 B) every 20 ms, ~6.3 KB/s
+  // with framing: fills lwIP (TCP_SND_BUF 5760) and the ring within the
+  // 2 s stall. At host priority, as from the NimBLE host task.
+  constexpr int kPeriodMs = 20;
+  constexpr int kStallFromMs = 1000, kStallMs = 2000, kRunMs = 9000;
+  SeqNotify nq{0, 120};
+  int sent = 0, dropped = 0;
+  bool stalled = false, unstalled = false, ping_sent = false, ctrl_tried = false;
+  bool ctrl_ok = false;
+  uint32_t ring_at_ctrl = 0, ring_max = 0, s_drops_at_ctrl = 0;
+  int64_t first_drop_ms = -1, max_us = 0;
+  const UBaseType_t prio0 = uxTaskPriorityGet(nullptr);
+  vTaskPrioritySet(nullptr, 21);
+  const int64_t t0 = esp_timer_get_time();
+  while (true) {
+    const int64_t ms = (esp_timer_get_time() - t0) / 1000;
+    if (ms >= kRunMs) break;
+    if (!stalled && ms >= kStallFromMs) {
+      stalled = true;
+      g_drop_port.store(local_port_net(g_fd_s));
+    }
+    if (stalled && !unstalled && ms >= kStallFromMs + kStallMs) {
+      unstalled = true;
+      g_drop_port.store(0);
+    }
+    if (stalled && !ping_sent && ms >= kStallFromMs + 500) ping_sent = send_ping(g_fd_s);
+    ++nq.seq;
+    const int64_t ts = esp_timer_get_time();
+    if (api_server::send_to(id_s, proxyapi::MSG_BLUETOOTH_GATT_NOTIFY_DATA_RESPONSE,
+                            &encode_seq, &nq)) {
+      ++sent;
+    } else {
+      ++dropped;
+      if (first_drop_ms < 0) first_drop_ms = ms;
+    }
+    max_us = std::max<int64_t>(max_us, esp_timer_get_time() - ts);
+    uint32_t s_drops = 0;
+    uint32_t ring = 0;
+    const api_server::TxqStats sx = api_server::txq_stats();
+    for (uint8_t i = 0; i < sx.n_clients; ++i) {
+      if (sx.clients[i].id == id_s) {
+        ring = sx.clients[i].ring;
+        s_drops = sx.clients[i].notify_drops;
+      }
+    }
+    ring_max = std::max(ring_max, ring);
+    // The connection state goes in once notifies are being dropped, i.e.
+    // the ring is at its notify limit.
+    if (!ctrl_tried && dropped > 0) {
+      ctrl_tried = true;
+      ring_at_ctrl = ring;
+      s_drops_at_ctrl = s_drops;
+      ctrl_ok = api_server::send_to(id_s, kStrictType, &encode_fill, &kNotifyBytes);
+    }
+    vTaskDelay(pdMS_TO_TICKS(kPeriodMs));
+  }
+  vTaskPrioritySet(nullptr, prio0);
+  g_drop_port.store(0);
+  for (int t = 0; t < 10000; t += 50) {
+    if (g_s_notifies.load() >= static_cast<uint32_t>(sent) && g_s_pong.load() >= 1 &&
+        g_s_ctrl.load() >= (ctrl_ok ? 1u : 0u)) {
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+  vTaskDelay(pdMS_TO_TICKS(300));
+  const api_server::TxqStats s1 = api_server::txq_stats();
+  bool s_there = false;
+  uint32_t s_drops = 0;
+  for (uint8_t i = 0; i < s1.n_clients; ++i) {
+    if (s1.clients[i].id == id_s) {
+      s_there = true;
+      s_drops = s1.clients[i].notify_drops;
+    }
+  }
+  // Notifies stop at the notify limit (the frame that would cross it is
+  // dropped); the connection state goes into the reserve above it.
+  const uint32_t notify_limit =
+      static_cast<uint32_t>(proxy::API_CLIENT_TX_RING) - s1.ctrl_reserve;
+  const uint32_t notify_frame = static_cast<uint32_t>(3 + nq.n);  // header 3 B
+  const uint32_t ctrl_frame = static_cast<uint32_t>(3 + kNotifyBytes);
+  const bool at_limit = ring_at_ctrl + notify_frame > notify_limit &&
+                        ring_at_ctrl <= notify_limit &&
+                        ring_max <= notify_limit + ctrl_frame;
+  measure("notify_stall_sent", sent);
+  measure("notify_stall_dropped", dropped);
+  measure("notify_stall_first_drop_ms", static_cast<long>(first_drop_ms));
+  measure("notify_stall_ring_max", static_cast<long>(ring_max));
+  measure("notify_stall_ring_at_ctrl", static_cast<long>(ring_at_ctrl));
+  measure("notify_stall_max_send_call_us", static_cast<long>(max_us));
+  result("notify_stall",
+         c == 2 && id_s != 0 && s_there && ping_sent && dropped > 0 && sent > 0 &&
+             s_drops == static_cast<uint32_t>(dropped) && s_drops_at_ctrl > 0 &&
+             s1.notify_drops - s0.notify_drops == static_cast<uint32_t>(dropped) &&
+             at_limit && ctrl_ok && g_s_ctrl.load() == 1 &&
+             g_s_pong.load() == 1 && g_s_notifies.load() == static_cast<uint32_t>(sent) &&
+             g_s_bad.load() == 0 && g_s_order_bad.load() == 0 && g_s_other.load() == 0 &&
+             s1.ring_reaps == s0.ring_reaps && s1.reaps == s0.reaps && max_us < 10000,
+         "S %lu: %d notifies queued, %d dropped (first at %lld ms, counted %lu); "
+         "ring %lu at the connection state, max %lu (notify limit %lu); "
+         "connection state mid-stall %s, got %lu; pong %lu; S got %lu notifies, %lu bad frames, %lu out of order; "
+         "%s; ring reaps %lu->%lu",
+         static_cast<unsigned long>(id_s), sent, dropped,
+         static_cast<long long>(first_drop_ms), static_cast<unsigned long>(s_drops),
+         static_cast<unsigned long>(ring_at_ctrl), static_cast<unsigned long>(ring_max),
+         static_cast<unsigned long>(notify_limit), ctrl_ok ? "queued" : "REFUSED", static_cast<unsigned long>(g_s_ctrl.load()),
+         static_cast<unsigned long>(g_s_pong.load()),
+         static_cast<unsigned long>(g_s_notifies.load()),
+         static_cast<unsigned long>(g_s_bad.load()),
+         static_cast<unsigned long>(g_s_order_bad.load()), s_there ? "S kept" : "S reaped",
+         static_cast<unsigned long>(s0.ring_reaps),
+         static_cast<unsigned long>(s1.ring_reaps));
+  g_s_run.store(false);
+  vTaskDelay(pdMS_TO_TICKS(300));
+  ::close(g_fd_s);
+  g_fd_s = -1;
+  wait_gone(id_s, 3000);
 }
 
 // Phase: what the sender's coalescing does on a healthy client (B, which
@@ -1159,6 +1389,7 @@ void run() {
   step_bulk_reserve();
   step_bulk_adverts();
   step_bulk_gate();
+  step_notify_stall();
   step_coalesce();
   print_tasks();
   g_b_run.store(false);

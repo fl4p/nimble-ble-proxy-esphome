@@ -119,7 +119,8 @@ CONFIG_LWIP_SO_REUSE=y
 CONFIG_LWIP_SO_LINGER=y
 # Per-client API TX ring (static .bss): every frame is copied in and one
 # sender task drains it, so no producer (NimBLE host task) blocks on a slow
-# client. At least 3136 (one max-size frame plus two max-size notifies);
+# client. At least 3296 (one max-size frame, two max-size notifies and the
+# control reserve);
 # see NBP_API_CLIENT_TX_RING.
 CONFIG_NBP_API_CLIENT_TX_RING=4096
 

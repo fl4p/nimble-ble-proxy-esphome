@@ -24,9 +24,9 @@ void start();
 //
 // `encode` returns the number of bytes written (0 → drop the message).
 // Returns true if the frame was queued for at least one client; false if
-// there is no client, or it was dropped (advert, ring full) or the client
-// was reaped (other frame, ring full). Callers should not retry from a
-// callback hot path.
+// there is no client, or it was dropped (advert or notification, ring full)
+// or the client was reaped (other frame, ring full). Callers should not
+// retry from a callback hot path.
 using EncodeFn = size_t (*)(void *ctx, uint8_t *buf, size_t cap);
 bool send_async(uint16_t msg_type, EncodeFn encode, void *ctx);
 
@@ -36,8 +36,9 @@ bool send_async(uint16_t msg_type, EncodeFn encode, void *ctx);
 // if that client is no longer connected, closing or reaped, so a late BLE
 // callback for a client that left is dropped instead of reaching whoever
 // got its fd. Returns true once the frame is queued in the client's ring
-// (not when it is on the wire); false if it did not fit and the client was
-// reaped for it.
+// (not when it is on the wire); false if it did not fit: a GATT
+// notification is then dropped and the client kept, any other frame reaps
+// the client.
 bool send_to(uint32_t client_id, uint16_t msg_type, EncodeFn encode, void *ctx);
 
 // True while a client is connected. Cheap, lock-free check for
@@ -60,12 +61,15 @@ struct TxqClient {
   uint32_t ring;      // bytes in the ring now
   uint32_t ring_max;  // ring high-water mark this connection
   bool congested;     // api_tx cannot move its ring into lwIP right now
+  uint32_t notify_drops;  // notifications dropped this connection
 };
 struct TxqStats {
   uint32_t cap;        // 0 = no cap
   uint32_t ring_size;  // per-client ring bytes
   uint32_t max_all;    // lwIP queue high-water mark since boot, all clients
   uint32_t drops;      // advert batches dropped: ring (half) full
+  uint32_t notify_drops; // notifications dropped: ring at the notify limit
+  uint32_t ctrl_reserve; // ring bytes notifications leave for control frames
   uint32_t ring_reaps; // clients reaped: a frame that must not be lost did not fit
   uint32_t reaps;      // clients reaped: queued data not moving for 20 s
   uint32_t refused;    // connections refused: all client slots taken
