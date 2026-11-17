@@ -9,7 +9,8 @@ on:
   workflow_dispatch:
   # A release is created by the build workflow's GITHUB_TOKEN, which triggers no
   # other workflow, so a `release` trigger would never fire. Restage the flasher
-  # firmware once a tag build has uploaded its assets instead.
+  # firmware once a tag build has uploaded its assets instead. A failed run counts
+  # too: its matrix jobs upload independently, so the other chips' images exist.
   workflow_run:
     workflows: [build]
     types: [completed]
@@ -27,8 +28,9 @@ jobs:
   deploy:
     if: >-
       github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       startsWith(github.event.workflow_run.head_branch, 'v'))
+      (github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v') &&
+       contains(fromJSON('["success","failure"]'), github.event.workflow_run.conclusion))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
