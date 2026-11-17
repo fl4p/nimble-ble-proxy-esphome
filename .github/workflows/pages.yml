@@ -7,6 +7,12 @@ on:
       - web-flasher/**
       - .github/workflows/pages.yml
   workflow_dispatch:
+  # A release is created by the build workflow's GITHUB_TOKEN, which triggers no
+  # other workflow, so a `release` trigger would never fire. Restage the flasher
+  # firmware once a tag build has uploaded its assets instead.
+  workflow_run:
+    workflows: [build]
+    types: [completed]
 
 permissions:
   contents: read
@@ -19,6 +25,10 @@ concurrency:
 
 jobs:
   deploy:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
