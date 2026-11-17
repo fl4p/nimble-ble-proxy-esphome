@@ -45,7 +45,7 @@ endif()
 
 project(nimble_ble_proxy
     LANGUAGES C CXX
-    VERSION 0.2.6)
+    VERSION 0.2.7)
 
 # QEMU heap self-test on the C3: QEMU models no ADC, so IDF's boot-time ADC
 # self-calibration (a constructor, pulled in with the PHY) spins forever in
