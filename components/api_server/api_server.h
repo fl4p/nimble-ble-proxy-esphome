@@ -80,8 +80,10 @@ struct TxqStats {
 };
 TxqStats txq_stats();
 
-// esp_timer_get_time() of the last frame from an API client that reached us
-// over the STA uplink (not loopback, not the SoftAP subnet); 0 if none.
-int64_t last_rx_us();
+// esp_timer_get_time() of the last frame from an API session that reached us
+// over the STA uplink (not loopback, not the SoftAP subnet), is still open and
+// has been open for at least `min_age_us`; 0 if none. A client that keeps
+// reconnecting never qualifies, so its handshakes can't pass for uplink health.
+int64_t stable_rx_us(int64_t min_age_us);
 
 }  // namespace api_server

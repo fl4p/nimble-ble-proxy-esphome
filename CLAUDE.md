@@ -1190,8 +1190,10 @@ rest:
   repeater). Only a handshake or a RST counts as reachable; local socket
   errors count as failures.
 - Frames from an *upstream* API client within 60 s also pass a cycle
-  (`api_server::last_rx_us`; loopback = WS bridge and SoftAP-subnet peers
-  don't count, they would hide a dead uplink).
+  (`api_server::stable_rx_us`; loopback = WS bridge and SoftAP-subnet peers
+  don't count, they would hide a dead uplink), but only from a session open
+  for at least max(60 s, 2 × interval). 2026-11-16, .231 at -80 dBm: batmon
+  reconnected every ~40 s and each handshake kept the watchdog from firing.
 - Reboots arm only after a probe target answered once this boot (`"armed"`
   in `GET /liveness`). A liveness reboot carries the armed state across
   `esp_restart` (`__NOINIT` magic), so a wedge that recurs before the first

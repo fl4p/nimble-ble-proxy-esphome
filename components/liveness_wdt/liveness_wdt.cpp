@@ -49,8 +49,13 @@ constexpr const char *EXTRA_TARGET = CONFIG_NBP_LIVENESS_EXTRA_TARGET;
 // Data from an API client within this many seconds (and at least one probe
 // interval) also proves the LAN path. HA's keepalive ping is every 20 s.
 constexpr uint32_t CLIENT_RX_FRESH_S = 60;
+// ...but only from a session that has stayed open this long (and at least two
+// probe intervals). On a degraded uplink (2026-11-16, .231: -80 dBm, 45 % ping
+// loss) batmon lost its session and reconnected every ~40 s, and each
+// handshake looked like fresh traffic, so the watchdog never fired.
+constexpr uint32_t CLIENT_SESSION_MIN_S = 60;
 
-int64_t (*g_client_rx_us)() = nullptr;
+int64_t (*g_client_rx_us)(int64_t min_age_us) = nullptr;
 
 // EXTRA_TARGET, parsed once at start(); ip 0 = none.
 uint32_t g_extra_ip_be = 0;
@@ -215,12 +220,15 @@ bool probe_cycle(uint16_t *rtt_ms) {
   return false;
 }
 
-// True if an API client sent data within the freshness window.
+// True if an API session that has been open for at least the probe window
+// sent data within the freshness window.
 bool client_traffic_fresh() {
   if (g_client_rx_us == nullptr) return false;
-  int64_t last = g_client_rx_us();
+  const uint32_t interval_s = g_interval_s.load();
+  const uint32_t min_age_s = std::max(CLIENT_SESSION_MIN_S, 2 * interval_s);
+  int64_t last = g_client_rx_us(static_cast<int64_t>(min_age_s) * 1000000);
   if (last <= 0) return false;
-  uint32_t window_s = std::max(CLIENT_RX_FRESH_S, g_interval_s.load() + 10);
+  uint32_t window_s = std::max(CLIENT_RX_FRESH_S, interval_s + 10);
   return esp_timer_get_time() - last < static_cast<int64_t>(window_s) * 1000000;
 }
 
@@ -304,8 +312,9 @@ void record_sample(bool ok, uint16_t rtt_ms) {
       g_backoff_shift = 0;
       if (!g_armed.exchange(true)) ESP_LOGI(TAG, "probe target answered; armed");
     } else if (client_traffic_fresh()) {
-      // HA is talking to us, so the LAN path works even if the gateway
-      // ignores port 80. The chart still records the failed probe.
+      // A long-lived client session is talking to us, so the LAN path works
+      // even if the gateway ignores port 80. The chart still records the
+      // failed probe.
       ok = true;
     }
 
@@ -327,7 +336,7 @@ void record_sample(bool ok, uint16_t rtt_ms) {
 
 }  // namespace
 
-void set_client_rx_source(int64_t (*last_rx_us)()) { g_client_rx_us = last_rx_us; }
+void set_client_rx_source(int64_t (*stable_rx_us)(int64_t min_age_us)) { g_client_rx_us = stable_rx_us; }
 
 void start() {
   if (g_started.exchange(true)) return;

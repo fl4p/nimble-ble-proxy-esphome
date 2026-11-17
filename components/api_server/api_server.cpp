@@ -5,6 +5,7 @@
 #include "frame_codec.h"
 #include "handshake.h"
 #include "proxy_config.h"
+#include "stable_session.h"
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -258,11 +259,16 @@ void set_abortive_close(int fd) {
   }
 }
 
-// esp_timer time of the last frame received from an upstream API client
-// (0 = none yet). The liveness watchdog takes it as proof that the STA path
-// works, so clients on loopback (the WS bridge) or on our own SoftAP subnet
-// don't count: they would keep a dead uplink looking alive.
-std::atomic<int64_t> g_last_rx_us{0};
+// Per-slot start time and last-frame time of each upstream API session
+// (esp_timer µs, 0 = slot idle / no frame yet). The liveness watchdog takes
+// RX from a long-lived session as proof that the STA path works (see
+// stable_session.h), so clients on loopback (the WS bridge) or on our own
+// SoftAP subnet are never recorded: they would keep a dead uplink looking
+// alive. Written only by the slot's connection_task; start is set after
+// last_rx is cleared and cleared first on exit, and the reader re-checks
+// start, so it never pairs one session's RX with another's start.
+std::array<std::atomic<int64_t>, proxy::MAX_API_CLIENTS> g_sess_start_us{};
+std::array<std::atomic<int64_t>, proxy::MAX_API_CLIENTS> g_sess_rx_us{};
 
 ssize_t socket_read(void *ctx, uint8_t *buf, size_t n) {
   int fd = *static_cast<int *>(ctx);
@@ -1020,11 +1026,17 @@ void connection_task(void *arg) {
   uint8_t rx_payload[proxy::MAX_MESSAGE_SIZE];
   bt_handlers::ClientSubs subs;
 
+  const bool track = upstream && slot >= 0;
+  if (track) {
+    g_sess_rx_us[slot].store(0, std::memory_order_relaxed);
+    g_sess_start_us[slot].store(esp_timer_get_time(), std::memory_order_release);
+  }
   const char *why = "unknown";
   while (slot >= 0 && dispatch_one(client_fd, slot, client_id, rx_payload,
                                    sizeof(rx_payload), &subs, &why)) {
-    if (upstream) g_last_rx_us.store(esp_timer_get_time(), std::memory_order_relaxed);
+    if (track) g_sess_rx_us[slot].store(esp_timer_get_time(), std::memory_order_release);
   }
+  if (track) g_sess_start_us[slot].store(0, std::memory_order_release);
   // A reaped socket's recv() fails as a side effect of api_tx's shutdown,
   // so the reap is the real cause. Read it (and stop new frames) before
   // unregister clears the slot.
@@ -1182,7 +1194,17 @@ bool has_active_client() {
   return g_active_count.load(std::memory_order_acquire) > 0;
 }
 
-int64_t last_rx_us() { return g_last_rx_us.load(std::memory_order_relaxed); }
+int64_t stable_rx_us(int64_t min_age_us) {
+  stable_session::Snap snap[proxy::MAX_API_CLIENTS] = {};
+  for (size_t i = 0; i < proxy::MAX_API_CLIENTS; ++i) {
+    const int64_t s1 = g_sess_start_us[i].load(std::memory_order_acquire);
+    const int64_t rx = g_sess_rx_us[i].load(std::memory_order_acquire);
+    const int64_t s2 = g_sess_start_us[i].load(std::memory_order_acquire);
+    if (s1 == s2) snap[i] = {s1, rx};  // else the slot changed hands: skip
+  }
+  return stable_session::newest_rx(snap, proxy::MAX_API_CLIENTS, esp_timer_get_time(),
+                                   min_age_us);
+}
 
 bool send_async(uint16_t msg_type, EncodeFn encode, void *ctx) {
   if (g_active_count.load(std::memory_order_acquire) == 0) return false;

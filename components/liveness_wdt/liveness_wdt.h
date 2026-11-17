@@ -3,8 +3,11 @@
 // network wedge (WiFi/coex livelock under heavy forwarded throughput) where
 // tasks stay alive — so the IDF Task-WDT never fires — but the IP path is dead.
 // A cycle passes if the STA gateway (TCP :80) or the optional extra target
-// answers, or an API client sent data recently. Reboots are armed only after
-// a probe target answered once this boot.
+// answers, or an upstream API session that has been open for at least
+// max(60 s, 2 × interval_s) sent data recently. Session age matters: a client
+// that keeps reconnecting is a symptom of a bad uplink, and its handshakes
+// must not hold off the reboot. Reboots are armed only after a probe target
+// answered once this boot.
 
 #pragma once
 
@@ -17,9 +20,10 @@ namespace liveness_wdt {
 // Idempotent — a second call is a no-op. No-op when CONFIG_NBP_LIVENESS_WDT=n.
 void start();
 
-// Where to read the last API-client receive time (esp_timer µs, 0 = never).
-// Recent client traffic counts as a passed cycle. Call before start().
-void set_client_rx_source(int64_t (*last_rx_us)());
+// Where to read the last receive time (esp_timer µs, 0 = none) of a live API
+// session at least `min_age_us` old. Recent traffic from such a session counts
+// as a passed cycle. Call before start().
+void set_client_rx_source(int64_t (*stable_rx_us)(int64_t min_age_us));
 
 struct State {
   bool enabled;
