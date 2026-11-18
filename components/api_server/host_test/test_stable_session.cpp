@@ -27,29 +27,36 @@ int main() {
   const int64_t now = 10000 * S;
 
   // (1) one long-lived healthy session: its RX counts.
-  Snap stable[] = {{now - 3600 * S, now - 5 * S}, {0, 0}};
+  Snap stable[] = {{now - 3600 * S, now - 5 * S, false}, {0, 0, false}};
   expect("long-lived session", stable, 2, now, now - 5 * S);
 
   // (2) a session that reconnects every ~40 s never reaches the minimum age.
-  Snap churn[] = {{now - 40 * S, now - 1 * S}, {0, 0}};
+  Snap churn[] = {{now - 40 * S, now - 1 * S, false}, {0, 0, false}};
   expect("churning session (40 s)", churn, 2, now, 0);
-  Snap young[] = {{now - 59 * S, now - 1 * S}};
+  Snap young[] = {{now - 59 * S, now - 1 * S, false}};
   expect("session just under min age", young, 1, now, 0);
-  Snap edge[] = {{now - 60 * S, now - 1 * S}};
+  Snap edge[] = {{now - 60 * S, now - 1 * S, false}};
   expect("session exactly at min age", edge, 1, now, now - 1 * S);
 
   // (3) no clients at all.
-  Snap none[] = {{0, 0}, {0, 0}};
+  Snap none[] = {{0, 0, false}, {0, 0, false}};
   expect("no clients", none, 2, now, 0);
 
   // (4) one stable and one churning: only the stable one's RX counts, even
   // when the churning one is newer.
-  Snap mixed[] = {{now - 30 * S, now - 1 * S}, {now - 900 * S, now - 20 * S}};
+  Snap mixed[] = {{now - 30 * S, now - 1 * S, false}, {now - 900 * S, now - 20 * S, false}};
   expect("stable + churning", mixed, 2, now, now - 20 * S);
 
   // Old session that never sent a frame contributes nothing.
-  Snap silent[] = {{now - 900 * S, 0}};
+  Snap silent[] = {{now - 900 * S, 0, false}};
   expect("old silent session", silent, 1, now, 0);
+
+  // (5) a long-lived session whose sends are being retransmitted: its RX only
+  // proves the downlink and does not count; a healthy one beside it does.
+  Snap stuck[] = {{now - 3600 * S, now - 2 * S, true}};
+  expect("long-lived session, TX retransmitting", stuck, 1, now, 0);
+  Snap stuck_mixed[] = {{now - 3600 * S, now - 2 * S, true}, {now - 900 * S, now - 9 * S, false}};
+  expect("stuck + healthy", stuck_mixed, 2, now, now - 9 * S);
 
   std::printf(g_fail ? "%d FAILED\n" : "all passed\n", g_fail);
   return g_fail ? 1 : 0;

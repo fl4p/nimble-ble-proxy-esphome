@@ -1286,11 +1286,23 @@ bool has_active_client() {
 
 int64_t stable_rx_us(int64_t min_age_us) {
   stable_session::Snap snap[proxy::MAX_API_CLIENTS] = {};
+  int fds[proxy::MAX_API_CLIENTS];
+  xSemaphoreTake(g_clients_mutex, portMAX_DELAY);
+  for (size_t i = 0; i < proxy::MAX_API_CLIENTS; ++i) {
+    fds[i] = i < g_clients.size() && live(g_clients[i]) ? g_clients[i].fd : -1;
+  }
+  xSemaphoreGive(g_clients_mutex);
   for (size_t i = 0; i < proxy::MAX_API_CLIENTS; ++i) {
     const int64_t s1 = g_sess_start_us[i].load(std::memory_order_acquire);
+    if (s1 <= 0) continue;
+    // Is our side getting through? A retransmitted oldest segment means the
+    // peer is not ACKing what we send (stable_session.h). A failed query
+    // (socket torn down meanwhile) counts as stuck: unknown is not proof.
+    TxqCall q;
+    const bool stuck = fds[i] < 0 || !txq_query(fds[i], &q) || (q.segs > 0 && q.nrtx > 0);
     const int64_t rx = g_sess_rx_us[i].load(std::memory_order_acquire);
     const int64_t s2 = g_sess_start_us[i].load(std::memory_order_acquire);
-    if (s1 == s2) snap[i] = {s1, rx};  // else the slot changed hands: skip
+    if (s1 == s2) snap[i] = {s1, rx, stuck};  // else the slot changed hands: skip
   }
   return stable_session::newest_rx(snap, proxy::MAX_API_CLIENTS, esp_timer_get_time(),
                                    min_age_us);

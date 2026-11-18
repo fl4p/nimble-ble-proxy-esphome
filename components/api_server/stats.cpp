@@ -725,18 +725,21 @@ esp_err_t appinfo_get(httpd_req_t *req) {
 #if CONFIG_NBP_LIVENESS_WDT
 esp_err_t liveness_get(httpd_req_t *req) {
   liveness_wdt::State s = liveness_wdt::get_state();
-  char buf[160];
+  char buf[224];
   char age[16];
   if (s.last_ok_age_s == UINT32_MAX)
     std::strcpy(age, "null");
   else
     snprintf(age, sizeof(age), "%u", static_cast<unsigned>(s.last_ok_age_s));
+  // failures = bad cycles among the last `window` (not a consecutive count).
   int n = snprintf(buf, sizeof(buf),
                    "{\"enabled\":%s,\"interval\":%u,\"threshold\":%u,"
-                   "\"failures\":%u,\"armed\":%s,\"last_ok_s\":%s}",
+                   "\"failures\":%u,\"window\":%u,\"reconnects\":%u,\"slow_ms\":%u,"
+                   "\"armed\":%s,\"last_ok_s\":%s}",
                    s.enabled ? "true" : "false", static_cast<unsigned>(s.interval_s),
                    static_cast<unsigned>(s.threshold), static_cast<unsigned>(s.failures),
-                   s.armed ? "true" : "false", age);
+                   static_cast<unsigned>(s.window), static_cast<unsigned>(s.reconnects),
+                   static_cast<unsigned>(s.slow_ms), s.armed ? "true" : "false", age);
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
 }

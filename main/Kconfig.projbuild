@@ -42,12 +42,14 @@ config NBP_LIVENESS_WDT
         Spawn a supervisor task that probes upstream LAN reachability
         (TCP connect to the STA default gateway on port 80, plus the
         optional NBP_LIVENESS_EXTRA_TARGET) every
-        NBP_LIVENESS_INTERVAL_SECS. A cycle also passes when an API
-        client (Home Assistant) sent data recently. After
-        NBP_LIVENESS_THRESHOLD consecutive failed cycles it calls
-        esp_restart(). It only arms after a probe target has answered
-        once this boot, so a LAN whose gateway filters port 80 never
-        triggers a reboot.
+        NBP_LIVENESS_INTERVAL_SECS. A probe slower than 1 s counts as a
+        bad cycle; a cycle also passes when a long-lived API client
+        (Home Assistant) whose sends are being ACKed sent data recently.
+        NBP_LIVENESS_THRESHOLD bad cycles among the last threshold + 2
+        force a WiFi re-association; if that recurs within 16 cycles it
+        calls esp_restart(). It only arms after a probe target has
+        answered once this boot, so a LAN whose gateway filters port 80
+        never triggers a reboot.
 
         Recovers a total network wedge (a WiFi/coex livelock under heavy
         forwarded throughput) where tasks stay alive — so the IDF
@@ -71,7 +73,7 @@ config NBP_LIVENESS_INTERVAL_SECS
     range 5 3600
 
 config NBP_LIVENESS_THRESHOLD
-    int "Liveness: consecutive failed cycles before reboot"
+    int "Liveness: bad cycles (of the last N+2) before recovery"
     depends on NBP_LIVENESS_WDT
     default 6
     range 1 60

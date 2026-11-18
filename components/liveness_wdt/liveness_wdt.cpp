@@ -1,4 +1,5 @@
 #include "liveness_wdt.h"
+#include "liveness_policy.h"
 
 #include "sdkconfig.h"
 
@@ -98,6 +99,24 @@ WifiSample g_hist[HIST_LEN];
 size_t g_hist_head = 0;     // next slot to write
 uint32_t g_hist_total = 0;  // total samples ever recorded
 SemaphoreHandle_t g_hist_mtx = nullptr;
+
+// Window decider (liveness_policy.h). Touched only by the liveness task;
+// get_state() reads the published counters below.
+policy::Decider g_decider;
+std::atomic<uint32_t> g_window{0};
+std::atomic<uint32_t> g_reconnects{0};
+
+// Heartbeat: the task stamps this every tick. lwIP core locking is off, so
+// the probe's socket calls go through the tcpip thread's mailbox, and a
+// wedged tcpip thread would block this task forever with nothing else
+// watching (the IDF task WDT only watches the idle tasks and only logs). An
+// esp_timer check, which does not touch lwIP, reboots if the stamp goes
+// stale. Bound: one tick + two 3 s connects + an API txq query is well under
+// a minute; the limit is generous so a slow but alive task never trips it.
+constexpr int64_t HEARTBEAT_STALE_US = 5LL * 60 * 1000000;
+constexpr int64_t HEARTBEAT_CHECK_US = 30LL * 1000000;
+std::atomic<int64_t> g_heartbeat_us{0};
+esp_timer_handle_t g_heartbeat_timer = nullptr;
 
 uint32_t uptime_s() { return static_cast<uint32_t>(esp_timer_get_time() / 1000000); }
 
@@ -273,12 +292,26 @@ void record_sample(bool ok, uint16_t rtt_ms) {
   esp_restart();
 }
 
+// esp_timer task context: must not block or take long. Carries the armed
+// state like a probe-driven reboot does.
+void heartbeat_check(void *) {
+  const int64_t hb = g_heartbeat_us.load();
+  if (hb == 0 || !g_enabled.load()) return;
+  if (esp_timer_get_time() - hb < HEARTBEAT_STALE_US) return;
+  ESP_LOGE(TAG, "liveness task stalled for %llds (blocked in lwIP?); restarting",
+           static_cast<long long>((esp_timer_get_time() - hb) / 1000000));
+  g_carry_n = g_have_probe_ok ? 0 : g_backoff_shift + 1;
+  g_armed_carry = g_carry_n <= CARRY_MAX_SHIFT ? ARMED_CARRY_MAGIC : 0;
+  esp_restart();
+}
+
 [[noreturn]] void task(void *) {
   bool seen_connected = false;
   uint32_t last_probe_s = 0;
 
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(TICK_MS));
+    g_heartbeat_us.store(esp_timer_get_time());
 
     if (g_force_test.exchange(false)) do_reboot("forced liveness self-test", /*carry=*/g_have_probe_ok);
     if (!g_enabled.load()) continue;
@@ -295,42 +328,59 @@ void record_sample(bool ok, uint16_t rtt_ms) {
     // A disassociated STA is the native reconnect path's job, not ours.
     // Rebooting on top of an in-progress reconnect — common on a weak link that
     // keeps dropping and re-associating — just throws the progress away. So
-    // hold the counter at 0 while the link is down (record the outage for the
-    // chart) and reboot only for an associated-but-dead path: a true wedge.
+    // disassociated cycles are recorded for the chart but not judged. The
+    // window keeps what it had: a link that flaps between bad associations
+    // still accumulates toward a trigger (liveness_policy.h).
     if (!wifi_sta::is_connected()) {
-      g_failures.store(0);
       record_sample(false, 0xFFFF);
       continue;
     }
 
     uint16_t rtt = 0xFFFF;
-    bool ok = probe_cycle(&rtt);
-    record_sample(ok, rtt);
+    const bool probe_ok = probe_cycle(&rtt);
+    record_sample(probe_ok, rtt);
+    g_heartbeat_us.store(esp_timer_get_time());
 
-    if (ok) {
+    if (probe_ok) {
       g_have_probe_ok = true;
       g_backoff_shift = 0;
       if (!g_armed.exchange(true)) ESP_LOGI(TAG, "probe target answered; armed");
-    } else if (client_traffic_fresh()) {
-      // A long-lived client session is talking to us, so the LAN path works
-      // even if the gateway ignores port 80. The chart still records the
-      // failed probe.
-      ok = true;
     }
+    // A long-lived client session whose sends are being ACKed also proves
+    // the path (e.g. a gateway that ignores :80). Asked only when the probe
+    // did not pass cleanly. The chart still records the probe.
+    const bool probe_clean = probe_ok && rtt <= policy::SLOW_RTT_MS;
+    const bool client_ok = !probe_clean && client_traffic_fresh();
+    const bool bad = policy::cycle_bad(probe_ok, rtt, client_ok);
 
-    if (ok) {
-      g_failures.store(0);
+    if (!bad) {
       g_last_ok_s.store(now);
       g_have_ok.store(true);
-      continue;
     }
 
-    if (!g_armed.load()) continue;  // no target has ever answered: no evidence of a wedge
-
-    uint32_t f = g_failures.fetch_add(1) + 1;
-    uint32_t thr = g_threshold.load() << g_backoff_shift;
-    ESP_LOGW(TAG, "upstream LAN unreachable (%u/%u)", (unsigned)f, (unsigned)thr);
-    if (f >= thr) do_reboot("upstream LAN unreachable past threshold");
+    const uint32_t thr = g_threshold.load() << g_backoff_shift;
+    const policy::Action act = g_decider.on_cycle(bad, thr, g_armed.load());
+    g_failures.store(g_decider.bad());
+    g_window.store(g_decider.window());
+    if (bad && g_armed.load()) {
+      if (probe_ok) {
+        ESP_LOGW(TAG, "upstream LAN slow (%u ms; %u/%u bad of last %u)", (unsigned)rtt,
+                 (unsigned)g_decider.bad(), (unsigned)thr, (unsigned)g_decider.window());
+      } else {
+        ESP_LOGW(TAG, "upstream LAN unreachable (%u/%u bad of last %u)",
+                 (unsigned)g_decider.bad(), (unsigned)thr, (unsigned)g_decider.window());
+      }
+    }
+    if (act == policy::Action::RECONNECT) {
+      g_reconnects.store(g_decider.reconnects());
+      // Re-associate: wifi_sta's STA_DISCONNECTED handler calls
+      // esp_wifi_connect() again. Costs seconds and keeps the BLE links; on
+      // 2026-11-17 every recovery followed a re-association.
+      ESP_LOGE(TAG, "upstream LAN degraded past threshold; forcing WiFi re-association");
+      esp_wifi_disconnect();
+    } else if (act == policy::Action::REBOOT) {
+      do_reboot("upstream LAN still degraded after a WiFi re-association");
+    }
   }
 }
 
@@ -359,6 +409,14 @@ void start() {
   g_carry_n = 0;
   g_hist_mtx = xSemaphoreCreateMutex();
   xTaskCreate(&task, "liveness", 4096, nullptr, 3, nullptr);
+  const esp_timer_create_args_t hb = {.callback = &heartbeat_check, .arg = nullptr,
+                                      .dispatch_method = ESP_TIMER_TASK,
+                                      .name = "liveness_hb", .skip_unhandled_events = true};
+  if (esp_timer_create(&hb, &g_heartbeat_timer) == ESP_OK) {
+    esp_timer_start_periodic(g_heartbeat_timer, HEARTBEAT_CHECK_US);
+  } else {
+    ESP_LOGW(TAG, "heartbeat timer not created; a blocked liveness task goes unnoticed");
+  }
   ESP_LOGI(TAG, "started: interval=%us threshold=%u enabled=%d",
            (unsigned)g_interval_s.load(), (unsigned)g_threshold.load(), g_enabled.load());
 }
@@ -370,6 +428,9 @@ State get_state() {
   s.threshold = g_threshold.load();
   s.failures = g_failures.load();
   s.armed = g_armed.load();
+  s.window = g_window.load();
+  s.reconnects = g_reconnects.load();
+  s.slow_ms = policy::SLOW_RTT_MS;
   s.last_ok_age_s = g_have_ok.load() ? (uptime_s() - g_last_ok_s.load()) : UINT32_MAX;
   return s;
 }
