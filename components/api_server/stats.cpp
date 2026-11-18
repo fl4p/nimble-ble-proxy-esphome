@@ -39,6 +39,7 @@
 
 #if CONFIG_NBP_LIVENESS_WDT
 #include "liveness_wdt.h"
+#include "tx_boost.h"
 #endif
 
 #include <algorithm>
@@ -554,6 +555,16 @@ bool g_cpu_pd = false;
 // be bricked over BLE.
 bool g_wifi_off = false;
 
+// Self-reverting WiFi TX boost (tx_boost.h). RAM-only: g_wifi_tx_dbm stays
+// the persisted level, the boost overrides the radio until g_boost_until_us,
+// then g_boost_timer restores g_wifi_tx_dbm. g_txp_mtx serialises the HTTP
+// handler, the BLE dashboard handler and the esp_timer callback; it and the
+// timer are created at boot in apply_tx_power_from_nvs().
+int8_t g_boost_dbm = 0;  // 0 = no boost
+int64_t g_boost_until_us = 0;
+esp_timer_handle_t g_boost_timer = nullptr;
+SemaphoreHandle_t g_txp_mtx = nullptr;
+
 esp_err_t apply_cpu_freq_mhz(int mhz, bool light_sleep) {
   // Pin min=max so the CPU is clamped exactly. light_sleep lets the
   // SoC coast between bursts of work — measurable temp drop on the
@@ -618,6 +629,30 @@ esp_err_t apply_wifi_off() {
 #endif
 }
 
+// esp_timer task. The timer may already have fired for an older boost when a
+// request restarts it, so act only if the CURRENT boost is due; a newer one
+// has its own pending expiry.
+void boost_revert_cb(void *) {
+  if (g_txp_mtx == nullptr) return;
+  xSemaphoreTake(g_txp_mtx, portMAX_DELAY);
+  if (g_boost_dbm != 0 && esp_timer_get_time() + 50000 >= g_boost_until_us) {
+    const int was = g_boost_dbm;
+    g_boost_dbm = 0;
+    g_boost_until_us = 0;
+    if (!g_wifi_off) apply_wifi_tx_dbm(g_wifi_tx_dbm);
+    ESP_LOGI(TAG, "wifi tx boost %d dBm expired -> %d dBm (persisted level)", was,
+             static_cast<int>(g_wifi_tx_dbm));
+  }
+  xSemaphoreGive(g_txp_mtx);
+}
+
+// Caller holds g_txp_mtx. Does not touch the radio.
+void boost_clear_locked() {
+  if (g_boost_timer != nullptr) esp_timer_stop(g_boost_timer);  // not running: harmless
+  g_boost_dbm = 0;
+  g_boost_until_us = 0;
+}
+
 esp_err_t nvs_read_i8(const char *key, int8_t *out) {
   nvs_handle_t h;
   esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
@@ -638,8 +673,9 @@ esp_err_t nvs_write_i8(const char *key, int8_t v) {
 }
 
 esp_err_t txpower_get(httpd_req_t *req) {
-  // {"wifi":-20,"ble":-12,"ble_off":false} is ~38 chars — 32 truncated it.
-  char buf[48];
+  // {"wifi":20,"wifi_cfg":11,"revert_s":900,"ble":-12,"ble_off":false} is
+  // ~68 chars; keep headroom.
+  char buf[96];
   size_t n = build_txpower_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
@@ -1515,10 +1551,23 @@ size_t build_txpower_json(char *buf, size_t cap) {
   // wifi==0 in the wire format means "WiFi not active" — either runtime
   // off (via handle_txpower_set) or compile-time absent. Either way the
   // dashboard disables the TX-power dropdown on seeing 0.
+  // "wifi" is what the radio runs at now (the boost while one is active),
+  // "wifi_cfg" the persisted level it reverts to, "revert_s" the seconds
+  // until an active boost reverts (0 = none).
 #if CONFIG_NBP_WIFI
-  int wifi = g_wifi_off ? 0 : static_cast<int>(g_wifi_tx_dbm);
+  int wifi_cfg = static_cast<int>(g_wifi_tx_dbm);
+  int boost = 0;
+  int64_t until = 0;
+  if (g_txp_mtx != nullptr) xSemaphoreTake(g_txp_mtx, portMAX_DELAY);
+  boost = g_boost_dbm;
+  until = g_boost_until_us;
+  if (g_txp_mtx != nullptr) xSemaphoreGive(g_txp_mtx);
+  uint32_t revert_s = boost != 0 ? tx_boost::remaining_s(until, esp_timer_get_time()) : 0;
+  int wifi = g_wifi_off ? 0 : (boost != 0 && revert_s > 0 ? boost : wifi_cfg);
+  if (wifi != boost) revert_s = 0;
 #else
-  int wifi = 0;
+  int wifi = 0, wifi_cfg = 0;
+  uint32_t revert_s = 0;
 #endif
   // ble_off true ⇒ BLE was fully shut down at runtime (NimBLEDevice::deinit);
   // the dashboard renders the BLE-TX dropdown as "off" and reboot re-enables.
@@ -1529,9 +1578,11 @@ size_t build_txpower_json(char *buf, size_t cap) {
 #else
   bool ble_off = false;
 #endif
-  int n = std::snprintf(buf, cap, "{\"wifi\":%d,\"ble\":%d,\"ble_off\":%s}", wifi,
-                        static_cast<int>(g_ble_tx_dbm),
-                        ble_off ? "true" : "false");
+  int n = std::snprintf(buf, cap,
+                        "{\"wifi\":%d,\"wifi_cfg\":%d,\"revert_s\":%u,\"ble\":%d,"
+                        "\"ble_off\":%s}",
+                        wifi, wifi_cfg, static_cast<unsigned>(revert_s),
+                        static_cast<int>(g_ble_tx_dbm), ble_off ? "true" : "false");
   if (n < 0) return 0;
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }
@@ -1539,28 +1590,84 @@ size_t build_txpower_json(char *buf, size_t cap) {
 const char *handle_txpower_set(const char *query) {
   char val[8];
   bool changed = false;
+  // `for` present but unreadable (too long) must fail, not fall through to
+  // a persisted set: only ESP_ERR_NOT_FOUND means "absent".
+  char forv[12];
+  const esp_err_t for_rc = httpd_query_key_value(query, "for", forv, sizeof(forv));
+  const bool has_for = for_rc != ESP_ERR_NOT_FOUND;
+  if (has_for && for_rc != ESP_OK) return "for: 1..900 seconds";
   if (httpd_query_key_value(query, "wifi", val, sizeof(val)) == ESP_OK) {
     int dbm = std::atoi(val);
     if (dbm == 0) {
+      if (has_for) return "for needs wifi 2..21";
+      if (g_txp_mtx != nullptr) xSemaphoreTake(g_txp_mtx, portMAX_DELAY);
+      boost_clear_locked();
+      if (g_txp_mtx != nullptr) xSemaphoreGive(g_txp_mtx);
       if (!g_wifi_off) {
         if (apply_wifi_off() != ESP_OK) return "wifi stop failed";
         g_wifi_off = true;
         ESP_LOGI(TAG, "wifi off (runtime; reboot to re-enable)");
         changed = true;
       }
+    } else if (has_for) {
+      // Temporary boost: RAM-only, reverts on its own (tx_boost.h).
+      if (dbm < 2 || dbm > 21) return "wifi 0 or 2..21";
+      if (g_wifi_off) return "wifi off; reboot to re-enable";
+      uint32_t for_s = 0;
+      if (const char *e = tx_boost::parse_for(forv, &for_s)) return e;
+      if (g_txp_mtx == nullptr || g_boost_timer == nullptr) return "boost unavailable";
+      xSemaphoreTake(g_txp_mtx, portMAX_DELAY);
+      if (apply_wifi_tx_dbm(dbm) != ESP_OK) {
+        xSemaphoreGive(g_txp_mtx);
+        return "wifi tx apply failed";
+      }
+      esp_timer_stop(g_boost_timer);
+      g_boost_dbm = static_cast<int8_t>(dbm);
+      g_boost_until_us = esp_timer_get_time() + static_cast<int64_t>(for_s) * 1000000;
+      const esp_err_t terr = esp_timer_start_once(g_boost_timer, static_cast<uint64_t>(for_s) * 1000000);
+      if (terr != ESP_OK) {
+        // No expiry would be armed: undo rather than leave an unbounded boost.
+        boost_clear_locked();
+        apply_wifi_tx_dbm(g_wifi_tx_dbm);
+        xSemaphoreGive(g_txp_mtx);
+        return "boost timer failed";
+      }
+      xSemaphoreGive(g_txp_mtx);
+      ESP_LOGI(TAG, "wifi tx boost -> %d dBm for %u s (then %d dBm; not persisted)", dbm,
+               static_cast<unsigned>(for_s), static_cast<int>(g_wifi_tx_dbm));
+      changed = true;
     } else {
       if (dbm < 2 || dbm > 21) return "wifi 0 or 2..21";
       if (g_wifi_off) return "wifi off; reboot to re-enable";
+      // A plain set cancels any boost and is persisted as before.
+      if (g_txp_mtx != nullptr) xSemaphoreTake(g_txp_mtx, portMAX_DELAY);
+      const bool was_boosted = g_boost_dbm != 0;
+      boost_clear_locked();
+      const char *err = nullptr;
       if (dbm != g_wifi_tx_dbm) {
         int8_t new_dbm = static_cast<int8_t>(dbm);
-        if (apply_wifi_tx_dbm(new_dbm) != ESP_OK) return "wifi tx apply failed";
-        g_wifi_tx_dbm = new_dbm;
-        nvs_write_i8(NVS_WIFI_TX_KEY, g_wifi_tx_dbm);
-        ESP_LOGI(TAG, "wifi tx -> %d dBm (persisted)",
-                 static_cast<int>(g_wifi_tx_dbm));
-        changed = true;
+        if (apply_wifi_tx_dbm(new_dbm) != ESP_OK) {
+          err = "wifi tx apply failed";
+        } else {
+          g_wifi_tx_dbm = new_dbm;
+          nvs_write_i8(NVS_WIFI_TX_KEY, g_wifi_tx_dbm);
+          ESP_LOGI(TAG, "wifi tx -> %d dBm (persisted)",
+                   static_cast<int>(g_wifi_tx_dbm));
+          changed = true;
+        }
+      } else if (was_boosted) {
+        if (apply_wifi_tx_dbm(g_wifi_tx_dbm) != ESP_OK) {
+          err = "wifi tx apply failed";
+        } else {
+          ESP_LOGI(TAG, "wifi tx boost cancelled -> %d dBm", static_cast<int>(g_wifi_tx_dbm));
+          changed = true;
+        }
       }
+      if (g_txp_mtx != nullptr) xSemaphoreGive(g_txp_mtx);
+      if (err) return err;
     }
+  } else if (has_for) {
+    return "for needs wifi 2..21";
   }
 #if CONFIG_NBP_BLE
   if (httpd_query_key_value(query, "ble", val, sizeof(val)) == ESP_OK) {
@@ -2299,6 +2406,16 @@ void apply_log_overrides_from_nvs() {
 }
 
 void apply_tx_power_from_nvs() {
+  if (g_txp_mtx == nullptr) g_txp_mtx = xSemaphoreCreateMutex();
+  if (g_boost_timer == nullptr) {
+    const esp_timer_create_args_t a = {.callback = &boost_revert_cb, .arg = nullptr,
+                                       .dispatch_method = ESP_TIMER_TASK,
+                                       .name = "txboost", .skip_unhandled_events = false};
+    if (esp_timer_create(&a, &g_boost_timer) != ESP_OK) {
+      g_boost_timer = nullptr;
+      ESP_LOGW(TAG, "txboost timer not created; /txpower for= disabled");
+    }
+  }
   int8_t v;
   if (nvs_read_i8(NVS_WIFI_TX_KEY, &v) == ESP_OK) g_wifi_tx_dbm = v;
   if (nvs_read_i8(NVS_BLE_TX_KEY, &v) == ESP_OK) g_ble_tx_dbm = v;
