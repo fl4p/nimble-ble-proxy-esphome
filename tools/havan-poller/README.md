@@ -18,6 +18,31 @@ Measurement `nimble_proxy`, tag `host=nimble-proxy-231`, ms timestamp. Fields:
 - `ok` (both requests succeeded), `ok_stats`, `ok_wd`, `latency_ms`,
   `latency_wd_ms` (float).
 
+- from `/wifihist` (added 2026-11-17): the newest liveness-probe sample as
+  `sta_rssi` (proxy → router RSSI), `ap_rssi` (weakest SoftAP client),
+  `wd_rtt_ms` (the proxy's own TCP-connect RTT to the router), `wd_probe_ok`
+  (0 = that probe failed), `sta_count` (SoftAP clients); plus `ok_wh`,
+  `latency_wh_ms`.
+
+Measurement `nimble_proxy_wifi` (same tag) holds **every** `/wifihist` sample.
+The device keeps ~1 h of them (120 × 30 s), so after an outage the samples
+recorded while the poller could not reach it are backfilled. New samples are
+found by matching the overlap with the previous fetch. The device stores no
+per-sample time, so the timestamps are **estimates**: new samples are spread
+evenly between the last one sent and now. That is accurate to the extent that
+probe cycles are evenly paced (30 s plus up to ~8 s of tick and connect
+timeouts on a bad link).
+
+Measurement `nimble_proxy_reboot` gets one point per detected reboot (uptime
+from `/wifidisc` went backwards): `prev_uptime_s`, `uptime_s`, `reset_reason`
+and `crash_count` from `/crash`, `saved_log`, `saved_crash`. The new boot's
+`/log` (whose 4 KB ring still holds the previous boot's tail for a few
+minutes) and `/crash` are saved to `~/nbp-reboots/<UTC stamp>/` on havan
+(`NBP_REBOOT_DIR`). A failed snapshot is retried for 10 cycles. A reboot
+between two polls that both fail is not detected until the next answered
+`/wifidisc`. A reboot that completes faster than the uptime it replaces is
+always seen, because uptime only grows within a boot.
+
 When the device does not answer, a point with `ok=0` and the latencies is still
 sent. Integers carry the `i` suffix; `temp_c` and the latencies are always
 float. Fields are split into several lines with the same timestamp when one
