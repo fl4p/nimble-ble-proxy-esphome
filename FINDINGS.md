@@ -886,3 +886,285 @@ python $IDF_PATH/components/esptool_py/esptool/esptool.py \
 
 `/tmp/proxytest/smoke.py` — connects via aioesphomeapi, prints
 device info, subscribes to raw adverts for 15s, reports counts per MAC.
+
+## 12. 2026-11-17: .231 goes unresponsive while associated, then reboots (diagnosis only)
+
+Diagnosis from the source and the havan Influx history (`nimble_proxy`,
+2026-11-16 13:49 to 2026-11-17 21:52 UTC). No device writes were made.
+Evidence was gathered with read-only GETs at 21:46 and 21:52 UTC.
+
+### Running image
+
+- d821472 (0.2.7 code without the release bump), so `/appinfo` still says
+  "0.2.6". Built in worktree `~/dev/ha/nbp-d821-wt`, dir
+  `build-d821-psram-sw`. `GET /crash` reports `running_elf
+  c58283adffa15d86`. It was OTA'd at 17:17:28 UTC by the batmon-ha
+  field-test session.
+- The `api_notify_drops` field first appears in Influx at 17:18:18.
+  47a6848 only bumps the version.
+
+### Most of the reboots were OTAs
+
+| Boot (UTC) | Cause | Evidence |
+|---|---|---|
+| 11:37:27 | OTA 0.2.6 psram-sw | batmon session OTA at 11:37:09; `api_tx_mss` appears at 11:37:48 |
+| 12:03:50, 12:06:55 | OTA 0.2.6 psram, then psram-sw | ELF index 12:04:49; batmon session OTA at 12:06:35 |
+| 17:17:51 | OTA d821472 | batmon session OTA at 17:17:28 |
+| 20:47:52 | **self-reboot**, almost certainly the liveness WDT | no session touched .231 then; timing fits (below) |
+| ~21:49:45 | **liveness WDT, confirmed** | `/log`: `liveness: previous boot was a liveness restart; starting armed (threshold x1)`; `/crash`: `last_reset_reason sw`, 0 panic records |
+
+The "11:34" and "17:12" reboots were therefore deployments, not faults.
+
+### What a stall looks like in the data
+
+Example: 20:17 to 20:48.
+
+- **The onset is gradual.** Poller latency goes 0.1 s, then 0.4, 2.0,
+  2.6, 4.4 and 6.1 s. Then it alternates between timeouts and 1 to 10 s
+  successes for about 25 min. During the 21:34 outage the poller got 0
+  of 30 fetches through. From about 21:44 even ARP from havan failed:
+  `FAILED`, then `No route to host`.
+- **The firmware itself stays healthy:**
+  - `cpu0` 3 to 9 %, `cpu1` 0 to 3 %
+  - `heap` 85 to 104 kB, `heap_min` 48 kB, `heap_largest` constant
+    31744 (non-predictive, see kb `esp32/heap-free-and-largest-can-both-be-non-predictive.md`)
+  - `oom` 0, `api_txq_drops` 0, `api_ring_reaps` 0
+  - `temp_c` 48 to 51 °C. It rises about 3 K at each onset, which fits
+    more radio retries.
+  - SoftAP forwarding is about 150 B/s (`ap_rx`/`ap_tx`), which is
+    negligible.
+- **API-layer counters move after the onset, not before it.**
+  - `api_txq_reaps` (no byte sent for 20 s, `api_server.cpp:904`) climbed
+    from 4 to 33 between 20:19 and 20:45.
+  - `notifies` fell from about 18/s to about 0.
+  - `ble_disc` rose with reason 534 (local host), which is the proxy
+    releasing the BMS link when its API owner is reaped.
+- **The AP drops the station for missing ACKs.**
+  - The 19:53 to 20:08 episode had 6 STA disconnects: reason 34
+    (`MISSING_ACKS`) five times and 209 (SA-Query timeout) once, at
+    -66 to -68 dBm. Reason 34 also occurred at 17:05 (-65 dBm) and
+    11-16 15:47 (-90 dBm).
+  - After the 21:49 reboot the station was dropped again 20 s after
+    boot: reason 34 at -70 dBm. The reconnect attempts then failed with
+    `AUTH_EXPIRE` and `CLASS3_FROM_NONASSOC` before it got back after
+    23 s (`/wifidisc`, `/log`).
+  - Each reconnect (after a kick or a reboot) was followed by a period
+    of normal service.
+- **`GET /txpower` returns `{"wifi":11,"ble":9}`.** WiFi TX has been
+  11 dBm since 11-16 13:58, set to keep the NAT AP cool. BLE was raised
+  from -9 to +9 dBm at 11-17 09:34.
+- **The same failure was seen on 11-16 11:50.** RTT was 2.4 to 3.6 s with
+  45 % ping loss, and moving the antennas fixed it (batmon-ha session
+  a1206f24). Raising TX power to 17 dBm before the antenna move did not
+  help, so that test was confounded.
+- **Other WiFi hosts did not stall at the same times.** The Kasa plugs
+  (.171/.181/.203/.214/.226) log errors in an hourly :20 to :40 pattern
+  that does not track the .231 windows, and none at 20:20 to 20:40.
+
+### Hypotheses, ranked
+
+1. **The uplink (device to AP) is marginal, and the association degrades
+   until a re-association resets it.** (Most likely.)
+   - For:
+     - Reason 34 means the AP is not getting ACKs from the proxy.
+     - Reconnect attempts fail with `AUTH_EXPIRE`, so the AP is not
+       hearing the auth frames.
+     - TX power is 11 dBm, against a downlink of -65 to -74 dBm.
+     - ICMP and ARP fail too, so the fault is below the API layer.
+     - The firmware counters are flat, CPU is idle and heap is stable.
+     - Each re-association (AP kick or reboot) restores service. The
+       21:49 reboot came straight back into a reason-34 kick, so a fresh
+       firmware state does not fix the link.
+     - The same symptom was fixed yesterday by moving the antenna.
+   - Against or unknown:
+     - Downlink RSSI at the kicks (-65 to -70) is not terrible.
+     - There is no live RSSI during the stalls: `/wifihist` has it, but
+       it is lost on the reboot, and the poller does not fetch it.
+     - It is unclear why the quality changes over tens of minutes.
+       Candidates are people or vehicles moving in the van, other
+       2.4 GHz traffic, and AP-side rate control. Channel utilisation
+       was not measured: the router UI at 192.168.1.1 needs a login,
+       which was not attempted.
+2. **Coex airtime makes the proxy miss ACK slots (an amplifier of 1).**
+   - Load sharing the single radio:
+     - STA and SoftAP. `ESP_COEX_PREFER_WIFI` is set while the AP is up
+       (`nat_router.cpp:557`).
+     - The BLE scan duty is 30/1000 ms.
+     - One GATT link carries about 18 notifies/s.
+     - BLE is now at +9 dBm.
+   - For: reason 34 is exactly what an STA that cannot ACK on time
+     produces.
+   - Against: the scan duty is only 3 %, and the stalls did not start on
+     11-17 09:34 with the BLE power change. They started at 11:21 and
+     also occurred on 11-16.
+   - Not separable from 1 with the data at hand.
+3. **A firmware stall: lwIP or tcpip starvation, a held lock, TX ring
+   backpressure or heap fragmentation.** (Unlikely.)
+   - Against:
+     - CPU is idle.
+     - Heap and allocation-failure counters are flat.
+     - SoftAP NAT load is negligible.
+     - The onset is gradual and service partly succeeds, where a wedge
+       would be total.
+     - ICMP is answered by the tcpip thread directly, so an application
+       lock cannot block it.
+     - TX-ring reaps follow the latency rise instead of leading it.
+     - Service came back immediately after a reboot, and then failed
+       again at the radio layer (a reason-34 kick 20 s after boot).
+   - Not ruled out: a total tcpip wedge in the last minutes before
+     21:49, when ARP failed. That is equally explained by the STA being
+     dropped and re-associating.
+
+Ruled out:
+- WiFi power save: `li=0`.
+- OOM: `oom` 0.
+- NAT forwarding load.
+- A CPU-bound task.
+- Thermal throttling: ≤ 51 °C.
+- The 0.2.6 and 0.2.7 TX-ring changes as a cause. They only decide
+  whether a stalled client is reaped or has its notifications dropped.
+
+### Watchdog and recovery audit (running image's sdkconfig)
+
+| Mechanism | What it tests | Action | Timeout | Covers this failure? |
+|---|---|---|---|---|
+| `liveness_wdt` (`liveness_wdt.cpp`) | Each 30 s cycle (`:292`) passes if a TCP connect to the STA gateway port 80 succeeds or is refused within 3 s (`:139-221`), **or** an API session open ≥ 60 s received a byte in the last 60 s (`:225-233`, `api_server.cpp:1287`). Counts **consecutive** failed cycles only; any pass resets the count (`:321-326`). Held at 0 while the STA is disassociated (`:300-304`). Arms only after one gateway success this boot (`:328`). | `esp_restart()` (`:263-274`), carrying an "armed" flag with backoff | 6 × 30 s ≈ 3.2 min (Kconfig 6/30, `/liveness` confirms) | **Partly.** It fired at 21:49 (confirmed) and at 20:47 (by timing), but only 15 to 20 min into each outage. See below. |
+| ESP-IDF task WDT | Only the idle tasks of CPU0 and CPU1 (`CHECK_IDLE_TASK_CPU0/1=y`). No `esp_task_wdt_add` anywhere in the code. | **Log only**: `CONFIG_ESP_TASK_WDT_PANIC` is not set | 30 s | No. CPU is idle during the stalls, and it cannot reset anyway. |
+| Interrupt WDT | ISR or critical-section lockup on either core | Panic, then reboot (`PANIC_PRINT_REBOOT`, crash_capture, coredump) | 800 ms | No. |
+| Panic handler and crash_capture | Faults | RTC record, flash coredump, reboot | n/a | No. `/crash` shows 0 records. |
+| Brownout | Supply below level 7 | Reset | n/a | No. The reset reason was `sw`. |
+| Bootloader WDT | Boot only | Reset | 9 s | No. |
+| `wifi_sta` reconnect (`wifi_sta.cpp:343-350`) | `STA_DISCONNECTED` | Immediate `esp_wifi_connect()`, unbounded retries, no reboot | none | Only when the AP kicks the station. It does nothing for "associated but dead". |
+| api_server reaper (`api_server.cpp:172`, `:904`) | Nothing sent to a client for 20 s | Reaps that client and releases its BLE links | 20 s | Per client only. This is the symptom HA and batmon see. |
+| `oom_guard`, `http_guard` | Failed allocations; httpd handler error | Count or wait 2 s; abortive close | n/a | No reset path. |
+| BLE auto-off supervisor | Idle radio roles | Quiesces scan or advertising | 30 s | Not a recovery path. |
+
+**Why recovery takes 15 to 20 min instead of about 3.** Guard checklist
+items 1, 2 and 8 apply here.
+
+- **One lucky cycle resets the count.** The verdict needs 6 failed cycles
+  *in a row*, but at 30 to 70 % loss one gateway handshake (SYN out,
+  SYN-ACK in, within 3 s) often gets through. Each one zeroes the count,
+  so the dog is fed by a link that cannot carry an HTTP request or an API
+  session. It only fires once the link is almost completely dead: the
+  20:47:52 boot is about 3 min after the last poller success at
+  20:45:18. The probe's RTT is recorded in `/wifihist` but never judged:
+  1335 ms counts the same as 7 ms.
+- **Inbound client traffic can feed the dog through a one-way link.**
+  `client_traffic_fresh()` takes any byte *received* from a session open
+  ≥ 60 s. If the proxy's transmissions are what is being lost (reason
+  34), HA's and batmon's TCP retransmissions keep arriving and pass the
+  cycle, while nothing the proxy sends reaches them. The api_server
+  reaps the client after 20 s with no send progress, and HA reconnects.
+  A new session counts only after 60 s, so this feed is weaker since
+  27eca49 but not gone. This is a proxy for the thing being guarded: RX
+  freshness does not show that TX works. It cannot be told apart from
+  the gateway feed after the fact, because `/wifihist` is lost on the
+  reboot and nothing records which feed passed the cycle.
+- **There are two unevaluable states.** A disassociated STA holds the
+  count at 0 forever, by design, because the reconnect path owns that
+  state. If the tcpip thread itself wedges, `reachable()`'s `socket()`
+  and `connect()` block indefinitely: `LWIP_TCPIP_CORE_LOCKING` is off,
+  so every socket call waits on a tcpip message with no timeout. The
+  liveness task then never reaches `esp_restart()`, and no other
+  watchdog watches it. The comment at `:138` ("the task can never block
+  here") holds only for the `select()` step. This was not observed today,
+  but nothing would recover it.
+
+### Recommended changes (not implemented)
+
+1. **Judge a window, not a streak.** Count a cycle as failed when the
+   gateway probe fails *or* its RTT is above about 1000 ms. Act when at
+   least 6 of the last 8 cycles failed (about 4 min), instead of on 6
+   consecutive failures.
+2. **Take the client feed only with proof of TX progress.** Pass on
+   client traffic only if that session's `api_tx` also made send
+   progress in the window: bytes left its ring with no "nothing sent"
+   stall. Otherwise an inbound-only link keeps feeding the dog.
+3. **Escalate: reconnect first, reboot second.** On the first verdict,
+   do `esp_wifi_disconnect()` then `esp_wifi_connect()` and keep the
+   count. Reboot only if the window fails again after the reconnect.
+   The data say re-association is what restores service (the AP kicks
+   at 19:53 to 20:08 and both reboots). A reconnect costs about 3 to
+   25 s and keeps BLE links and clone state; a reboot drops all of it.
+   The GPIO14 switch survives either.
+4. **Make the liveness task watchable.** Subscribe it to the task WDT
+   (`esp_task_wdt_add`, reset each loop) with a long timeout. Use a
+   separate user-WDT entry or an `esp_timer` heartbeat check (about
+   120 s, then `esp_restart`) so idle-task panics stay off. This covers
+   a tcpip wedge.
+
+False-positive risk:
+- On a link that is degraded but usable (yesterday's 45 % loss state),
+  1 and 2 will reconnect where the old code did nothing. With
+  escalation, that costs a 3 to 25 s blip every few minutes instead of a
+  reboot.
+- The existing backoff (`:263-274`) resets on any probe success, so
+  once rebooting is reached, add a doubling backoff on consecutive
+  liveness reboots regardless of probe success (cap about 30 min).
+  Without it, a permanently marginal link could reboot-loop every
+  4 min.
+- The 1000 ms RTT limit must stay well above a healthy link: in
+  `/wifihist`, gateway RTT is 7 to 32 ms when healthy.
+
+None of this fixes the link. Experiment 2 below tests the fix that would.
+
+### Next experiments (cheapest first)
+
+1. **Poller, read-only, no firmware change.**
+   - Also fetch `/wifihist`: it gives live STA RSSI and the device-side
+     gateway RTT every 30 s.
+   - Fetch `/log` once whenever `uptime_s` drops. The previous-boot tail
+     is in the 4 KB ring only for the first few minutes; at 21:52 it had
+     already rolled off.
+   - Fetch `/crash` `last_reset_reason`.
+
+   This discriminates hypothesis 1 from 3. If RSSI drops or gateway RTT
+   rises before the poller latency rises, the cause is radio. If RSSI
+   and gateway RTT are fine while havan cannot reach the proxy, the
+   cause is inbound or firmware. It needs an nbp-poll restart on havan,
+   which is Fab's call.
+2. **With Fab's OK: WiFi TX 11 → 17 dBm for 24 h** (`POST /txpower`). Compare
+   STA kicks per hour, failed-poll minutes and `temp_c` with today. Up to
+   21:52 today there were 8 kicks (7 × reason 34, 1 × 209), 116 failed
+   30 s polls (about 58 min, up to 21:46, including OTA windows), and
+   47 to 51 °C at 11 dBm.
+   This is the direct test of the uplink budget now that the antenna has
+   been moved. If temperature is the constraint, an external antenna or
+   placement is the alternative.
+3. **Firmware counters, if 1 is ambiguous.**
+   - Add live `sta_rssi` and the liveness last-pass source (gateway,
+     client or none) plus `failures` to `/stats.json`, so the poller
+     records which feed kept the dog quiet.
+   - Optionally log `esp_wifi_statis_dump()` TX retry and fail counts
+     when an `api_txq_reap` fires.
+4. **To separate 2 from 1:** a window with the BMS link released (no
+   notifies) or BLE at -9 dBm, comparing kick rate. This is a write;
+   it needs Fab's OK.
+
+### Follow-up, 2026-11-18
+
+- **Experiment 1 is done.** The havan poller records `/wifihist` with
+  outage backfill and saves `/log` + `/crash` on every reboot (ccc3f5b).
+  First data, 2026-11-17 22:08 to 11-18 00:51: -70/-71 dBm steady; the
+  proxy's own router probe failed or took over 1 s in 61-75 % of cycles
+  until 23:00 and in 22-31 % after. Three more liveness reboots (22:24,
+  22:31, 23:06), all `sw` reset, no crash records. The saved logs hold the
+  new boot only, so the previous boot's tail did not survive in the 4 KB
+  ring.
+- **The watchdog fix from the audit landed** (04dd058): a probe over
+  1000 ms counts as bad, 6 bad of the last 8 cycles trigger, the first
+  trigger forces a Wi-Fi re-association and a second one within 16 cycles
+  reboots. API RX vouches only for a session whose sends are ACKed, and an
+  esp_timer heartbeat covers a blocked liveness task. Replayed over the
+  samples above, the new rule reconnects at 22:11 where the old one
+  rebooted at 22:22.
+- **Self-reverting TX boost** (4f24c2f): `POST /txpower?wifi=N&for=S`,
+  RAM-only, so fugu's `ota_mqtt.py` can run .231 at 20 dBm only for the
+  duration of a fry/flat OTA. The persisted level stays 11 dBm.
+- **Fab repositioned the router's antennas** at about 09:44 UTC on 11-18.
+- **.231 runs 4f24c2f**, a clean build of that commit with the
+  `build-d821-psram-sw` sdkconfig, flashed 2026-11-18 10:33:42 UTC.
+  Earlier flashes the same day: 09:32 (watchdog fix) and 09:57 (boost),
+  both from uncommitted trees with the same code.
+- Still open: experiment 2 (persisted TX power 17 dBm), 3 and 4.
