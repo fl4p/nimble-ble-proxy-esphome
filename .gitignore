@@ -50,3 +50,6 @@ web-flasher/firmware/
 # symbolicate core dumps (etc/idf-devtools/elf_archive.py).
 build-*/
 elf-archive/
+
+# Local crash/coredump captures pulled from devices (raw, per-session; not tracked).
+crashes/
