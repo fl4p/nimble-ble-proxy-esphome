@@ -310,7 +310,7 @@ table#portmaps button.del:hover{background:#3b0a0a}
            across N DTIMs; TX is always immediate, only inbound packets
            wait. Change persists to NVS; full effect needs a reboot to
            restamp the AP association. -->
-      <label>PS: <select id=wps>
+      <label>power saving: <select id=wps>
         <option value=0>off</option>
         <option value=1>1×DTIM</option>
         <option value=3>3×DTIM</option>
@@ -319,8 +319,8 @@ table#portmaps button.del:hover{background:#3b0a0a}
       </select></label>
     </div>
 
-    <div class=tgroup>
-      <span class="glabel ble-only">BLE</span>
+    <div class="tgroup ble-only">
+      <span class=glabel>BLE</span>
       <label class=ble-only>TX: <select id=btx>
         <option value=-12>-12</option><option value=-9>-9</option>
         <option value=-6>-6</option><option value=-3>-3</option>
@@ -334,7 +334,8 @@ table#portmaps button.del:hover{background:#3b0a0a}
            default (~30..60 ms = ~17..33 adv/s). Larger values are big
            TX-duty savings since each adv burst transmits on 3 primary
            channels; cost is slower discovery by phones. -->
-      <label class=ble-only>adv: <select id=advitvl>
+      <div class=tline>
+      <label class=ble-only>advertising: <select id=advitvl>
         <option value=-1>off (no broadcast)</option>
         <option value=0>default (~17–33/s)</option>
         <option value=100>100 ms (10/s)</option>
@@ -343,9 +344,11 @@ table#portmaps button.del:hover{background:#3b0a0a}
         <option value=1000>1000 ms (1/s)</option>
         <option value=2000>2000 ms (0.5/s)</option>
       </select></label>
+      </div>
       <!-- Central-role scan duty cycle. Values are "<window_ms>,<interval_ms>";
            JS splits and POSTs both. Lower duty = cooler chip, slower
            pickup of new advertisers. -->
+      <div class=tline>
       <label class=ble-only>scan: <select id=duty>
         <option value="30,60">50% (responsive)</option>
         <option value="30,120">25%</option>
@@ -353,14 +356,7 @@ table#portmaps button.del:hover{background:#3b0a0a}
         <option value="30,1000">3% (cool)</option>
       </select></label>
       <label class=ble-only><input type=checkbox id=act> active scan</label>
-      <label>log: <select id=lvl>
-        <option value=0>NONE</option>
-        <option value=1>ERROR</option>
-        <option value=2>WARN</option>
-        <option value=3>INFO</option>
-        <option value=4>DEBUG</option>
-        <option value=5>VERBOSE</option>
-      </select></label>
+      </div>
     </div>
 
     <div class=tgroup>
@@ -369,6 +365,14 @@ table#portmaps button.del:hover{background:#3b0a0a}
            DeviceInfo. Save persists to NVS; takes effect on next reboot. -->
       <label>name: <input type=text id=hn maxlength=30 spellcheck=false
                           autocomplete=off></label>
+      <label>log level: <select id=lvl>
+        <option value=0>NONE</option>
+        <option value=1>ERROR</option>
+        <option value=2>WARN</option>
+        <option value=3>INFO</option>
+        <option value=4>DEBUG</option>
+        <option value=5>VERBOSE</option>
+      </select></label>
       <!-- Shown only on builds with SMP but without clone (e.g. ESP32-C3),
            where POST /passkey is the PIN route; clone builds set the PIN in
            the clone prompt. -->
