@@ -209,6 +209,11 @@ size_t dispatch(const char *method, char *path, char *out, size_t cap) {
                               api_server::stats::handle_wifips_set(query));
   }
 
+  // Firmware identity incl. the release variant: lets the dashboard show
+  // "update available" over BLE too (install needs HTTP /update).
+  if (is_get && std::strcmp(path, "/appinfo") == 0) {
+    return api_server::stats::build_appinfo_json(out, cap);
+  }
   if (is_get && std::strcmp(path, "/hostname") == 0) {
     return api_server::stats::build_hostname_json(out, cap);
   }

@@ -56,8 +56,11 @@ jobs:
           command: |
             set -e
             pip install protobuf grpcio-tools
-            idf.py -DSDKCONFIG_DEFAULTS="${{ matrix.variant.defaults }}" build
             name="${{ matrix.target }}-${{ matrix.variant.name }}"
+            # NBP_VARIANT is the identity the dashboard's update check
+            # matches against release assets (GET /appinfo "variant"); the
+            # root CMakeLists.txt refuses it unless this is the stock config.
+            idf.py -DSDKCONFIG_DEFAULTS="${{ matrix.variant.defaults }}" -DNBP_VARIANT="$name" build
             mkdir -p "dist/$name"
             cp build/nimble_ble_proxy.bin "dist/$name/nimble_ble_proxy-$name-ota.bin"
             cp build/bootloader/bootloader.bin "dist/$name/bootloader-$name.bin"

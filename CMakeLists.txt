@@ -88,6 +88,65 @@ elseif(NBP_HEAP_SELFTEST)
         ESP_IDF_LWIP_HOOK_FILENAME="nbp_lwip_hooks.h")
 endif()
 
+# Release-variant identity, reported in GET /appinfo as "variant". The
+# dashboard offers an update image only to a device whose variant names
+# exactly one release asset (nimble_ble_proxy-<variant>-ota.bin), so a
+# wrong label could put a stock image on a custom build (PSRAM, switch
+# output, ...). CI sets it (-DNBP_VARIANT=<target>-ble-on|ble-off, see
+# .github/workflows/build.yml); every other build is "custom" and gets no
+# offer. A stock label is refused unless the build really is the stock
+# configuration: the target and BLE gate match the name, the defaults list
+# is the one CI uses, and none of the opt-in fragments' features are on.
+if(NOT NBP_VARIANT)
+    set(NBP_VARIANT "custom")
+endif()
+if(NOT NBP_VARIANT STREQUAL "custom")
+    if(CONFIG_NBP_BLE)
+        set(_nbp_stock_variant "${IDF_TARGET}-ble-on")
+        set(_nbp_stock_defaults "sdkconfig.defaults")
+    else()
+        set(_nbp_stock_variant "${IDF_TARGET}-ble-off")
+        set(_nbp_stock_defaults "sdkconfig.defaults;.github/build-no-ble.defaults")
+    endif()
+    # IDF hands SDKCONFIG_DEFAULTS back as absolute paths; compare relative.
+    set(_nbp_defaults "")
+    set(_nbp_raw "${SDKCONFIG_DEFAULTS}")
+    if(NOT _nbp_raw)
+        set(_nbp_raw "sdkconfig.defaults")
+    endif()
+    foreach(_nbp_f IN LISTS _nbp_raw)
+        get_filename_component(_nbp_abs "${_nbp_f}" ABSOLUTE
+                               BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+        file(RELATIVE_PATH _nbp_rel "${CMAKE_CURRENT_SOURCE_DIR}" "${_nbp_abs}")
+        list(APPEND _nbp_defaults "${_nbp_rel}")
+    endforeach()
+    if(NOT NBP_VARIANT STREQUAL _nbp_stock_variant)
+        message(FATAL_ERROR "NBP_VARIANT=${NBP_VARIANT} but this build is "
+            "${_nbp_stock_variant} (IDF_TARGET + CONFIG_NBP_BLE)")
+    endif()
+    if(NOT _nbp_defaults STREQUAL _nbp_stock_defaults)
+        message(FATAL_ERROR "NBP_VARIANT=${NBP_VARIANT} needs "
+            "SDKCONFIG_DEFAULTS=\"${_nbp_stock_defaults}\" (got "
+            "\"${_nbp_defaults}\"); label other builds custom")
+    endif()
+    foreach(_nbp_opt SPIRAM NBP_SWITCH_OUT NBP_MODBUS_BRIDGE NBP_ENV_SENSORS
+                     NBP_CRASH_TEST)
+        if(CONFIG_${_nbp_opt})
+            message(FATAL_ERROR "NBP_VARIANT=${NBP_VARIANT} with "
+                "CONFIG_${_nbp_opt}=y is not a release build; label it custom")
+        endif()
+    endforeach()
+    foreach(_nbp_st NBP_DHCPS_SELFTEST NBP_WS_SELFTEST NBP_HEAP_SELFTEST
+                    NBP_OOM_SELFTEST NBP_CRASH_SELFTEST)
+        if(${_nbp_st})
+            message(FATAL_ERROR "NBP_VARIANT=${NBP_VARIANT} on a ${_nbp_st} build")
+        endif()
+    endforeach()
+endif()
+message(STATUS "nimble-ble-proxy release variant: ${NBP_VARIANT}")
+idf_component_get_property(_nbp_api_lib api_server COMPONENT_LIB)
+target_compile_definitions(${_nbp_api_lib} PRIVATE NBP_VARIANT="${NBP_VARIANT}")
+
 # IDF 6 builds with -Werror=missing-field-initializers in C++. These
 # components register httpd routes with
 # `httpd_uri_t x = {.uri=…, .method=…, .handler=…, .user_ctx=…}`, which
