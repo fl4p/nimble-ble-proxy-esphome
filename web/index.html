@@ -79,6 +79,12 @@ body{font:14px system-ui;margin:0;color:#eee;background:#111;
 .swcard button.danger:hover{background:#3b0a0a}
 .swcard button:disabled{opacity:.5;cursor:default}
 .swcard label{color:#aaa;display:inline-flex;align-items:center;gap:.3em}
+.swcard input[type=text]{background:#1a1a1a;color:#eee;border:1px solid #333;
+  border-radius:4px;padding:.3em .6em;font:inherit;width:12em}
+#swcfgpin{width:5em!important}
+.swcard details summary{color:#888;cursor:pointer;font-size:.9em}
+.swcard details[open] summary{margin-bottom:.5em}
+.swcard details .swrow{margin-bottom:.5em}
 *{scrollbar-color:#2a2a2a #0a0a0a;scrollbar-width:thin}
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-track{background:#0a0a0a}
@@ -252,8 +258,10 @@ table#portmaps button.del:hover{background:#3b0a0a}
          SoftAP client) and not routed over the BLE transport. -->
     <div class=swcards>
       <div class=swcard>
-        <div class=name>inverter <small id=swgpio></small></div>
-        <div class=swrow>
+        <div class=name><span id=swname>switch</span> <small id=swgpio></small></div>
+        <div id=swnotcfg class="swinfo hidden">No output pin configured yet.
+          Set a GPIO under <b>configure</b>; nothing is driven until then.</div>
+        <div class=swrow id=swctl>
           <span id=swstate class=swstate>?</span>
           <button id=swon>turn on</button>
           <button id=swoff class=danger>turn off</button>
@@ -265,6 +273,24 @@ table#portmaps button.del:hover{background:#3b0a0a}
           </select></label>
         </div>
         <div id=swinfo class=swinfo></div>
+        <!-- Name and pin, stored on the device (NVS). A new pin applies at
+             once: the old pin is switched off and stays held off, the new
+             one starts off. -->
+        <details id=swcfg>
+          <summary>configure</summary>
+          <div class=swrow>
+            <label>name <input type=text id=swcfgname maxlength=24
+                               spellcheck=false autocomplete=off placeholder=inverter></label>
+          </div>
+          <div class=swrow>
+            <label>GPIO <input type=text id=swcfgpin maxlength=4 inputmode=numeric
+                               spellcheck=false autocomplete=off placeholder="none"></label>
+            <button id=swcfgsave>save</button>
+          </div>
+          <div class=swinfo>empty GPIO = no output. The device refuses
+            flash/PSRAM, console, USB and strapping pins and pins used by
+            another peripheral.</div>
+        </details>
       </div>
     </div>
   </section>
@@ -860,7 +886,8 @@ let g_natCap = null;
 let g_swCap = null;
 const SW_BTN = () => [document.getElementById('swon'),
                       document.getElementById('swoff'),
-                      document.getElementById('swboot')];
+                      document.getElementById('swboot'),
+                      document.getElementById('swcfgsave')];
 function renderSwitch(j, force) {
   const st = document.getElementById('swstate');
   st.textContent = j.on ? 'ON' : 'OFF';
@@ -869,10 +896,40 @@ function renderSwitch(j, force) {
   if (force || document.activeElement !== bs) bs.value = j.boot;
   const s = j.since_s, ago = s >= 3600 ? (s / 3600).toFixed(1) + ' h'
     : s >= 60 ? Math.round(s / 60) + ' min' : s + ' s';
-  document.getElementById('swgpio').textContent = `GPIO${j.gpio}`;
+  const cfg = j.gpio >= 0;
+  g_swState = j;
+  document.getElementById('swname').textContent = j.name || 'switch';
+  document.getElementById('swgpio').textContent = cfg ? `GPIO${j.gpio}` : '';
+  document.getElementById('swnotcfg').classList.toggle('hidden', cfg);
+  document.getElementById('swctl').classList.toggle('hidden', !cfg);
+  document.getElementById('swboot').closest('.swrow').classList.toggle('hidden', !cfg);
+  document.getElementById('swinfo').classList.toggle('hidden', !cfg);
+  document.getElementById('swcfg').open ||= !cfg;
   document.getElementById('swinfo').textContent =
     `since ${ago} · ${j.changes} changes since boot` +
     (j.running ? '' : ' — pin not allowed, output inactive');
+  // Don't clobber the config fields while the user edits them.
+  const nm = document.getElementById('swcfgname'), pn = document.getElementById('swcfgpin');
+  if (force || document.activeElement !== nm) nm.value = j.name || '';
+  if (force || document.activeElement !== pn) pn.value = cfg ? String(j.gpio) : '';
+}
+let g_swState = null;
+async function saveSwitchCfg() {
+  const name = document.getElementById('swcfgname').value.trim();
+  const pinTxt = document.getElementById('swcfgpin').value.trim();
+  if (pinTxt !== '' && !/^\d{1,2}$/.test(pinTxt)) { alert('GPIO: a number, or empty for none'); return; }
+  const pin = pinTxt === '' ? -1 : parseInt(pinTxt, 10);
+  const cur = g_swState || { gpio: -1, name: '' };
+  const q = [];
+  if (name !== (cur.name || '') && name !== '') q.push('name=' + encodeURIComponent(name));
+  if (pin !== cur.gpio) {
+    const what = pin < 0 ? 'disable the output' : `move the output to GPIO${pin}`;
+    const old = cur.gpio >= 0 ? ` GPIO${cur.gpio} is switched OFF now and stays off.` : '';
+    if (!confirm(`Save and ${what}?${old} The new pin starts OFF.`)) return;
+    q.push('gpio=' + (pin < 0 ? 'none' : pin));
+  }
+  if (!q.length) return;
+  await postSwitch(q.join('&'));
 }
 async function loadSwitch() {
   if (g_swCap !== true || g_tab !== 'switches') return;
@@ -1763,12 +1820,14 @@ function wireControls() {
   hn.onblur = hnSave;
   hn.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); hn.blur(); } };
 
+  const swLabel = () => (g_swState && g_swState.name) || 'switch output';
   document.getElementById('swon').onclick = () => {
-    if (confirm('Turn the switch output ON (inverter on)?')) postSwitch('on=1');
+    if (confirm(`Turn ${swLabel()} ON?`)) postSwitch('on=1');
   };
   document.getElementById('swoff').onclick = () => {
-    if (confirm('Turn the switch output OFF (inverter off)?')) postSwitch('on=0');
+    if (confirm(`Turn ${swLabel()} OFF?`)) postSwitch('on=0');
   };
+  document.getElementById('swcfgsave').onclick = saveSwitchCfg;
   document.getElementById('swboot').onchange = e => postSwitch('boot=' + e.target.value);
 
   document.getElementById('reboot').onclick = async () => {

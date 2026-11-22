@@ -1182,24 +1182,42 @@ rest:
 
 ## Switch output (`NBP_SWITCH_OUT`, `components/switch_out`)
 
-- **Build** (PSRAM unit): `idf.py -B build-psram-sw -DIDF_TARGET=esp32s3
-  -DSDKCONFIG=build-psram-sw/sdkconfig
+- **Built into every image since 2026-11-22** (`NBP_SWITCH_OUT` default y,
+  needs `NBP_WIFI`), so a device can run a stock release and keep its
+  switch. The pin is runtime config: NVS `switch`/`gpio` (i8, -1 = none),
+  else `CONFIG_NBP_SWITCH_GPIO` (default **-1**: release images touch no
+  pin until one is set). A build with a Kconfig pin writes it to NVS on the
+  first boot that finds no `gpio` key (migration), so a later stock image
+  keeps using it. `sdkconfig.defaults.switch` only presets GPIO14 for .231:
+  `idf.py -B build-psram-sw -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-psram-sw/sdkconfig
   -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.switch" build`.
-  Default n. Builds only so far, not hardware-tested.
-- GPIO14 (`NBP_SWITCH_GPIO`) drives an N-MOSFET gate across the EPEVER
-  IP3000 remote-switch contact: high = closed = inverter on. It feeds a
-  fridge, so the output must not glitch. Checked by `nbp_gpio::allowed()`
-  and claimed first (before the bridge and sensors); a disallowed pin is
-  left untouched (`running:false`, POST 500).
-- `GET /switch` → `{"gpio":14,"on":true,"boot":"last","changes":0,"since_s":12,"running":true}`
-  (`changes` since boot, `since_s` since the last change or boot).
-  `POST /switch?on=0|1` and/or `?boot=off|on|last` with `X-NBP-Confirm: yes`,
+  Running on .231 since 2026-11-18 (on/off, boot policy, held across OTA
+  reboots). Not yet run on hardware: a stock image picking the pin up from
+  NVS, and the live pin move/disable path.
+- On .231, GPIO14 drives an N-MOSFET gate across the EPEVER IP3000
+  remote-switch contact: high = closed = inverter on. It feeds a fridge,
+  so the output must not glitch. Checked by `nbp_gpio::allowed()` and
+  claimed first (before the bridge and sensors); a disallowed pin is left
+  untouched (`running:false`).
+- `GET /switch` → `{"gpio":14,"name":"inverter","on":true,"boot":"last","changes":0,"since_s":12,"running":true}`
+  (`changes` since boot, `since_s` since the last change or boot; `gpio`
+  -1 = not configured).
+  `POST /switch?on=0|1`, `?boot=off|on|last`, `?gpio=N|none`, `?name=TEXT`
+  (combinable) with `X-NBP-Confirm: yes`,
   **STA side only** (request on the STA address from the STA subnet, never
   from a SoftAP client; IPv6 peers refused; `getsockname`/`getpeername` on
   `httpd_req_to_sockfd`, IPv4-mapped on the dual-stack listener), else 403.
-  NVS namespace `switch` (`on`, `boot`, u8), written only when a value
-  differs from the stored one, before the pin changes. Default boot policy
-  `last`; no stored state = off. `/stats.json`: `sw_on`, `sw_changes`.
+  `gpio` is checked with `nbp_gpio::allowed(p, own pin)` (400 if refused)
+  and **applies at once**: the old pin is driven off and stays held off
+  (the safe level; nothing else drives it until power-off), the new pin
+  starts off and `on=0` is stored; `on=1` together with a new gpio is
+  refused. `name`: 1-24 printable ASCII after %XX/+ decoding, no `"` or
+  `\` (it goes into the JSON unescaped). on/boot without a working pin:
+  400. NVS namespace `switch` (`on`, `boot` u8, `gpio` i8, `name` str),
+  written only when a value differs, before the pin changes. Default boot
+  policy `last`; no stored state = off. `/stats.json`: `sw_on`,
+  `sw_changes`, `sw_cfg` (1 = pin active). Dashboard: Switches tab, name
+  and pin under "configure".
 - **Boot:** `switch_out::early_init()` right after `nvs_flash_init`, before
   WiFi: level into the output register, `gpio_config` (in+out, no pulls),
   `gpio_sleep_sel_dis` (startup isolates every pad in light sleep,

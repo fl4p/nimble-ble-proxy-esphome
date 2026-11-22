@@ -465,21 +465,27 @@ endif # NBP_ENV_SENSORS
 config NBP_SWITCH_OUT
     bool "Switched GPIO output (inverter remote on/off)"
     depends on NBP_WIFI
-    default n
+    default y
     help
         Drives one GPIO (e.g. a MOSFET across an inverter's remote-switch
         contact; high = closed = on) and holds the pad so the level
         survives software resets (esp_restart, OTA reboot, panic). Boot
         state off, on or last commanded (NVS). GET/POST /switch, writes
-        from the STA side only; sw_on/sw_changes in /stats.json.
-        Enabled by sdkconfig.defaults.switch.
+        from the STA side only; sw_on/sw_changes/sw_cfg in /stats.json.
+        Built into every image; the pin is set at runtime
+        (POST /switch?gpio=N, NVS "switch"/"gpio"), so no pin is touched
+        until one is configured.
 
 if NBP_SWITCH_OUT
 
 config NBP_SWITCH_GPIO
-    int "Switch output GPIO"
-    range 0 48
-    default 14
+    int "Switch output GPIO default (-1 = none)"
+    range -1 48
+    default -1
+    help
+        Pin used when NVS holds none. -1 (release images): not configured,
+        no pin is touched. A build with a pin here writes it to NVS on first
+        boot, so a later image with -1 keeps using it.
 
 endif # NBP_SWITCH_OUT
 
