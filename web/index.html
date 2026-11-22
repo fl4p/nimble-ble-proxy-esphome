@@ -103,6 +103,10 @@ code{color:#bbb}
 .tgroup{display:flex;flex-wrap:wrap;gap:.5em 1em;align-items:center;
   padding:.4em 0;border-top:1px solid #222}
 .tgroup:first-child{border-top:none;padding-top:0}
+/* a full-width sub-line inside a group, indented past the group label */
+.tgroup .tline{flex-basis:100%;display:flex;flex-wrap:wrap;align-items:center;
+  gap:.3em 1em;padding-left:calc(3.2em * .78 + 1em)}
+.tgroup .caveat{color:#fca5a5;font-size:.78em}
 .tgroup .glabel{color:#3b82f6;font-size:.78em;text-transform:uppercase;
   letter-spacing:.08em;min-width:3.2em;font-weight:600}
 #controls label,#tunables label{color:#aaa;
@@ -280,9 +284,17 @@ table#portmaps button.del:hover{background:#3b0a0a}
         <option value=80>80</option><option value=160>160</option>
         <option value=240>240</option>
       </select> MHz</label>
-      <label title="Powers the CPU down between bursts. Leave OFF unless deliberately testing thermals."><input type=checkbox id=ls> light sleep</label>
-      <label title="Only matters when light sleep is ON. OFF = keep CPU powered during light sleep (coast/clock-gate only) — cooler yet stable. ON = full CPU power-down (max savings, can hang)."><input type=checkbox id=pdcpu> power-down CPU</label>
-      <small style="color:#fca5a5;font-size:.78em">can hang device — leave off</small>
+      <!-- Each on its own line with its caveat: BLE blocks light sleep, so
+           neither saves anything on a BLE build (docs/thermal-notes.md), and
+           light sleep with CPU power-down hung the device (2026-05-28). -->
+      <div class=tline>
+        <label title="Lets the SoC sleep between bursts. Leave OFF unless deliberately testing thermals."><input type=checkbox id=ls> light sleep</label>
+        <small class=caveat>no effect while BLE is on; can hang the device</small>
+      </div>
+      <div class=tline>
+        <label title="Only matters when light sleep is ON. OFF = keep CPU powered during light sleep (clock-gate only). ON = full CPU power-down (can hang)."><input type=checkbox id=pdcpu> power-down CPU</label>
+        <small class=caveat>only acts during light sleep; can hang the device</small>
+      </div>
     </div>
 
     <div class=tgroup>
