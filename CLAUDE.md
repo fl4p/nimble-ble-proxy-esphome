@@ -1261,3 +1261,90 @@ rest:
   before, A got 5 notifies in 120 s; after, 2240/2246 sent, no sequence
   gap, repeat GetServices 20–400 ms. A Service Changed indication is not
   handled (the cache is not invalidated by it).
+
+## App image signing (OTA accepts only images signed with the running key)
+
+- **What is on** (`sdkconfig.defaults`, S3/C3/C6): `SECURE_SIGNED_APPS_NO_SECURE_BOOT`
+  + `SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`, RSA scheme (Secure Boot V2 block,
+  RSA-3072 PSS), `SECURE_BOOT_BUILD_SIGNED_BINARIES=n`. No secure boot, no
+  flash encryption, no eFuse is written. Release checklist, key handling,
+  recovery and rotation: `docs/signing.md`.
+- **Where it is checked:** only in the running app. `esp_ota_end()` →
+  `ota_verify_partition` → `esp_image_verify` (IDF 6.0.3
+  `app_update/esp_ota_ops.c:554-566,593-626`); `esp_ota_set_boot_partition`
+  re-validates (`:790-797`). The app build gets `SECURE_BOOT_CHECK_SIGNATURE=1`
+  from `SECURE_SIGNED_ON_UPDATE`, the bootloader build does not
+  (`bootloader_support/src/esp_image_format.c:36-48`); bootloader-side checking
+  without secure boot exists only for the V1/ECDSA scheme
+  (`bootloader/Kconfig.projbuild:619-629`). Verification itself is PSA RSA-PSS
+  (`secure_boot_v2/secure_boot_rsa_signature.c:88-189`).
+- **The trusted key is the running image's own signature block 0** — not
+  eFuse, not a compiled-in key: `get_secure_boot_key_digests` takes the
+  digests from the running app when secure boot is off
+  (`secure_boot_v2/secure_boot_signatures_app.c:154-160`), and with
+  `SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` only index 0 is compared on both
+  sides (`:233-237`, loop `:239-283`). Consequences: (1) a dev-signed device
+  accepts only dev-signed images and a release device only release-signed
+  ones; switching keys = USB flash; (2) **key rotation over OTA is
+  impossible**, it is a USB reflash of every device; (3) **a running image
+  without a valid signature has no trusted key and refuses every OTA**
+  (`no_trusted_key`) until a USB flash.
+- **Field transition:** firmware up to 0.2.8 has no check, so it accepts the
+  next image signed or not (and the extra signature sector is ignored). A
+  pre-signing bootloader boots a signed image: it verifies only the appended
+  SHA-256 (`esp_image_format.c:236-241`), the 4 KiB signature sector sits past
+  the image length (`:1034-1055` only in signing builds), and `--secure-pad-v2`
+  padding is a segment inside the image. QEMU 2026-11-22: the baseline
+  bootloader (main 3dd7a29) booted the release-style signed S3 app. So: give
+  field devices the **signed** release first; if they get the unsigned CI
+  image they lock themselves out of OTA. App OTA cannot replace the
+  bootloader, and nothing here needs it to.
+- **USB:** `idf.py flash`/esptool check nothing about signatures and the
+  bootloader does not either, so USB flashing is always the escape hatch.
+  Secure boot would add a bootloader-checked chain and refuse unsigned USB
+  images; flash encryption would stop reading/patching flash. Both burn
+  eFuses irreversibly and a lost key bricks the board: out of scope.
+- **Classic ESP32: off** (`sdkconfig.defaults.esp32`). Its RSA scheme needs chip
+  rev >= 3 (`Kconfig.projbuild:470-474`; `ets_rsa_pss_verify` is only in
+  `esp32.rom.eco3.ld`), and V1/ECDSA would need a second key and a build-time
+  embedded public key. The release script skips `esp32` assets.
+- **Local builds are signed with the dev key** by the root `CMakeLists.txt`
+  (`scripts/nbp_sign.py build-sign`, after IDF's `.bin` step):
+  `build/nimble_ble_proxy.bin` is signed in place, the unsigned image stays as
+  `nimble_ble_proxy-unsigned.bin`. Key: `-DNBP_SIGNING_KEY=` / env
+  `NBP_SIGNING_KEY` / `~/.config/nbp-signing/dev-key.pem`; `none` or a missing
+  key builds UNSIGNED with a CMake warning. The release key is refused there.
+  IDF still prints "App built but not signed" (its own build-time signing is
+  off); the next line says it was signed. ~2 s per relink. `idf.py flash` and
+  the OTA curl in "OTA over a loaded device" work unchanged on a dev-key
+  device; the first dev-signed OTA onto an unsigned-era device is accepted.
+- **Device side** (`components/ota/ota_sig.cpp`): `GET /update` →
+  `{"sig_check","scheme","running","running_signed","key_sha256","rejects","last_reject","last_reject_key"}`;
+  `key_sha256` equals `scripts/nbp_sign.py fingerprint <pem>`. A failed
+  `esp_ota_end` answers 403 (`unsigned`, `untrusted_key`, `bad_signature`,
+  `no_trusted_key`) or 400 (`corrupt`, `not_an_image`) with header
+  `X-OTA-Refused`, logs `OTA REFUSED: …` (image key vs trusted key), never
+  switches the boot partition, and erases the target slot's first sector
+  (the bootloader checks no signature, so a fallback must not boot it). The
+  classification only explains IDF's verdict; it cannot turn a failure into a
+  success. It returns ESP_OK after the 4xx: with ESP_FAIL http_guard's
+  abortive close ate the body. `sig::init` runs on the httpd task (queued by
+  `ota::start`): IDF's running-app signature read needs ~2 KiB of stack and
+  overflowed the 3.5 KiB main task into the heap (QEMU, pm-lock deadlock).
+- **QEMU test:** `idf.py -B build-qemu-sig -DIDF_TARGET=esp32s3
+  -DSDKCONFIG=build-qemu-sig/sdkconfig -DNBP_SIG_SELFTEST=1 build`, then
+  `… qemu` (needs the dev key; QEMU must not be a background job reading the
+  tty, or it stops on SIGTTIN: redirect stdin or use `-serial file:`). Test
+  vectors from `nbp_sign.py selftest-blob` go to the last 8 KiB of the
+  coredump partition (0x3FE000). Prints `SIG-SELFTEST <step>: PASS|FAIL`:
+  fingerprint, unsigned / wrong key / tampered (one byte of the app
+  description flipped, checksum and SHA-256 fixed up) → 403, boot partition
+  unchanged, slot header erased; signed → 200, boots from ota_1, same key.
+  Known-bad: add `sdkconfig.defaults.sigtest-nocheck` (own build dir); the
+  three refusals and the counter FAIL.
+- **Release flow:** CI stays unsigned. `scripts/release_sign.py sign <tag>`
+  (dry run; `--upload` asks for the tag, then `gh release upload --clobber`)
+  signs `*-ota.bin` with the Keychain key, rebuilds `*-flash.bin` after
+  checking the CI parts reproduce the CI merged image, verifies with
+  espsecure against `keys/release.pub.pem` and the fingerprint pinned in
+  `scripts/nbp_sign.py`. Never run it against a real release from an agent.
