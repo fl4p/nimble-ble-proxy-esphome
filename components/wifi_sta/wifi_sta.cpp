@@ -34,6 +34,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace wifi_sta {
@@ -42,6 +43,11 @@ namespace {
 
 constexpr const char *TAG = "wifi";
 constexpr int BIT_GOT_IP = BIT0;
+#if CONFIG_NBP_IMPROV
+constexpr int BIT_REQ_JOIN = BIT1;
+constexpr int BIT_REQ_SCAN = BIT2;
+constexpr int BIT_STA_DISC = BIT3;  // STA disconnect while provisioning
+#endif
 
 // Live STA connectivity, tracked off the WiFi/IP events. Distinct from
 // BIT_GOT_IP (which latches once at first IP for the boot wait and is
@@ -72,6 +78,9 @@ constexpr const char *NVS_WIFI_SSID = "ssid";
 constexpr const char *NVS_WIFI_PSK = "psk";
 
 EventGroupHandle_t g_events = nullptr;
+#if CONFIG_NBP_IMPROV
+esp_netif_t *g_sta_netif = nullptr;
+#endif
 
 // ──────────────────── disconnect bookkeeping ─────────────────────
 // Why the STA dropped off the upstream AP, and why SoftAP clients left.
@@ -344,7 +353,12 @@ void on_wifi_event(void * /*arg*/, esp_event_base_t base, int32_t id,
     if (!prov) esp_wifi_connect();
   } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
     g_sta_connected.store(false, std::memory_order_relaxed);
-    if (prov) return;  // provisioning loop owns the retry cadence
+    if (prov) {  // provisioning loop owns the retry cadence
+#if CONFIG_NBP_IMPROV
+      xEventGroupSetBits(g_events, BIT_STA_DISC);
+#endif
+      return;
+    }
     on_sta_disconnected(static_cast<wifi_event_sta_disconnected_t *>(data));
     esp_wifi_connect();
   } else if (id == WIFI_EVENT_AP_STADISCONNECTED) {
@@ -474,6 +488,144 @@ bool form_get(const char *src, const char *key, char *out, size_t cap) {
   return false;
 }
 
+bool psk_valid(const char *psk, size_t len) {
+  return len == 0 || (len >= 8 && len < 64) || (len == 64 && is_hex_string(psk));
+}
+
+bool save_creds(const char *ssid, const char *psk) {
+  nvs_handle_t h;
+  if (nvs_open(NVS_WIFI_NS, NVS_READWRITE, &h) != ESP_OK) return false;
+  bool ok = nvs_set_str(h, NVS_WIFI_SSID, ssid) == ESP_OK &&
+            nvs_set_str(h, NVS_WIFI_PSK, psk) == ESP_OK &&
+            nvs_commit(h) == ESP_OK;
+  nvs_close(h);
+  return ok;
+}
+
+#if CONFIG_NBP_IMPROV
+// Improv requests, handed from the NimBLE host task to the provisioning
+// loop. g_req_busy is the single in-flight slot; g_prov_closed ends the
+// window for good (device online or about to reboot).
+const ProvisioningHooks *g_hooks = nullptr;
+std::atomic<bool> g_req_busy{false};
+std::atomic<bool> g_prov_closed{false};
+// Heap, allocated on entering provisioning; null means no requests.
+struct JoinReq {
+  char ssid[33];
+  char psk[65];
+};
+JoinReq *g_req = nullptr;
+constexpr uint32_t JOIN_TIMEOUT_MS = 30000;
+constexpr int JOIN_MAX_FAILS = 3;
+constexpr uint16_t SCAN_MAX_APS = 20;
+
+// Joins the requested network as STA. Success saves the credentials and
+// reboots; failure restores the previous STA config and mode.
+void do_join() {
+  wifi_mode_t mode = WIFI_MODE_AP;
+  esp_wifi_get_mode(&mode);
+  wifi_config_t saved = {};
+  esp_wifi_get_config(WIFI_IF_STA, &saved);
+  if (mode == WIFI_MODE_AP) esp_wifi_set_mode(WIFI_MODE_APSTA);
+  esp_wifi_disconnect();
+
+  wifi_config_t wc = {};
+  std::memcpy(wc.sta.ssid, g_req->ssid, std::strlen(g_req->ssid));
+  std::memcpy(wc.sta.password, g_req->psk, std::strlen(g_req->psk));
+  wc.sta.threshold.authmode =
+      g_req->psk[0] == '\0' ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+  esp_wifi_set_config(WIFI_IF_STA, &wc);
+  xEventGroupClearBits(g_events, BIT_GOT_IP | BIT_STA_DISC);
+  ESP_LOGW(AP_TAG, "BLE provisioning: joining '%s'", g_req->ssid);
+  // Right after AP -> APSTA the STA interface may not be up yet.
+  for (int i = 0; i < 5 && esp_wifi_connect() != ESP_OK; ++i) {
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+
+  const TickType_t start = xTaskGetTickCount();
+  const TickType_t limit = pdMS_TO_TICKS(JOIN_TIMEOUT_MS);
+  int fails = 0;
+  bool ok = false;
+  while (!ok && fails < JOIN_MAX_FAILS) {
+    const TickType_t spent = xTaskGetTickCount() - start;
+    if (spent >= limit) break;
+    EventBits_t bits = xEventGroupWaitBits(
+        g_events, BIT_GOT_IP | BIT_STA_DISC, pdTRUE, pdFALSE, limit - spent);
+    if (bits & BIT_GOT_IP) {
+      // A stale event of an earlier association must not count.
+      wifi_ap_record_t ap = {};
+      ok = esp_wifi_sta_get_ap_info(&ap) == ESP_OK &&
+           std::strncmp(reinterpret_cast<const char *>(ap.ssid), g_req->ssid,
+                        sizeof(ap.ssid)) == 0;
+    } else if (bits & BIT_STA_DISC) {
+      if (++fails < JOIN_MAX_FAILS) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_wifi_connect();
+      }
+    }
+  }
+
+  if (ok) {
+    g_prov_closed.store(true);
+    char url[32] = "";
+    esp_netif_ip_info_t ip = {};
+    if (g_sta_netif && esp_netif_get_ip_info(g_sta_netif, &ip) == ESP_OK) {
+      std::snprintf(url, sizeof(url), "http://" IPSTR "/", IP2STR(&ip.ip));
+    }
+    const bool saved_ok = save_creds(g_req->ssid, g_req->psk);
+    ESP_LOGW(AP_TAG, "BLE provisioning: joined '%s' (%s)%s; rebooting",
+             g_req->ssid, url, saved_ok ? "" : ", NVS save FAILED");
+    std::memset(g_req->psk, 0, sizeof(g_req->psk));
+    if (g_hooks && g_hooks->join_done) g_hooks->join_done(saved_ok, url);
+    // Let the result and state notifications reach the client first.
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    if (saved_ok) g_recovered_magic = RECOVERED_MAGIC;
+    esp_restart();
+  }
+
+  ESP_LOGW(AP_TAG, "BLE provisioning: could not join '%s' (%d failures)",
+           g_req->ssid, fails);
+  std::memset(g_req->psk, 0, sizeof(g_req->psk));
+  esp_wifi_disconnect();
+  esp_wifi_set_config(WIFI_IF_STA, &saved);
+  if (mode == WIFI_MODE_AP) esp_wifi_set_mode(WIFI_MODE_AP);
+  xEventGroupClearBits(g_events, BIT_GOT_IP | BIT_STA_DISC);
+  g_req_busy.store(false);
+  if (g_hooks && g_hooks->join_done) g_hooks->join_done(false, "");
+}
+
+void do_scan() {
+  wifi_mode_t mode = WIFI_MODE_AP;
+  esp_wifi_get_mode(&mode);
+  if (mode == WIFI_MODE_AP) esp_wifi_set_mode(WIFI_MODE_APSTA);
+  wifi_scan_config_t sc = {};
+  esp_err_t err = esp_wifi_scan_start(&sc, true);
+  if (err == ESP_ERR_WIFI_STATE) {
+    // A saved-network retry is still connecting; the next one is due in
+    // AP_STA_RETRY_SECS anyway.
+    esp_wifi_disconnect();
+    err = esp_wifi_scan_start(&sc, true);
+  }
+  uint16_t n = SCAN_MAX_APS;
+  auto *aps = static_cast<wifi_ap_record_t *>(
+      calloc(SCAN_MAX_APS, sizeof(wifi_ap_record_t)));
+  if (err == ESP_OK && aps) {
+    err = esp_wifi_scan_get_ap_records(&n, aps);
+  } else {
+    esp_wifi_clear_ap_list();
+    if (err == ESP_OK) err = ESP_ERR_NO_MEM;
+  }
+  if (err != ESP_OK) {
+    n = 0;
+    ESP_LOGW(AP_TAG, "BLE provisioning: scan failed: %s", esp_err_to_name(err));
+  }
+  if (mode == WIFI_MODE_AP) esp_wifi_set_mode(WIFI_MODE_AP);
+  g_req_busy.store(false);
+  if (g_hooks && g_hooks->scan_done) g_hooks->scan_done(err == ESP_OK, aps, n);
+  free(aps);
+}
+#endif  // CONFIG_NBP_IMPROV
+
 esp_err_t ap_root_get(httpd_req_t *req) {
   httpd_resp_set_type(req, "text/html; charset=utf-8");
   return httpd_resp_send(req, AP_PAGE_HTML, HTTPD_RESP_USE_STRLEN);
@@ -503,22 +655,31 @@ esp_err_t ap_wifi_post(httpd_req_t *req) {
     return ESP_FAIL;
   }
   form_get(buf, "psk", psk, sizeof(psk));  // may be empty (open AP)
-  size_t psk_len = std::strlen(psk);
-  if ((psk_len > 0 && psk_len < 8) || psk_len > 64 ||
-      (psk_len == 64 && !is_hex_string(psk))) {
+  if (!psk_valid(psk, std::strlen(psk))) {
     httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid password");
     return ESP_FAIL;
   }
 
-  nvs_handle_t h;
-  if (nvs_open(NVS_WIFI_NS, NVS_READWRITE, &h) != ESP_OK) {
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "nvs open");
+#if CONFIG_NBP_IMPROV
+  // One owner of the stored credentials at a time: a BLE join in flight
+  // saves its own on success.
+  bool idle = false;
+  if (g_prov_closed.load() ||
+      !g_req_busy.compare_exchange_strong(idle, true)) {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                        "BLE provisioning in progress, retry in 30 s");
     return ESP_FAIL;
   }
-  nvs_set_str(h, NVS_WIFI_SSID, ssid);
-  nvs_set_str(h, NVS_WIFI_PSK, psk);
-  nvs_commit(h);
-  nvs_close(h);
+  g_prov_closed.store(true);
+#endif
+  if (!save_creds(ssid, psk)) {
+#if CONFIG_NBP_IMPROV
+    g_prov_closed.store(false);
+    g_req_busy.store(false);
+#endif
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "nvs write");
+    return ESP_FAIL;
+  }
 
   ESP_LOGI(AP_TAG, "creds saved (ssid='%s', psk len=%u); rebooting",
            ssid, static_cast<unsigned>(std::strlen(psk)));
@@ -598,6 +759,44 @@ void compose_ap_ssid(char *out, size_t cap) {
   ESP_LOGW(AP_TAG, "SoftAP up: SSID='%s' (open) — http://192.168.4.1/",
            ssid);
 
+#if CONFIG_NBP_IMPROV
+  if (g_hooks) g_req = static_cast<JoinReq *>(calloc(1, sizeof(JoinReq)));
+  if (g_req && g_hooks->entered) g_hooks->entered();
+  // Join and scan requests run here, so nothing else drives the radio
+  // meanwhile. The saved-network retry keeps its own cadence.
+  const TickType_t period = pdMS_TO_TICKS(AP_STA_RETRY_SECS * 1000);
+  TickType_t last_retry = xTaskGetTickCount();
+  uint32_t skips = 0;
+  while (true) {
+    TickType_t wait = portMAX_DELAY;
+    if (retry_sta) {
+      const TickType_t spent = xTaskGetTickCount() - last_retry;
+      wait = spent >= period ? 0 : period - spent;
+    }
+    EventBits_t bits = xEventGroupWaitBits(
+        g_events, BIT_GOT_IP | BIT_REQ_JOIN | BIT_REQ_SCAN, pdFALSE, pdFALSE,
+        wait);
+    if (bits & BIT_GOT_IP) {
+      g_prov_closed.store(true);
+      ESP_LOGW(AP_TAG, "saved network is back; rebooting into STA mode");
+      g_recovered_magic = RECOVERED_MAGIC;
+      vTaskDelay(pdMS_TO_TICKS(200));
+      esp_restart();
+    }
+    if (bits & BIT_REQ_JOIN) {
+      xEventGroupClearBits(g_events, BIT_REQ_JOIN);
+      do_join();  // reboots on success
+      last_retry = xTaskGetTickCount();
+      continue;
+    }
+    if (bits & BIT_REQ_SCAN) {
+      xEventGroupClearBits(g_events, BIT_REQ_SCAN);
+      do_scan();
+      continue;
+    }
+    if (!retry_sta || xTaskGetTickCount() - last_retry < period) continue;
+    last_retry = xTaskGetTickCount();
+#else
   if (!retry_sta) {
     // Block forever; ap_wifi_post reboots the device on success.
     while (true) vTaskDelay(portMAX_DELAY);
@@ -614,6 +813,7 @@ void compose_ap_ssid(char *out, size_t cap) {
       vTaskDelay(pdMS_TO_TICKS(200));
       esp_restart();
     }
+#endif
     wifi_sta_list_t stas = {};
     if (esp_wifi_ap_get_sta_list(&stas) == ESP_OK && stas.num > 0 &&
         ++skips < AP_STA_MAX_SKIPS) {
@@ -644,6 +844,9 @@ void start_and_wait_for_ip() {
   ESP_ERROR_CHECK(esp_netif_init());
   esp_netif_t *netif = esp_netif_create_default_wifi_sta();
   esp_netif_set_hostname(netif, proxy::hostname());
+#if CONFIG_NBP_IMPROV
+  g_sta_netif = netif;
+#endif
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -751,5 +954,48 @@ void register_endpoints(void *httpd_handle) {
                    .user_ctx = nullptr};
   httpd_register_uri_handler(static_cast<httpd_handle_t>(httpd_handle), &g);
 }
+
+#if CONFIG_NBP_IMPROV
+void set_provisioning_hooks(const ProvisioningHooks *hooks) { g_hooks = hooks; }
+
+Request request_join(const char *ssid, size_t ssid_len, const char *psk,
+                     size_t psk_len) {
+  if (ssid_len == 0 || ssid_len > 32 || std::memchr(ssid, 0, ssid_len) ||
+      psk_len > 64 || std::memchr(psk, 0, psk_len)) {
+    return Request::Invalid;
+  }
+  char tmp[65];
+  std::memcpy(tmp, psk, psk_len);
+  tmp[psk_len] = '\0';
+  const bool valid = psk_valid(tmp, psk_len);
+  std::memset(tmp, 0, sizeof(tmp));
+  if (!valid) return Request::Invalid;
+  if (!g_req || !g_provisioning.load() || g_prov_closed.load()) {
+    return Request::Closed;
+  }
+  bool idle = false;
+  if (!g_req_busy.compare_exchange_strong(idle, true)) return Request::Busy;
+  if (g_prov_closed.load()) {  // the form or the saved network won the race
+    g_req_busy.store(false);
+    return Request::Closed;
+  }
+  std::memcpy(g_req->ssid, ssid, ssid_len);
+  g_req->ssid[ssid_len] = '\0';
+  std::memcpy(g_req->psk, psk, psk_len);
+  g_req->psk[psk_len] = '\0';
+  xEventGroupSetBits(g_events, BIT_REQ_JOIN);
+  return Request::Queued;
+}
+
+Request request_scan() {
+  if (!g_req || !g_provisioning.load() || g_prov_closed.load()) {
+    return Request::Closed;
+  }
+  bool idle = false;
+  if (!g_req_busy.compare_exchange_strong(idle, true)) return Request::Busy;
+  xEventGroupSetBits(g_events, BIT_REQ_SCAN);
+  return Request::Queued;
+}
+#endif
 
 }  // namespace wifi_sta

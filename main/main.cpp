@@ -42,6 +42,10 @@
 #include "ble_httpd.h"
 #endif
 
+#if CONFIG_NBP_IMPROV
+#include "improv_ble.h"
+#endif
+
 #if CONFIG_NBP_WS_PROXY
 #include "ws_proxy.h"
 #endif
@@ -235,6 +239,10 @@ extern "C" void app_main() {
   // dashboard GET reflects the saved value. wifi_sta itself reads the
   // same NVS key independently when stamping wifi_config_t.
   api_server::stats::apply_wifi_ps_from_nvs();
+#if CONFIG_NBP_IMPROV
+  // Improv over BLE next to the SoftAP form, only while provisioning.
+  wifi_sta::set_provisioning_hooks(improv_ble::hooks());
+#endif
   wifi_sta::start_and_wait_for_ip();
   mdns_announce::start();
   ota::start();

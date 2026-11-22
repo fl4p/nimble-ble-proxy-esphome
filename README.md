@@ -121,6 +121,32 @@ row of the devices table. Both lists are capped at
 the fix when a peer has been factory-reset and starts rejecting the
 proxy's encrypted reconnects.
 
+## WiFi setup over BLE (Improv)
+
+With `CONFIG_NBP_IMPROV` (default on), the provisioning mode of
+`CONFIG_NBP_AP_FALLBACK` also advertises the
+[Improv Wi-Fi](https://www.improv-wifi.com/ble/) BLE service. Provisioning
+mode starts when no credentials are stored, or when the saved network gives
+no IP within `CONFIG_NBP_AP_FALLBACK_SECS` at boot. Then either:
+
+- open https://www.improv-wifi.com/ in Chrome (desktop or Android), start
+  the BLE setup and pick the device by its hostname, or
+- let Home Assistant find it: the `improv_ble` integration offers it under
+  **Settings → Devices & services → Discovered**.
+
+The phone sends SSID and password, the device joins while the phone stays
+connected, reports success with `http://<ip>/` as the next page, stores the
+credentials where the setup form does (NVS namespace `wifi`) and reboots
+into normal mode. A wrong password ends in "unable to connect" and the
+device stays in provisioning mode.
+
+Improv is unauthenticated and the credentials cross the air unencrypted,
+the same exposure as the open setup AP: anyone in range while the device is
+offline can point it at a network. Once the device is online, or after a
+reboot into normal mode, the service and its advertisement are gone. To
+test from a Mac: `scripts/improv_provision.py` (uses py-improv-ble-client,
+the library behind Home Assistant's integration).
+
 ## Architecture
 
 ```
@@ -139,6 +165,8 @@ components/
 ├── ble_httpd/             optional (CONFIG_NBP_BLE_HTTPD) — GATT request/
 │                          response service that routes the same dashboard
 │                          endpoints over Web Bluetooth
+├── improv_ble/            optional (CONFIG_NBP_IMPROV) — Improv Wi-Fi BLE
+│                          service, only during SoftAP provisioning
 ├── mdns_announce/         _esphomelib._tcp registration
 ├── ota/                   HTTP POST /update via esp_ota_*; owns the shared
 │                          httpd that the dashboard piggybacks on
@@ -167,6 +195,7 @@ These Kconfig switches under `nimble-ble-proxy` choose what gets compiled in:
 | `CONFIG_NBP_WIFI`          | `y`     | STA + mDNS + dashboard httpd + aioesphomeapi server + embedded dashboard HTML                                                                                                                                                                                                                                                                                                   |
 | `CONFIG_NBP_OTA`           | `y`     | `POST /update` HTTP OTA endpoint. Turn off for a lockdown build where firmware updates require serial.                                                                                                                                                                                                                                                                          |
 | `CONFIG_NBP_AP_FALLBACK`   | `n`     | When STA can't associate within `CONFIG_NBP_AP_FALLBACK_SECS`, fall back to a SoftAP at `<hostname>-setup` (192.168.4.1) with a one-page form that POSTs credentials to NVS and reboots. Replaces edit-`wifi_creds.h`-and-reflash for first-time setup.                                                                                                                         |
+| `CONFIG_NBP_IMPROV`        | `y`     | Needs `NBP_AP_FALLBACK` and `NBP_BLE`. While the setup AP is up, also offer [Improv Wi-Fi over BLE](https://www.improv-wifi.com/ble/), so a phone can send credentials without joining the AP; see [WiFi setup over BLE](#wifi-setup-over-ble-improv). Inactive outside provisioning; costs 12 KB flash (16.5 KB on C3) and under 100 B static RAM.                             |
 | `CONFIG_NBP_NAT_ROUTER`    | `n`     | SoftAP + NAPT out the STA uplink, with `/nat` (status + AP creds) and `/portmap` (inbound forwards). `/nat` also lists connected clients — MAC, leased IP, RSSI, and DHCP hostname (captured via a custom lwIP hook; see `components/dhcps_hostname`). Shown in the dashboard NAT panel.                                                                                        |
 | `CONFIG_NBP_BLE_HTTPD`     | `n`     | GATT request/response service (Web Bluetooth dashboard)                                                                                                                                                                                                                                                                                                                         |
 | `CONFIG_NBP_CLONE`         | `n`     | Clone supervisor, upstream client, local GATT mirror, `/clone` endpoint                                                                                                                                                                                                                                                                                                         |

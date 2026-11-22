@@ -535,6 +535,30 @@ config NBP_BLE_HTTPD
         one of them gets advertised at a time. A real coordination
         layer can be added later.
 
+config NBP_IMPROV
+    bool "Improv Wi-Fi over BLE in the provisioning window"
+    depends on NBP_AP_FALLBACK
+    default y
+    help
+        While the device sits in SoftAP provisioning (NBP_AP_FALLBACK:
+        no credentials, or the saved network unreachable at boot), also
+        start NimBLE with the Improv Wi-Fi BLE service
+        (https://www.improv-wifi.com/ble/), so a phone can send
+        credentials from https://www.improv-wifi.com/ in Chrome or from
+        Home Assistant's improv_ble discovery. The device joins the
+        network while the phone stays connected, reports the result
+        (with http://<ip>/ as the next URL), saves the credentials where
+        the SoftAP form does and reboots into normal mode.
+
+        Nothing of it runs outside the provisioning window: in normal
+        operation no Improv service, advert, task or heap exists, so the
+        proxy and NAT router see no difference. Cost (IDF 6.0.3): 12 KB
+        flash on esp32/esp32s3, 16.5 KB on esp32c3, under 100 B static
+        RAM. Like the open setup AP it is
+        unauthenticated and the credentials cross the air in clear text;
+        anyone in range while the device is offline can provision it.
+        Supported RPCs: Wi-Fi settings, device info, scan.
+
 config NBP_BLE_AUTO_OFF
     bool "Auto-quiesce the BLE radio when nothing needs it"
     default n

@@ -1,0 +1,10 @@
+## NimBLE-CPP, same dependency line as ble_backend so the component manager
+## resolves one version. Gated on NBP_BLE (not BT_NIMBLE_ENABLED, which
+## vanishes from Kconfig when BT is off); NBP_IMPROV requires NBP_BLE.
+dependencies:
+  h2zero/esp-nimble-cpp:
+    version: "^2.5.0"
+    rules:
+      - if: "$CONFIG{NBP_BLE} == True"
+  idf:
+    version: ">=5.1"

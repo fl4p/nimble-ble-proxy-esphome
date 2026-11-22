@@ -6,8 +6,41 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+
+#include "sdkconfig.h"
+
+#if CONFIG_NBP_IMPROV
+#include "esp_wifi_types.h"
+#endif
 
 namespace wifi_sta {
+
+#if CONFIG_NBP_IMPROV
+// A second provisioning transport (Improv over BLE) next to the SoftAP form.
+// It exists only inside the provisioning window: the hooks fire from the
+// provisioning loop, which stays the only code that touches the radio.
+// request_join()/request_scan() only queue work for that loop.
+struct ProvisioningHooks {
+  void (*entered)();  // provisioning mode is up (SoftAP running)
+  // Outcome of request_join(). On success `url` is "http://<ip>/" and the
+  // device reboots into normal mode about 2 s later.
+  void (*join_done)(bool ok, const char *url);
+  // Outcome of request_scan(); records strongest first, valid during the call.
+  void (*scan_done)(bool ok, const wifi_ap_record_t *aps, uint16_t n);
+};
+void set_provisioning_hooks(const ProvisioningHooks *hooks);
+
+enum class Request : uint8_t {
+  Queued,
+  Invalid,  // SSID/password can never work (length, NUL byte)
+  Busy,     // another join or scan is in flight
+  Closed,   // not in the provisioning window, or it is ending
+};
+Request request_join(const char *ssid, size_t ssid_len, const char *psk,
+                     size_t psk_len);
+Request request_scan();
+#endif
 
 void start_and_wait_for_ip();
 

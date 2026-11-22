@@ -9,6 +9,7 @@ idf_component_register(
         api_server
         ble_clone
         ble_httpd
+        improv_ble
         ws_proxy
         nat_router
         dhcps_hostname

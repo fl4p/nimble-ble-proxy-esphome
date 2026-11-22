@@ -211,6 +211,30 @@
   absent in a BLE-free build, so the dashboard's device table + BLE
   controls 404/empty. Not yet gated client-side.
 
+## Improv Wi-Fi over BLE (`NBP_IMPROV`, `components/improv_ble`)
+
+- **Lives only in the AP provisioning window.** `wifi_sta::enter_ap_provisioning`
+  blocks `app_main` before `ble_backend::start()`, so the `entered` hook inits
+  NimBLE itself with just the Improv service. Nothing is allocated, advertised
+  or started in normal mode (static cost < 100 B; flash 12 KB, 16.5 KB on C3,
+  measured IDF 6.0.3 vs main 3dd7a29 with the same `dependencies.lock`).
+  Every exit is a reboot, so there is no teardown path.
+- **One radio owner: the provisioning loop.** The GATT write callback only
+  queues (`wifi_sta::request_join` / `request_scan`, one in-flight slot
+  `g_req_busy`); the loop runs the join or scan between its saved-network
+  retries. The SoftAP form takes the same slot, so a form submit and a BLE
+  join cannot race; `g_prov_closed` refuses both once the saved network is
+  back or a join succeeded. A BLE join switches AP to APSTA and restores the
+  previous STA config and mode when it fails.
+- **Results never exceed one notification on the requester's MTU** (clients
+  parse the notification as is). A device-info that does not fit answers
+  `ERR_UNKNOWN`; scan results keep whole triples; a URL that does not fit is
+  dropped. The device also starts an MTU exchange on connect.
+- **Tests:** `components/improv_ble/host_test/test_improv_proto.cpp`
+  (assembler incl. the 2026-09-17 Codex review's continuation and staleness
+  cases) and `scripts/test_improv_client.py` (cross-check against
+  py-improv-ble-client). On a device: `scripts/improv_provision.py`.
+
 ## DHCP client hostnames (NAT/SoftAP) — captured via a custom lwIP hook
 
 - `/nat` lists connected SoftAP clients with MAC, leased IP, RSSI, and
