@@ -73,6 +73,8 @@ namespace {
 
 constexpr const char *TAG = "crash";
 
+size_t (*g_ota_json)(char *, size_t) = nullptr;  // set_ota_json_provider()
+
 constexpr int kFrames = 16;  // backtrace entries kept per panic
 constexpr int kSlots = 3;    // most recent panics kept
 
@@ -675,6 +677,14 @@ void write_crash_json(JsonOut &o) {
 #else
   o.printf(",\"coredump\":null");
 #endif
+  if (g_ota_json != nullptr) {
+    char ota[1024];  // httpd task (8 KiB stack) or the self-test
+    const size_t k = g_ota_json(ota, sizeof(ota));
+    if (k != 0) {
+      o.printf(",\"ota\":");
+      o.put(ota, k);
+    }
+  }
   o.printf("}\n");
   o.flush();
 }
@@ -1054,6 +1064,8 @@ void register_endpoints(httpd_handle_t srv) {
 #endif
 }
 
+void set_ota_json_provider(size_t (*fn)(char *buf, size_t len)) { g_ota_json = fn; }
+
 }  // namespace crash_capture
 
 extern "C" void __wrap_esp_panic_handler(panic_info_t *info) {
@@ -1066,6 +1078,7 @@ extern "C" void __wrap_esp_panic_handler(panic_info_t *info) {
 namespace crash_capture {
 void init() {}
 void register_endpoints(httpd_handle_t) {}
+void set_ota_json_provider(size_t (*)(char *, size_t)) {}
 }  // namespace crash_capture
 
 #endif

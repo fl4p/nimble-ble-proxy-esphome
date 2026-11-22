@@ -1,4 +1,5 @@
 #include "ota.h"
+#include "ota_verify.h"
 
 #include "proxy_config.h"
 #include "http_confirm.h"
@@ -58,6 +59,20 @@ esp_err_t update_post(httpd_req_t *req) {
   if (strncasecmp(peer_str, "::ffff:", 7) == 0) peer_str += 7;
   ESP_LOGW(TAG, "OTA STARTED from %s (content_len=%d)", peer_str,
            req->content_len);
+
+  // The running image is not verified yet: the other slot holds the only
+  // image to roll back to, so don't overwrite it. (With a rollback bootloader
+  // esp_ota_begin refuses too, ESP_ERR_OTA_ROLLBACK_INVALID_STATE; an old
+  // bootloader leaves the state NEW, which esp_ota_begin lets through.)
+  if (ota_verify::pending()) {
+    char msg[120];
+    std::snprintf(msg, sizeof(msg),
+                  "running image not verified yet (%u s to deadline); retry later, "
+                  "or POST /ota?mark=valid\n", ota_verify::left_s());
+    ESP_LOGW(TAG, "OTA refused: running image pending verification");
+    httpd_resp_set_status(req, "409 Conflict");
+    return httpd_resp_sendstr(req, msg);
+  }
 
   const esp_partition_t *target = esp_ota_get_next_update_partition(nullptr);
   if (target == nullptr) {
@@ -132,6 +147,9 @@ esp_err_t update_post(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
+  // Lets the next boot tell "booted the new image" from "rolled back".
+  ota_verify::note_update(target);
+
   char msg[80];
   std::snprintf(msg, sizeof(msg), "ok: wrote %u bytes to %s, rebooting\n",
                 static_cast<unsigned>(total), target->label);
@@ -169,6 +187,7 @@ void start() {
   // a runtime assert at registration time. Each slot is one pointer of
   // heap (4 B).
   cfg.max_uri_handlers = 44;
+  cfg.max_uri_handlers += 2;  // /ota GET+POST (ota_verify)
 #if CONFIG_NBP_MODBUS_BRIDGE
   cfg.max_uri_handlers += 2;  // /modbus GET+POST
 #endif
@@ -199,6 +218,11 @@ void start() {
   // filter; coarse-level mute is the only knob. Real bugs in this path
   // would surface via ESP_LOGE (e.g. 'httpd_start failed') instead.
   esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
+
+  // GET /ota (image verification / rollback state), POST /ota?mark=… .
+  // Also without NBP_OTA: an image installed by another build still has to
+  // be confirmed, and its state is worth seeing.
+  ota_verify::register_endpoints(g_srv);
 
 #if CONFIG_NBP_OTA
   httpd_uri_t update = {.uri = "/update",

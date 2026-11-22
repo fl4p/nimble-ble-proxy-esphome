@@ -43,6 +43,20 @@ if(NBP_WS_SELFTEST)
     idf_build_set_property(COMPILE_DEFINITIONS "NBP_WS_SELFTEST=1" APPEND)
 endif()
 
+# QEMU OTA-rollback self-test only (idf.py -B build-qemu-ota
+# -DIDF_TARGET=esp32s3 -DNBP_OTA_SELFTEST=1 build, then … qemu): after
+# ota_verify::early_init(), app_main runs ota_verify::selftest::run(), which
+# installs copies of itself into the other slot and checks mark-valid, the
+# rollback on a panic and on the deadline against the real bootloader.
+# sdkconfig.defaults.otatest shortens the verify times. Never in a firmware
+# build.
+if(NBP_OTA_SELFTEST)
+    idf_build_set_property(COMPILE_DEFINITIONS "NBP_OTA_SELFTEST=1" APPEND)
+    if(NOT SDKCONFIG_DEFAULTS)
+        set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.otatest")
+    endif()
+endif()
+
 project(nimble_ble_proxy
     LANGUAGES C CXX
     VERSION 0.2.8)
