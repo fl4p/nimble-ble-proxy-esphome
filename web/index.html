@@ -27,26 +27,77 @@
 <link rel=stylesheet href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
 <style>
 html,body{box-sizing:border-box}*,*::before,*::after{box-sizing:inherit}
-body{font:14px system-ui;margin:0;padding:1em;color:#eee;background:#111}
-html{scrollbar-color:#2a2a2a #0a0a0a;scrollbar-width:thin}
+/* Fixed layout: header + tab bar on top, only the active tab scrolls
+   (#main), the device log is docked at the bottom (#logwrap). */
+html,body{height:100%}
+:root{color-scheme:dark;--colw:960px}
+body{font:14px system-ui;margin:0;color:#eee;background:#111;
+  display:flex;flex-direction:column;overflow:hidden}
+#top{flex:none;padding:1em 1em 0}
+#app{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+#tabs{flex:none;display:flex;gap:.2em;border-bottom:1px solid #333;overflow-x:auto;
+  white-space:nowrap;scrollbar-width:none;padding:0 1em}
+#tabs button{background:none;border:none;border-bottom:2px solid transparent;
+  color:#999;padding:.55em 1em;font:inherit;font-weight:500;cursor:pointer}
+#tabs button:hover{color:#ddd;background:#1a1a1a}
+#tabs button[aria-selected=true]{color:#fff;border-bottom-color:#3b82f6}
+#main{flex:1 1 auto;min-height:0;overflow-y:auto;padding:0 1em}
+.tabpane{padding:1em 0}
+/* centered column: backgrounds span the window, content max --colw */
+#top>*,#tabs>.tabsin,#main>*,#loghead,#console{max-width:var(--colw);
+  margin-left:auto;margin-right:auto}
+#tabs>.tabsin{display:flex;gap:.2em;width:100%}
+/* device log, docked; collapsible (click header) + resizable (drag grip) */
+#logwrap{flex:none;background:#0a0a0a;border-top:1px solid #333;
+  display:flex;flex-direction:column}
+#loggrip{height:8px;cursor:ns-resize;margin-top:-4px;touch-action:none}
+#loggrip:hover,#loggrip.drag{background:#3b82f6}
+#loghead{display:flex;align-items:center;gap:.8em;padding:.35em 1em;
+  cursor:pointer;user-select:none;color:#ccc;font-weight:600;font-size:.9em;
+  width:100%}
+#loghead:hover{background:#151515}
+#logchev{display:inline-block;transition:transform .15s;color:#888}
+#logwrap.collapsed #logchev{transform:rotate(-90deg)}
+#lognew{font-weight:400;font-size:.85em;color:#93c5fd}
+#lognew.warn{color:#fcd34d}
+#loghead .sp{flex:1}
+#loghead button{background:#1a1a1a;color:#eee;border:1px solid #333;
+  border-radius:4px;font:inherit;font-size:.8em;padding:.1em .5em;
+  font-weight:400;cursor:pointer}
+#logwrap.collapsed #console,#logwrap.collapsed #loggrip{display:none}
+/* switch cards */
+.swcards{display:flex;flex-wrap:wrap;gap:1em}
+.swcard{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;
+  padding:1em;min-width:300px;display:flex;flex-direction:column;gap:.7em}
+.swcard .name{font-weight:600}
+.swcard .name small{color:#777;font-weight:400}
+.swrow{display:flex;align-items:center;gap:.6em;flex-wrap:wrap}
+.swcard button,.swcard select{background:#1a1a1a;color:#eee;border:1px solid #333;
+  border-radius:4px;padding:.3em .6em;font:inherit;cursor:pointer}
+.swcard button:hover{background:#2a2a2a}
+.swcard button.danger{border-color:#7f1d1d;color:#fca5a5}
+.swcard button.danger:hover{background:#3b0a0a}
+.swcard button:disabled{opacity:.5;cursor:default}
+.swcard label{color:#aaa;display:inline-flex;align-items:center;gap:.3em}
+*{scrollbar-color:#2a2a2a #0a0a0a;scrollbar-width:thin}
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-track{background:#0a0a0a}
 ::-webkit-scrollbar-thumb{background:#2a2a2a;border-radius:5px}
 ::-webkit-scrollbar-thumb:hover{background:#3a3a3a}
+::-webkit-scrollbar-corner{background:#0a0a0a}
 h1,h2{font-size:1.1em;margin:0 0 1em}
 h2{margin-top:1.5em}
 #chart,#chart2,#chart3,#chart4{background:#1a1a1a;padding:.5em;border-radius:6px;display:block;max-width:100%}
 #chart,#chart3,#chart4{margin-top:.5em}
 #console{background:#0a0a0a;color:#d4d4d4;
   font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
-  padding:.5em;border-radius:6px;width:100%;max-width:920px;
-  height:300px;overflow-y:auto;white-space:pre-wrap;
-  word-break:break-all;margin:0;border:1px solid #222}
-footer{margin-top:1em;color:#888;font-size:.85em}
+  padding:.3em 1em .5em;width:100%;height:var(--logh,30vh);overflow-y:auto;
+  white-space:pre-wrap;word-break:break-all;margin:0 auto}
+footer{margin:1em auto;color:#888;font-size:.85em}
 code{color:#bbb}
 #controls,#tunables{margin:1em 0;display:flex;flex-wrap:wrap;
   gap:.6em 1em;align-items:center}
-#tunables{flex-direction:column;align-items:stretch;gap:0}
+#tunables{flex-direction:column;align-items:stretch;gap:0;margin-top:0}
 .tgroup{display:flex;flex-wrap:wrap;gap:.5em 1em;align-items:center;
   padding:.4em 0;border-top:1px solid #222}
 .tgroup:first-child{border-top:none;padding-top:0}
@@ -110,7 +161,10 @@ table#devices button.bond-btn.on:hover{background:#1a2e05}
   margin:0 0 .3em}
 #bondpanel ul{list-style:none;margin:0;padding:0}
 #bondpanel li{display:flex;align-items:center;gap:.6em;padding:.1em 0}
-#bondpanel li code{color:#ddd}
+#bondpanel li code{color:#888}
+#bondpanel li .bname{color:#eee;min-width:9em}
+#bondpanel li .bname.stale{color:#999;font-style:italic}
+#bondpanel li .bname.none{color:#555;font-style:italic}
 #bondpanel li.empty{color:#666;font-style:italic}
 #bondpanel .muted{color:#777;font-size:12px}
 #natstatus{display:flex;flex-wrap:wrap;gap:.4em 1.5em;color:#aaa;margin:.5em 0}
@@ -138,15 +192,22 @@ table#portmaps button.del{background:#1a1a1a;border:1px solid #7f1d1d;
   color:#fca5a5;font:inherit;padding:.1em .5em;border-radius:3px;cursor:pointer}
 table#portmaps button.del:hover{background:#3b0a0a}
 .hidden{display:none!important}
+.swstate{font-weight:700;padding:.2em .8em;border-radius:4px;background:#333;
+  min-width:4em;text-align:center}
+.swstate.on{background:#14532d;color:#86efac}
+.swstate.off{background:#3b0a0a;color:#fca5a5}
+.swinfo{color:#777;font-size:.85em}
 #fwinfo{margin-top:.5em;opacity:.65;font-family:ui-monospace,monospace;font-size:.85em;word-break:break-word}
 #unsupported{background:#3b0a0a;color:#fca5a5;padding:1em;border-radius:6px;
   border:1px solid #7f1d1d;margin-bottom:1em}
-@media(max-width:640px){body{padding:.5em;font-size:13px}
+@media(max-width:640px){body{font-size:13px}#top{padding:.5em .5em 0}
+  #main{padding:0 .5em}#tabs button{padding:.5em .7em}
   h1{font-size:1em}#controls,#tunables{gap:.5em}}
 </style>
 </head>
 <body>
-<h1>nimble-ble-proxy &mdash; BLE activity/s</h1>
+<div id=top>
+<h1>nimble-ble-proxy</h1>
 
 <div id=unsupported class=hidden>
   This browser doesn't expose Web Bluetooth. Use Chrome, Edge, or Opera
@@ -157,8 +218,52 @@ table#portmaps button.del:hover{background:#3b0a0a}
   <button id=connect class=primary>Connect</button>
   <span id=status>not connected</span>
 </div>
+</div>
 
 <div id=app class=hidden>
+  <!-- Tabs. A tab button stays hidden until its feature is known to be in
+       the build (applyCaps / updateTabs). The active tab lives in
+       location.hash. Per-tab polls (devices, bond, switch, NAT) only run
+       while their tab is open; stats, log and WiFi history always run. -->
+  <nav id=tabs role=tablist><div class=tabsin>
+    <button role=tab data-tab=status>Status</button>
+    <button role=tab data-tab=switches class=hidden>Switches</button>
+    <button role=tab data-tab=settings>Settings</button>
+    <button role=tab data-tab=ble class=hidden>BLE</button>
+    <button role=tab data-tab=nat class=hidden>NAT router / AP</button>
+  </div></nav>
+
+  <div id=main>
+  <section class=tabpane id=tab-status role=tabpanel>
+    <!-- WiFi link quality, 1 h. Hidden until /wifihist answers (liveness build). -->
+    <div id=chart4 class=hidden></div>
+    <p id=statusempty class="muted hidden" style="color:#777">no WiFi history on this firmware/transport</p>
+  </section>
+
+  <section class=tabpane id=tab-switches role=tabpanel>
+    <!-- Switch output (NBP_SWITCH_OUT): GPIO driving the inverter's
+         remote on/off contact. POST /switch is STA-side only (403 from a
+         SoftAP client) and not routed over the BLE transport. -->
+    <div class=swcards>
+      <div class=swcard>
+        <div class=name>inverter <small id=swgpio></small></div>
+        <div class=swrow>
+          <span id=swstate class=swstate>?</span>
+          <button id=swon>turn on</button>
+          <button id=swoff class=danger>turn off</button>
+        </div>
+        <div class=swrow>
+          <label title="Output level after a reboot/power-up: off, on, or the last state set here">at boot: <select id=swboot>
+            <option value=off>off</option><option value=on>on</option>
+            <option value=last>last</option>
+          </select></label>
+        </div>
+        <div id=swinfo class=swinfo></div>
+      </div>
+    </div>
+  </section>
+
+  <section class=tabpane id=tab-settings role=tabpanel>
   <!-- Tunables grouped by subsystem: CPU → WiFi → BLE → device. Placed
        first so the device is configured up top, with the CPU/temp chart
        directly below showing the thermal effect of those settings.
@@ -258,16 +363,12 @@ table#portmaps button.del:hover{background:#3b0a0a}
     </div>
   </div>
 
-  <!-- CPU/temp chart sits right under the tunables that drive it, then
-       BLE activity, WiFi link, and NAT throughput. -->
+  <!-- CPU/temp chart right under the tunables that drive it. -->
   <div id=chart2></div>
-  <div id=chart></div>
-  <!-- WiFi link quality, 1 h. Hidden until /wifihist answers (liveness build). -->
-  <div id=chart4 class=hidden></div>
-  <!-- NAT/repeater throughput; hidden until /stats.json reports ap_rx
-       (i.e. an NBP_NAT_ROUTER build). See applyCaps(). -->
-  <div id=chart3 class="nat-only hidden"></div>
+  </section>
 
+  <section class=tabpane id=tab-ble role=tabpanel>
+  <div id=chart></div>
   <h2 class=ble-only>devices seen</h2>
   <div class="devwrap ble-only"><table id=devices><thead><tr>
     <th>MAC</th><th>type</th><th>name</th><th class=r>RSSI</th>
@@ -305,20 +406,14 @@ table#portmaps button.del:hover{background:#3b0a0a}
     </div>
   </div>
 
+  </section>
+
+  <section class=tabpane id=tab-nat role=tabpanel>
   <!-- NAT router panel. Hidden unless GET /nat succeeds (i.e. the
        firmware was built with CONFIG_NBP_NAT_ROUTER); loadNat() unhides
        it, so the same HTML stays valid for non-NAT builds. -->
   <div id=natpanel class=hidden>
-    <h2>NAT router</h2>
-    <div id=natstatus>
-      <span>AP <b id=natssidlbl>&mdash;</b></span>
-      <span>AP IP <code id=natapip>&mdash;</code></span>
-      <span>uplink <code id=natstaip>&mdash;</code></span>
-      <span><b id=natclients>0</b>/<span id=natmax>0</span> clients</span>
-    </div>
-    <div class=devwrap><table id=natstations><thead><tr>
-      <th>hostname</th><th>IP</th><th>MAC</th><th class=r>RSSI</th>
-    </tr></thead><tbody></tbody></table></div>
+    <h2 style="margin-top:0">access point</h2>
     <div class=natedit>
       <label><input type=checkbox id=naten> SoftAP enabled</label>
       <label>SSID <input type=text id=natssid maxlength=32 spellcheck=false
@@ -327,6 +422,20 @@ table#portmaps button.del:hover{background:#3b0a0a}
                              autocomplete=off placeholder="8–63, blank = open"></label>
       <button id=natsave>save AP</button>
     </div>
+    <div id=natstatus>
+      <span>AP <b id=natssidlbl>&mdash;</b></span>
+      <span>AP IP <code id=natapip>&mdash;</code></span>
+      <span>uplink <code id=natstaip>&mdash;</code></span>
+      <span><b id=natclients>0</b>/<span id=natmax>0</span> clients</span>
+    </div>
+    <!-- NAT/repeater throughput; hidden until /stats.json reports ap_rx
+         (i.e. an NBP_NAT_ROUTER build). See applyCaps(). -->
+    <div id=chart3 class="nat-only hidden"></div>
+    <h2>clients</h2>
+    <div class=devwrap><table id=natstations><thead><tr>
+      <th>hostname</th><th>IP</th><th>MAC</th><th class=r>RSSI</th>
+    </tr></thead><tbody></tbody></table></div>
+    <h2>port maps</h2>
     <div class=devwrap><table id=portmaps><thead><tr>
       <th>proto</th><th class=r>ext&nbsp;port</th><th>&rarr; internal IP</th>
       <th class=r>port</th><th></th>
@@ -342,13 +451,26 @@ table#portmaps button.del:hover{background:#3b0a0a}
     </div>
   </div>
 
-  <h2>device log</h2>
-  <pre id=console></pre>
-</div>
+  </section>
 
 <footer>nimble-ble-proxy dashboard &mdash; HTTP or Web Bluetooth, same
 HTML. OTA: <code>curl -H 'X-NBP-Confirm: yes' --data-binary @firmware.bin http://<span id=otahost>nimble-proxy.local</span>/update</code>
 <div id=fwinfo title="From esp_app_get_description() on the running image"></div></footer>
+  </div>
+
+  <!-- Device log: docked at the bottom, visible on every tab. Click the
+       header to collapse (counts new lines meanwhile), drag the top edge
+       to resize; both kept in localStorage. -->
+  <div id=logwrap>
+    <div id=loggrip title="drag to resize"></div>
+    <div id=loghead title="click to collapse / expand">
+      <span id=logchev>&#9662;</span> device log <span id=lognew></span>
+      <span class=sp></span>
+      <button id=logclear title="clear this view (not the device's log ring)">clear</button>
+    </div>
+    <pre id=console></pre>
+  </div>
+</div>
 <script>try{document.getElementById('otahost').textContent=location.host||'nimble-proxy.local';}catch(e){}</script>
 
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
@@ -539,9 +661,7 @@ async function connect() {
       TRANSPORT = 'http';
       document.getElementById('controls').classList.add('hidden');
       document.getElementById('app').classList.remove('hidden');
-      if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
-      if (u_cpu)   u_cpu  .setSize({ width: chartW(chart2El), height: 200 });
-      if (g_nat && u_thru) u_thru.setSize({ width: chartW(chart3El), height: 200 });
+      updateTabs();
       loadInitialValues();
       startPolling();
       return;
@@ -575,11 +695,9 @@ async function connect() {
   document.getElementById('app').classList.remove('hidden');
 
   // #app was display:none at initCharts() time, so chartW() returned a
-  // negative number and uPlot rendered the canvases at width=0. Now
-  // that the wrapper is visible, give the charts the real width.
-  if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
-  if (u_cpu)   u_cpu  .setSize({ width: chartW(chart2El), height: 200 });
-  if (g_nat && u_thru) u_thru.setSize({ width: chartW(chart3El), height: 200 });
+  // tiny width. Now that the wrapper is visible, pick the tab (which
+  // sizes the charts in it).
+  updateTabs();
 
   await loadInitialValues();
   startPolling();
@@ -610,13 +728,25 @@ const ma = (arr, k) => {
   return n ? s / n : null;
 };
 const fmt1 = (u, v) => v == null ? '--' : v.toFixed(1);
-const chartW = el => Math.min(900, el.clientWidth - 16);
+// A chart inside a hidden tab has clientWidth 0; keep uPlot at a sane
+// minimum there and size it for real when its tab is shown (resizeCharts).
+const chartW = el => Math.max(100, Math.min(940, el.clientWidth - 16));
 const chartEl  = document.getElementById('chart');
 const chart2El = document.getElementById('chart2');
 const chart3El = document.getElementById('chart3');
 const chart4El = document.getElementById('chart4');
 
 let u_rates, u_cpu, u_thru, u_wifi;
+// Resize every chart that is on screen now. Charts in a hidden tab (or a
+// hidden container) are skipped: their width would read as 0. Called on
+// every tab switch, window resize and when a chart's container appears.
+function resizeCharts() {
+  const all = [[u_rates, chartEl, 320], [u_cpu, chart2El, 200],
+               [u_thru, chart3El, 200], [u_wifi, chart4El, 220]];
+  for (const [u, el, h] of all) {
+    if (u && el.offsetParent !== null) u.setSize({ width: chartW(el), height: h });
+  }
+}
 function initCharts() {
   u_rates = new uPlot({
     width: chartW(chartEl), height: 320,
@@ -697,6 +827,42 @@ let g_nat = null;
 // keeps the old behaviour: poll and quietly ignore a 404.
 let g_cloneCap = null;
 let g_natCap = null;
+// Switch output (inverter remote contact) compiled in? From "sw_on" in
+// /stats.json. Until then loadSwitch() does nothing.
+let g_swCap = null;
+const SW_BTN = () => [document.getElementById('swon'),
+                      document.getElementById('swoff'),
+                      document.getElementById('swboot')];
+function renderSwitch(j, force) {
+  const st = document.getElementById('swstate');
+  st.textContent = j.on ? 'ON' : 'OFF';
+  st.className = 'swstate ' + (j.on ? 'on' : 'off');
+  const bs = document.getElementById('swboot');
+  if (force || document.activeElement !== bs) bs.value = j.boot;
+  const s = j.since_s, ago = s >= 3600 ? (s / 3600).toFixed(1) + ' h'
+    : s >= 60 ? Math.round(s / 60) + ' min' : s + ' s';
+  document.getElementById('swgpio').textContent = `GPIO${j.gpio}`;
+  document.getElementById('swinfo').textContent =
+    `since ${ago} · ${j.changes} changes since boot` +
+    (j.running ? '' : ' — pin not allowed, output inactive');
+}
+async function loadSwitch() {
+  if (g_swCap !== true || g_tab !== 'switches') return;
+  try { renderSwitch(await apiJson('GET /switch')); } catch (e) { /* next tick */ }
+}
+async function postSwitch(query) {
+  const els = SW_BTN();
+  els.forEach(el => el.disabled = true);
+  try {
+    renderSwitch(await apiJson('POST /switch?' + query));
+  } catch (err) {
+    alert('switch: ' + (err.message || err));
+    // Show the device's real state again, also in the focused dropdown.
+    try { renderSwitch(await apiJson('GET /switch'), true); } catch (e) { /* next poll */ }
+  } finally {
+    els.forEach(el => el.disabled = false);
+  }
+}
 function applyCaps(s) {
   if (typeof s.clone !== 'undefined') g_cloneCap = !!s.clone;
   if (typeof s.nat !== 'undefined') g_natCap = !!s.nat;
@@ -704,6 +870,7 @@ function applyCaps(s) {
   if (s.smp === true && s.clone === false) {
     document.getElementById('pinbtn').classList.remove('hidden');
   }
+  if (g_swCap === null && typeof s.sw_on !== 'undefined') g_swCap = true;
   if (g_ble === null && typeof s.ble !== 'undefined') {
     g_ble = !!s.ble;
     if (!g_ble) {
@@ -713,9 +880,87 @@ function applyCaps(s) {
   if (g_nat !== true && typeof s.ap_rx !== 'undefined') {
     g_nat = true;
     document.querySelectorAll('.nat-only').forEach(el => el.classList.remove('hidden'));
-    if (u_thru) u_thru.setSize({ width: chartW(chart3El), height: 200 });
+    resizeCharts();
   }
+  // Re-evaluate the tabs only when a capability changed, not every tick.
+  const capSig = [g_swCap, g_ble, g_natCap].join();
+  if (capSig !== g_capSig) { g_capSig = capSig; updateTabs(); }
 }
+
+// ---- tabs ------------------------------------------------------------
+
+const TABS = ['status', 'switches', 'settings', 'ble', 'nat'];
+let g_tab = null;
+let g_natSeen = false;  // set by loadNat() on its first success
+let g_capSig = null;    // applyCaps: last capability signature seen
+// Is a tab's feature in this build (and reachable over this transport)?
+// /switch and /nat are not routed by ble_httpd. Unknown (older firmware
+// without the flag) counts as available for BLE and NAT, like the polls.
+function tabAvailable(tab) {
+  if (tab === 'switches') return g_swCap === true && TRANSPORT !== 'ble';
+  if (tab === 'ble') return g_ble !== false;
+  if (tab === 'nat') return TRANSPORT !== 'ble' && g_natCap !== false
+                            && (g_natCap === true || g_natSeen);
+  return TABS.includes(tab);
+}
+function showTab(tab, fromUser) {
+  if (!tabAvailable(tab)) tab = 'status';
+  const changed = tab !== g_tab;
+  g_tab = tab;
+  for (const b of document.querySelectorAll('#tabs button[data-tab]')) {
+    const on = b.dataset.tab === tab;
+    b.setAttribute('aria-selected', on);
+    b.tabIndex = on ? 0 : -1;
+  }
+  for (const t of TABS) {
+    document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
+  }
+  if (fromUser && location.hash !== '#' + tab) {
+    history.replaceState(null, '', '#' + tab);
+  }
+  resizeCharts();
+  if (changed) onTabShown(tab);
+}
+// Re-evaluate which tab buttons are visible (capabilities may have just
+// been learned) and keep the active tab valid. The hash names the wanted
+// tab; if that tab is not (yet) available we show Status and switch to it
+// once its capability shows up.
+function updateTabs() {
+  // The BLE activity chart also carries heap and connections. On a BLE-free
+  // build there is no BLE tab, so it goes to Status instead.
+  if (g_ble === false && chartEl.parentElement.id !== 'tab-status') {
+    document.getElementById('tab-status').prepend(chartEl);
+  }
+  for (const b of document.querySelectorAll('#tabs button[data-tab]')) {
+    b.classList.toggle('hidden', !tabAvailable(b.dataset.tab));
+  }
+  const want = location.hash.slice(1);
+  // Over Web Bluetooth Status has no WiFi history (/wifihist is not routed),
+  // so start on BLE there.
+  const dflt = TRANSPORT === 'ble' && tabAvailable('ble') ? 'ble' : 'status';
+  showTab(TABS.includes(want) && tabAvailable(want) ? want
+          : g_tab && tabAvailable(g_tab) ? g_tab : dflt, false);
+}
+// Immediate refresh when a tab opens, so it doesn't show stale data until
+// the next interval. Only while polling (connected).
+function onTabShown(tab) {
+  if (!g_pollTimers.length) return;
+  if (tab === 'ble') { loadBond().then(tickDevices); }
+  if (tab === 'switches') loadSwitch();
+  if (tab === 'nat') loadNat();
+}
+document.getElementById('tabs').addEventListener('click', e => {
+  const b = e.target.closest('button[data-tab]');
+  if (b) showTab(b.dataset.tab, true);
+});
+document.getElementById('tabs').addEventListener('keydown', e => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const vis = [...document.querySelectorAll('#tabs button[data-tab]:not(.hidden)')];
+  const i = vis.findIndex(b => b.dataset.tab === g_tab);
+  const nb = vis[(i + (e.key === 'ArrowRight' ? 1 : vis.length - 1)) % vis.length];
+  if (nb) { showTab(nb.dataset.tab, true); nb.focus(); }
+});
+addEventListener('hashchange', () => showTab(location.hash.slice(1), false));
 
 function shiftPush(arr, v) { arr.shift(); arr.push(v); }
 const delta = (cur, p, dt) => { const v = (cur - p) / dt; return v < 0 ? null : v; };
@@ -794,8 +1039,9 @@ async function tickWifiHist() {
     if (g_wifihist === null) {
       g_wifihist = true;
       chart4El.classList.remove('hidden');
+      document.getElementById('statusempty').classList.add('hidden');
       initWifiChart();
-      u_wifi.setSize({ width: chartW(chart4El), height: 220 });
+      resizeCharts();
     }
     const n = d.count || 0, iv = d.interval || 30;
     const xs = [], loss = [];
@@ -812,16 +1058,76 @@ async function tickWifiHist() {
     u_wifi.setData([xs, d.rssi, d.ap, d.rtt, loss]);
     u_wifi.setLegend({ idx: n - 1 });
   } catch (e) {
-    if (g_wifihist === null) g_wifihist = false;  // endpoint absent (old fw)
+    if (g_wifihist === null) {                     // endpoint absent (old fw)
+      g_wifihist = false;
+      document.getElementById('statusempty').classList.remove('hidden');
+    }
   }
 }
 
 let g_logSeq = 0;
 const con = document.getElementById('console');
+// Docked log: collapse/expand, resize, unread count while collapsed.
+const logwrap = document.getElementById('logwrap');
+const lognew = document.getElementById('lognew');
+let g_logUnread = 0, g_logUnreadWarn = false;
+const lsGet = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } };
+function setLogCollapsed(c) {
+  logwrap.classList.toggle('collapsed', c);
+  lsSet('nbp.logCollapsed', c ? '1' : '0');
+  if (!c) {
+    g_logUnread = 0; g_logUnreadWarn = false;
+    lognew.textContent = ''; lognew.classList.remove('warn');
+    con.scrollTop = con.scrollHeight;
+  }
+}
+document.getElementById('loghead').addEventListener('click', e => {
+  if (e.target.closest('button')) return;
+  setLogCollapsed(!logwrap.classList.contains('collapsed'));
+});
+document.getElementById('logclear').addEventListener('click', () => {
+  con.textContent = '';
+});
+{
+  const grip = document.getElementById('loggrip');
+  const setLogH = px => {
+    const hpx = Math.max(60, Math.min(innerHeight * 0.8, px));
+    document.documentElement.style.setProperty('--logh', hpx + 'px');
+  };
+  grip.addEventListener('pointerdown', e => {
+    grip.setPointerCapture(e.pointerId);
+    grip.classList.add('drag');
+    const y0 = e.clientY, h0 = con.clientHeight;
+    const move = m => setLogH(h0 + (y0 - m.clientY));
+    const up = () => {
+      grip.removeEventListener('pointermove', move);
+      grip.removeEventListener('pointerup', up);
+      grip.removeEventListener('pointercancel', up);
+      grip.classList.remove('drag');
+      lsSet('nbp.logH', String(con.clientHeight));
+    };
+    grip.addEventListener('pointermove', move);
+    grip.addEventListener('pointerup', up);
+    grip.addEventListener('pointercancel', up);
+  });
+  const savedH = parseInt(lsGet('nbp.logH'), 10);
+  if (Number.isFinite(savedH)) setLogH(savedH);
+  // Re-clamp on rotation/resize so a height saved on a big screen can't
+  // squeeze the tab content to nothing on a small one.
+  addEventListener('resize', () => {
+    const cur = parseInt(lsGet('nbp.logH'), 10);
+    if (Number.isFinite(cur)) setLogH(cur);
+  });
+  setLogCollapsed(lsGet('nbp.logCollapsed') === '1');
+}
+// ESP log lines start with "W (" / "E (", possibly after an ANSI colour code.
+const LOG_WARN_RE = /(^|\n)(\x1b\[[0-9;]*m)?[WE] \(/;
 const au = new AnsiUp(); au.use_classes = false;
 
 async function tickLog() {
   try {
+    const firstFetch = g_logSeq === 0;
     const body = await apiText('GET /log?since=' + g_logSeq);
     // Envelope: "<10-digit seq>\n<bytes>"
     const nl = body.indexOf('\n');
@@ -831,6 +1137,14 @@ async function tickLog() {
     if (Number.isFinite(nextSeq)) g_logSeq = nextSeq;
     if (content.length === 0) return;
 
+    // The first fetch (since=0) returns the retained ring: history, not new.
+    if (logwrap.classList.contains('collapsed') && !firstFetch) {
+      g_logUnread += (content.match(/\n/g) || []).length || 1;
+      g_logUnreadWarn = g_logUnreadWarn || LOG_WARN_RE.test(content);
+      lognew.textContent = `· ${g_logUnread} new` +
+        (g_logUnreadWarn ? ' (warnings)' : '');
+      lognew.classList.toggle('warn', g_logUnreadWarn);
+    }
     const atBottom = con.scrollHeight - con.scrollTop - con.clientHeight < 20;
     const frag = document.createRange().createContextualFragment(
       au.ansi_to_html(content));
@@ -911,7 +1225,8 @@ function formatBthome(b) {
 async function tickDevices() {
   // BLE-free build: no scanner, /devices + /clone aren't served. Skip the
   // poll entirely so we don't spew 404s once we've learned the capability.
-  if (g_ble === false) return;
+  // Otherwise only while the BLE tab is open (/devices is a bulk endpoint).
+  if (g_ble === false || g_tab !== 'ble') return;
   try {
     // /clone is small (~250 B) and /devices already runs at 1 Hz, so we
     // just piggyback on the same tick. Failure of /clone (e.g. clone
@@ -932,6 +1247,7 @@ async function tickDevices() {
       };
     }
     const d = data.devices;
+    noteDeviceNames(d);
     const now = performance.now() / 1000;
     const next = {};
     d.sort((a, b) => b.count - a.count);
@@ -1047,8 +1363,58 @@ async function tickDevices() {
   } catch (e) { /* ignore */ }
 }
 
+// Names for the bond lists. /bond returns MACs only, so the name comes
+// from /devices (live) or, failing that, the last name this browser saw
+// for the address (localStorage 'nbp.names': {MAC: [name, epoch ms]}).
+let g_liveNames = {};
+let g_nameCache = {};
+try { g_nameCache = JSON.parse(lsGet('nbp.names') || '{}') || {}; } catch (e) { g_nameCache = {}; }
+function noteDeviceNames(devs) {
+  const live = {};
+  let dirty = false;
+  const now = Date.now();
+  for (const d of devs) {
+    if (!d.name) continue;
+    const a = d.addr.toUpperCase();
+    live[a] = d.name;
+    const c = g_nameCache[a];
+    // rewrite on a new name, or at most hourly to refresh the timestamp
+    if (!c || c[0] !== d.name || now - c[1] > 3600e3) {
+      g_nameCache[a] = [d.name, now]; dirty = true;
+    }
+  }
+  g_liveNames = live;
+  if (dirty) {
+    const keys = Object.keys(g_nameCache);
+    if (keys.length > 200) {  // keep the newest 200
+      keys.sort((x, y) => g_nameCache[y][1] - g_nameCache[x][1]);
+      for (const k of keys.slice(200)) delete g_nameCache[k];
+    }
+    lsSet('nbp.names', JSON.stringify(g_nameCache));
+  }
+}
+function agoText(ms) {
+  const s = Math.round(ms / 1000);
+  return s >= 86400 ? Math.round(s / 86400) + ' d'
+       : s >= 3600 ? Math.round(s / 3600) + ' h'
+       : s >= 60 ? Math.round(s / 60) + ' min' : s + ' s';
+}
 function bondListItem(addr, action, label) {
   const li = document.createElement('li');
+  const nm = document.createElement('span');
+  nm.className = 'bname';
+  const live = g_liveNames[addr], cached = g_nameCache[addr];
+  if (live) {
+    nm.textContent = live;
+  } else if (cached) {
+    nm.textContent = cached[0];
+    nm.classList.add('stale');
+    nm.title = `not advertising a name now; last seen ${agoText(Date.now() - cached[1])} ago`;
+  } else {
+    nm.textContent = 'no name seen';
+    nm.classList.add('none');
+  }
+  li.appendChild(nm);
   const code = document.createElement('code');
   code.textContent = addr;
   li.appendChild(code);
@@ -1075,6 +1441,7 @@ function renderBondList(ul, addrs, action, label, emptyText) {
 // Refresh the bonding panel. Silent no-op (panel stays hidden) when the
 // firmware doesn't serve /bond.
 async function loadBond() {
+  if (g_tab !== 'ble') return;
   let b;
   try { b = await apiJson('GET /bond'); }
   catch (e) { return; }
@@ -1112,10 +1479,15 @@ async function loadBond() {
 // page works for plain BLE-proxy builds.
 async function loadNat() {
   if (g_natCap === false) return;  // NAT router not in this build
+  if (TRANSPORT === 'ble') return; // /nat is not routed over ble_httpd
+  // Only while the NAT tab is open; on older firmware without the "nat"
+  // flag, probe until the first success so the tab can appear at all.
+  if (g_tab !== 'nat' && !(g_natCap === null && !g_natSeen)) return;
   let nat;
   try { nat = await apiJson('GET /nat'); }
   catch (e) { return; }
   document.getElementById('natpanel').classList.remove('hidden');
+  if (!g_natSeen) { g_natSeen = true; updateTabs(); }
   document.getElementById('natssidlbl').textContent =
     nat.ssid + (nat.open ? ' (open)' : '');
   document.getElementById('natapip').textContent = nat.ap_ip;
@@ -1191,6 +1563,8 @@ async function startPolling() {
   g_pollTimers.push(setInterval(loadBond,    5000)); loadBond();
   // WiFi history is a device-side ring sampled every ~30 s; 15 s poll is ample.
   g_pollTimers.push(setInterval(tickWifiHist, 15000)); tickWifiHist();
+  // Switch output; a no-op until applyCaps() saw sw_on.
+  g_pollTimers.push(setInterval(loadSwitch, 3000)); loadSwitch();
 }
 function stopPolling() {
   g_pollGen++;
@@ -1359,6 +1733,14 @@ function wireControls() {
   };
   hn.onblur = hnSave;
   hn.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); hn.blur(); } };
+
+  document.getElementById('swon').onclick = () => {
+    if (confirm('Turn the switch output ON (inverter on)?')) postSwitch('on=1');
+  };
+  document.getElementById('swoff').onclick = () => {
+    if (confirm('Turn the switch output OFF (inverter off)?')) postSwitch('on=0');
+  };
+  document.getElementById('swboot').onchange = e => postSwitch('boot=' + e.target.value);
 
   document.getElementById('reboot').onclick = async () => {
     if (!confirm('Reboot device?')) return;
@@ -1556,11 +1938,7 @@ function wireControls() {
     });
   }
 
-  addEventListener('resize', () => {
-    if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
-    if (u_cpu)   u_cpu  .setSize({ width: chartW(chart2El), height: 200 });
-    if (g_nat && u_thru) u_thru.setSize({ width: chartW(chart3El), height: 200 });
-  });
+  addEventListener('resize', resizeCharts);
 }
 
 // ---- boot -------------------------------------------------------------
@@ -1580,9 +1958,7 @@ wireControls();
     // chrome and start polling immediately.
     document.getElementById('controls').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
-    if (u_rates) u_rates.setSize({ width: chartW(chartEl),  height: 320 });
-    if (u_cpu)   u_cpu  .setSize({ width: chartW(chart2El), height: 200 });
-    if (g_nat && u_thru) u_thru.setSize({ width: chartW(chart3El), height: 200 });
+    updateTabs();
     loadInitialValues();
     startPolling();
   } else if (!navigator.bluetooth) {
