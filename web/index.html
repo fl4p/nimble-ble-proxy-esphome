@@ -238,6 +238,8 @@ table#portmaps button.del:hover{background:#3b0a0a}
     <button role=tab data-tab=ble class=hidden>BLE</button>
     <button role=tab data-tab=nat class=hidden>NAT router / AP</button>
   </div></nav>
+  <!-- "update available" notice, filled by the update-check script. -->
+  <div id=updnote class=hidden role=status></div>
 
   <div id=main>
   <section class=tabpane id=tab-status role=tabpanel>
@@ -378,6 +380,35 @@ table#portmaps button.del:hover{background:#3b0a0a}
            the clone prompt. -->
       <button id=pinbtn class=hidden title="SMP passkey used when a proxied device asks to pair">BLE PIN</button>
       <button id=reboot class=danger>reboot device</button>
+      <!-- Firmware update (update-check script at the end of the file):
+           the browser reads updates.json from GitHub Pages, downloads the
+           image of this device's exact variant, checks size + sha256 and
+           POSTs it to /update. Install is HTTP-only. -->
+      <div class=tline id=updrow>
+        <span>firmware: <b id=updcur>?</b></span>
+        <span id=updlatest class=updmuted></span>
+        <a id=updnotes class=hidden target=_blank rel=noreferrer>release notes</a>
+        <button id=updinstall class=hidden></button>
+        <button id=updcheck title="Check GitHub for a newer release now">check</button>
+      </div>
+      <div class="tline hidden" id=updprogline>
+        <progress id=updprog max=1 value=0></progress>
+        <span id=updstate class=updmuted></span>
+      </div>
+      <div class="tline hidden" id=updexpert>
+        <details><summary class=updmuted>install a release image anyway (expert)</summary>
+          <div class=updexp>
+            <small class=caveat>This device runs a build that is not a release
+            variant, or does not report one. A release image replaces it
+            completely: features of the custom build (PSRAM, switch output,
+            RS485 bridge, sensors, ...) are gone after the reboot.</small>
+            <label>variant: <select id=updxvar></select></label>
+            <label>type the variant name to confirm:
+              <input type=text id=updxconfirm spellcheck=false autocomplete=off></label>
+            <button id=updxinstall class=danger disabled>install</button>
+          </div>
+        </details>
+      </div>
     </div>
   </div>
 
@@ -1997,6 +2028,453 @@ wireControls();
   } else {
     connectBtn.disabled = false;
   }
+})();
+</script>
+<script>
+// ---- firmware update check + install (self-contained) -------------------
+//
+// The browser checks and downloads, the device does not (no TLS, heap or
+// GitHub access needed on it). updates.json and the -ota.bin images come
+// from GitHub Pages, which sends Access-Control-Allow-Origin: *; release
+// asset downloads do not, so they cannot be read from this page. The image
+// is POSTed to the unchanged /update handler (same-origin, X-NBP-Confirm).
+//
+// Offer rule: only an image whose variant equals the device's /appinfo
+// "variant" (CI build label). "custom" or no variant (firmware before the
+// field) gets no offer, only the expert override below. Prereleases only
+// with ?debug-releases=1. Checked on load, then at most every UPD_TTL_MS
+// (cached in localStorage); failures are shown quietly.
+(() => {
+'use strict';
+const UPD_REPO = 'fl4p/nimble-ble-proxy-esphome';
+// Test override, honoured only on a localhost-served page (a crafted link
+// to the device must not be able to point the installer elsewhere).
+const UPD_BASE = (() => {
+  const m = /[?&]upd-base=([^&]+)/.exec(location.search);
+  if (m && /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) return decodeURIComponent(m[1]);
+  return 'https://fl4p.github.io/nimble-ble-proxy-esphome/';
+})();
+const UPD_API = `https://api.github.com/repos/${UPD_REPO}/releases?per_page=10`;
+const UPD_DEBUG = /[?&]debug-releases=1(&|$)/.test(location.search);
+const UPD_TTL_MS = 6 * 3600e3;       // successful check
+const UPD_FAIL_TTL_MS = 3600e3;      // failed check (offline, rate limit)
+const UPD_CACHE = 'nbp.upd.cache.v1:' + UPD_BASE;
+const UPD_DISMISS = 'nbp.upd.dismiss';
+// esp_image_header_t.chip_id (offset 12) per IDF target.
+const CHIP_ID = { esp32: 0x00, esp32s2: 0x02, esp32c3: 0x05, esp32s3: 0x09,
+                  esp32c2: 0x0c, esp32c6: 0x0d, esp32h2: 0x10, esp32p4: 0x12 };
+
+const $ = id => document.getElementById(id);
+const st = document.createElement('style');
+st.textContent = `
+#updnote{flex:none;background:#0d1f3a;border-bottom:1px solid #1e3a8a;color:#bfdbfe;
+  padding:.4em 1em;font-size:.9em;display:flex;gap:.8em;align-items:center;justify-content:center}
+#updnote a{color:#93c5fd;cursor:pointer}
+#updnote button{background:none;border:none;color:#93c5fd;font:inherit;cursor:pointer;padding:0 .3em}
+#updrow a{color:#93c5fd}
+.updmuted{color:#888;font-size:.9em}
+#updstate.bad{color:#f87171}#updstate.good{color:#4ade80}
+#updprog{width:14em}
+#updexpert details{width:100%}
+.updexp{display:flex;flex-wrap:wrap;gap:.4em 1em;align-items:center;margin-top:.4em}
+#tunables #updxconfirm{width:13em}`;
+document.head.appendChild(st);
+
+let g_app = null;        // /appinfo of the running image
+let g_man = null;        // manifest (or API fallback), see fetchManifest
+let g_busy = false;      // install in progress
+
+// -- semver ---------------------------------------------------------------
+function semver(v) {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+.*)?$/.exec(String(v || '').trim());
+  if (!m) return null;
+  return { n: [+m[1], +m[2], +m[3]], pre: m[4] ? m[4].split('.') : null };
+}
+function semverCmp(a, b) {
+  const x = semver(a), y = semver(b);
+  if (!x || !y) return NaN;
+  for (let i = 0; i < 3; i++) if (x.n[i] !== y.n[i]) return x.n[i] < y.n[i] ? -1 : 1;
+  if (!x.pre || !y.pre) return x.pre ? -1 : y.pre ? 1 : 0;  // release > its prereleases
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    const p = x.pre[i], q = y.pre[i];
+    if (p === undefined) return -1;
+    if (q === undefined) return 1;
+    const pn = /^\d+$/.test(p), qn = /^\d+$/.test(q);
+    if (pn && qn) { if (+p !== +q) return +p < +q ? -1 : 1; continue; }
+    if (pn !== qn) return pn ? -1 : 1;
+    if (p !== q) return p < q ? -1 : 1;
+  }
+  return 0;
+}
+
+// -- SHA-256 (crypto.subtle is missing on a plain-http LAN page) ----------
+const SHA_K = new Uint32Array([
+  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+  0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+  0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+  0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+  0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+  0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+  0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+  0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+function sha256hex(bytes) {
+  const len = bytes.length, nb = ((len + 9 + 63) >> 6) << 6;
+  const m = new Uint8Array(nb);
+  m.set(bytes); m[len] = 0x80;
+  const dv = new DataView(m.buffer);
+  dv.setUint32(nb - 8, Math.floor(len / 0x20000000));
+  dv.setUint32(nb - 4, (len * 8) >>> 0);
+  const H = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+                             0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+  const W = new Uint32Array(64);
+  for (let o = 0; o < nb; o += 64) {
+    for (let i = 0; i < 16; i++) W[i] = dv.getUint32(o + i * 4);
+    for (let i = 16; i < 64; i++) {
+      const a = W[i - 15], b = W[i - 2];
+      const s0 = ((a >>> 7) | (a << 25)) ^ ((a >>> 18) | (a << 14)) ^ (a >>> 3);
+      const s1 = ((b >>> 17) | (b << 15)) ^ ((b >>> 19) | (b << 13)) ^ (b >>> 10);
+      W[i] = (W[i - 16] + s0 + W[i - 7] + s1) | 0;
+    }
+    let a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+    for (let i = 0; i < 64; i++) {
+      const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      const t1 = (h + S1 + ((e & f) ^ (~e & g)) + SHA_K[i] + W[i]) | 0;
+      const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      const t2 = (S0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+      h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+    }
+    H[0] += a; H[1] += b; H[2] += c; H[3] += d; H[4] += e; H[5] += f; H[6] += g; H[7] += h;
+  }
+  return Array.from(H, x => x.toString(16).padStart(8, '0')).join('');
+}
+window.nbpSha256hex = sha256hex;  // for the self-check in tests
+
+// -- manifest -------------------------------------------------------------
+async function fetchT(url, opt = {}, ms = 15000) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), ms);
+  try { return await fetch(url, { ...opt, signal: ac.signal }); }
+  finally { clearTimeout(t); }
+}
+// Normalised: {source:'pages'|'api', releases:[{tag,version,prerelease,
+// notes_url,images:{variant:{path|null,size,sha256,app_version,elf_sha256}}}]}
+async function fetchManifest() {
+  try {
+    const r = await fetchT(UPD_BASE + 'updates.json', { cache: 'no-store' });
+    if (r.ok) {
+      const j = await r.json();
+      if (j && j.schema === 1 && Array.isArray(j.releases)) return { source: 'pages', releases: j.releases };
+    }
+  } catch (e) { /* fall through to the API */ }
+  // Fallback before updates.json is published: the releases API (CORS ok)
+  // can say a release exists, but its binaries are not readable from here,
+  // so these entries are display-only (path null).
+  const r = await fetchT(UPD_API, { headers: { Accept: 'application/vnd.github+json' } });
+  if (!r.ok) throw new Error(r.status === 403 || r.status === 429 ? 'GitHub rate limit' : `GitHub API ${r.status}`);
+  const rel = await r.json();
+  return { source: 'api', releases: rel.filter(x => !x.draft && semver(x.tag_name)).map(x => {
+    const images = {};
+    for (const a of x.assets || []) {
+      const m = /^nimble_ble_proxy-(.+)-ota\.bin$/.exec(a.name);
+      if (m) images[m[1]] = { path: null, size: a.size,
+        sha256: (a.digest || '').replace(/^sha256:/, ''), app_version: null, elf_sha256: null };
+    }
+    return { tag: x.tag_name, version: x.tag_name.replace(/^v/, ''), prerelease: !!x.prerelease,
+             notes_url: x.html_url, images };
+  }) };
+}
+async function loadManifest(force) {
+  let c = null;
+  try { c = JSON.parse(localStorage.getItem(UPD_CACHE) || 'null'); } catch (e) {}
+  const age = c ? Date.now() - c.at : Infinity;
+  if (!force && c && age >= 0 && age < (c.man ? UPD_TTL_MS : UPD_FAIL_TTL_MS)) {
+    if (c.man) return c.man;
+    throw new Error(c.err + ' (cached)');
+  }
+  try {
+    const man = await fetchManifest();
+    localStorage.setItem(UPD_CACHE, JSON.stringify({ at: Date.now(), man }));
+    return man;
+  } catch (e) {
+    const err = e.name === 'AbortError' ? 'timeout' : (e.message || String(e));
+    try { localStorage.setItem(UPD_CACHE, JSON.stringify({ at: Date.now(), err })); } catch (x) {}
+    throw new Error(err);
+  }
+}
+// Newest offerable release that has an image for `variant`.
+function newestFor(variant) {
+  let best = null;
+  for (const r of (g_man && g_man.releases) || []) {
+    if (r.prerelease && !UPD_DEBUG) continue;
+    if (!r.images || !r.images[variant] || !semver(r.version)) continue;
+    if (!best || semverCmp(r.version, best.version) > 0) best = r;
+  }
+  return best;
+}
+function newestAny() {
+  let best = null;
+  for (const r of (g_man && g_man.releases) || []) {
+    if (r.prerelease && !UPD_DEBUG) continue;
+    if (!semver(r.version)) continue;
+    if (!best || semverCmp(r.version, best.version) > 0) best = r;
+  }
+  return best;
+}
+const isStock = v => typeof v === 'string' && v !== '' && v !== 'custom';
+
+// -- rendering ------------------------------------------------------------
+function setState(text, cls) {
+  const el = $('updstate');
+  el.textContent = text; el.className = 'updmuted' + (cls ? ' ' + cls : '');
+  $('updprogline').classList.remove('hidden');
+}
+function render(checkErr) {
+  const app = g_app;
+  $('updcur').textContent = app ? `v${app.version}` + (app.variant ? ` (${app.variant})` : '') : '?';
+  const latest = $('updlatest'), notes = $('updnotes'), btn = $('updinstall');
+  notes.classList.add('hidden'); btn.classList.add('hidden');
+  $('updexpert').classList.add('hidden');
+  let offer = null;
+  if (!app) {
+    latest.textContent = 'version unknown';
+  } else if (checkErr && !g_man) {
+    latest.textContent = `update check unavailable (${checkErr})`;
+  } else if (!isStock(app.variant)) {
+    latest.textContent = app.variant === 'custom'
+      ? 'custom build, no automatic update offer'
+      : 'this firmware does not report its build variant, no automatic update offer';
+    const r = newestAny();
+    if (r) {
+      notes.href = r.notes_url; notes.textContent = `latest release v${r.version}`;
+      notes.classList.remove('hidden');
+    }
+    if (TRANSPORT_ok()) fillExpert();
+  } else {
+    const r = newestFor(app.variant);
+    if (!r) {
+      latest.textContent = `no release image for ${app.variant}`;
+    } else {
+      notes.href = r.notes_url; notes.textContent = 'release notes';
+      notes.classList.remove('hidden');
+      const cmp = semverCmp(r.version, app.version);
+      if (cmp > 0) {
+        offer = r;
+        latest.textContent = `v${r.version}${r.prerelease ? ' (pre-release)' : ''} available`;
+        btn.textContent = `install v${r.version}`;
+        btn.classList.remove('hidden');
+        const img = r.images[app.variant];
+        btn.disabled = g_busy || !TRANSPORT_ok() || !img.path;
+        btn.title = !TRANSPORT_ok() ? 'Install needs the HTTP dashboard (open http://<device>/); /update is not served over Bluetooth'
+          : !img.path ? 'updates.json is not published on GitHub Pages yet; install manually from the release page'
+          : `${img.size} B, sha256 ${img.sha256.slice(0, 16)}…`;
+      } else {
+        latest.textContent = `up to date (latest v${r.version})`;
+      }
+    }
+  }
+  if (checkErr && g_man) latest.textContent += ` · last check failed (${checkErr})`;
+  if (!TRANSPORT_ok() && offer) latest.textContent += ' · install needs the HTTP dashboard';
+  renderNote(offer);
+}
+function TRANSPORT_ok() { return typeof TRANSPORT !== 'undefined' && TRANSPORT === 'http'; }
+function renderNote(offer) {
+  const n = $('updnote');
+  let dismissed = null;
+  try { dismissed = localStorage.getItem(UPD_DISMISS); } catch (e) {}
+  if (!offer || g_busy || dismissed === offer.version) { n.classList.add('hidden'); return; }
+  n.innerHTML = '';
+  const s = document.createElement('span');
+  s.textContent = `Firmware v${offer.version} is available (running v${g_app.version}).`;
+  const a = document.createElement('a');
+  a.textContent = 'Settings → device'; a.tabIndex = 0;
+  a.onclick = () => { if (typeof showTab === 'function') showTab('settings', true);
+                      $('updrow').scrollIntoView({ block: 'center' }); };
+  const x = document.createElement('button');
+  x.textContent = '×'; x.title = 'dismiss until the next release';
+  x.onclick = () => { try { localStorage.setItem(UPD_DISMISS, offer.version); } catch (e) {}
+                      n.classList.add('hidden'); };
+  n.append(s, a, x);
+  n.classList.remove('hidden');
+}
+function fillExpert() {
+  const r = newestAny();
+  const sel = $('updxvar');
+  if (!r) return;
+  const prev = sel.value;
+  sel.innerHTML = '';
+  const tgt = g_app && g_app.target;
+  const vars = Object.keys(r.images).filter(v => !tgt || v.startsWith(tgt + '-')).sort();
+  const blank = document.createElement('option');
+  blank.value = ''; blank.textContent = '(pick one)';
+  sel.appendChild(blank);
+  for (const v of vars) {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = `${v} (v${r.version})`;
+    o.disabled = !r.images[v].path;
+    sel.appendChild(o);
+  }
+  sel.value = vars.includes(prev) ? prev : '';
+  $('updexpert').classList.remove('hidden');
+  expertGate();
+}
+function expertGate() {
+  const v = $('updxvar').value;
+  $('updxinstall').disabled = g_busy || !v || $('updxconfirm').value.trim() !== v;
+}
+
+// -- check ----------------------------------------------------------------
+async function check(force) {
+  let err = null;
+  try {
+    g_app = await apiJson('GET /appinfo');
+  } catch (e) { g_app = null; }
+  try { g_man = await loadManifest(force); } catch (e) { err = e.message; }
+  render(err);
+}
+
+// -- install --------------------------------------------------------------
+async function download(img, onProgress) {
+  const r = await fetchT(UPD_BASE + img.path, { cache: 'no-store' }, 120000);
+  if (!r.ok) throw new Error(`download failed: HTTP ${r.status}`);
+  const buf = new Uint8Array(img.size);
+  let off = 0;
+  if (r.body && r.body.getReader) {
+    const rd = r.body.getReader();
+    for (;;) {
+      const { done, value } = await rd.read();
+      if (done) break;
+      if (off + value.length > img.size) throw new Error(`download larger than the manifest's ${img.size} B`);
+      buf.set(value, off); off += value.length;
+      onProgress(off / img.size);
+    }
+  } else {
+    const all = new Uint8Array(await r.arrayBuffer());
+    if (all.length > img.size) throw new Error(`download larger than the manifest's ${img.size} B`);
+    buf.set(all); off = all.length;
+  }
+  if (off !== img.size) throw new Error(`size mismatch: got ${off} B, manifest says ${img.size} B`);
+  return buf;
+}
+function checkImage(buf, img, target) {
+  if (buf[0] !== 0xe9) throw new Error('not an ESP app image');
+  if (target && target in CHIP_ID) {
+    const chip = buf[12] | (buf[13] << 8);
+    if (chip !== CHIP_ID[target]) throw new Error(`image is for chip id ${chip}, device is ${target}`);
+  }
+  const dv = new DataView(buf.buffer, buf.byteOffset);
+  if (dv.getUint32(32, true) !== 0xabcd5432) throw new Error('app descriptor missing');
+  const cstr = (o, n) => new TextDecoder().decode(buf.subarray(o, o + n)).replace(/\0.*$/s, '');
+  if (cstr(32 + 48, 32) !== 'nimble_ble_proxy') throw new Error('image is not nimble_ble_proxy');
+  if (img.app_version && cstr(32 + 16, 32) !== img.app_version)
+    throw new Error(`image says v${cstr(32 + 16, 32)}, manifest v${img.app_version}`);
+}
+function upload(buf, onProgress) {
+  return new Promise(resolve => {
+    const x = new XMLHttpRequest();
+    x.open('POST', '/update');
+    x.setRequestHeader('X-NBP-Confirm', 'yes');
+    x.setRequestHeader('Content-Type', 'application/octet-stream');
+    x.timeout = 300000;
+    x.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    x.onload = () => resolve({ status: x.status, text: x.responseText });
+    x.onerror = () => resolve({ status: 0, text: 'connection lost' });
+    x.ontimeout = () => resolve({ status: 0, text: 'timeout' });
+    x.send(buf);
+  });
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function waitForDevice(img, oldElf, maxMs) {
+  const t0 = Date.now();
+  await sleep(4000);
+  let last = null;
+  while (Date.now() - t0 < maxMs) {
+    try {
+      const r = await fetchT('/appinfo', { cache: 'no-store' }, 3000);
+      if (r.ok) {
+        last = await r.json();
+        if (last.elf_sha256 !== oldElf) return last;  // a different image runs
+      }
+    } catch (e) { /* still rebooting */ }
+    setState(`waiting for the device to come back… ${Math.round((Date.now() - t0) / 1000)} s`);
+    await sleep(2000);
+  }
+  return last;
+}
+async function install(release, variant) {
+  const img = release.images[variant];
+  if (g_busy || !img || !img.path || !TRANSPORT_ok()) return;
+  const host = location.host;
+  const prog = $('updprog');
+  g_busy = true; render(); expertGate();
+  const oldApp = g_app;
+  if (typeof stopPolling === 'function') stopPolling();  // keep httpd free for the upload
+  try {
+    setState('downloading…'); prog.value = 0;
+    const buf = await download(img, f => { prog.value = f; setState(`downloading… ${Math.round(f * 100)} %`); });
+    setState('verifying…');
+    await sleep(0);
+    const sha = sha256hex(buf);
+    if (sha !== img.sha256) throw new Error(`sha256 mismatch: got ${sha.slice(0, 16)}…, manifest ${img.sha256.slice(0, 16)}…`);
+    checkImage(buf, img, oldApp && oldApp.target);
+    setState('uploading to the device…'); prog.value = 0;
+    const res = await upload(buf, f => { prog.value = f; setState(`uploading… ${Math.round(f * 100)} %`); });
+    if (res.status !== 200 && res.status !== 0)
+      throw new Error(`device refused the image (HTTP ${res.status}: ${res.text.trim()}); it keeps running v${oldApp.version}`);
+    setState(res.status === 200 ? 'upload done, device is rebooting…' : `upload ended without a reply (${res.text}); checking the device…`);
+    prog.removeAttribute('value');
+    const now = await waitForDevice(img, oldApp && oldApp.elf_sha256, 120000);
+    if (!now) throw new Error(`the device did not answer at ${host} within 2 min; check it (a failed update leaves the old image)`);
+    if (now.elf_sha256 === (oldApp && oldApp.elf_sha256))
+      throw new Error(`the device still runs the old image v${now.version}; the update did not take`);
+    if ((img.elf_sha256 && now.elf_sha256 !== img.elf_sha256) || (img.app_version && now.version !== img.app_version))
+      throw new Error(`the device now runs v${now.version} (${now.elf_sha256}), not the expected v${img.app_version} (${img.elf_sha256})`);
+    g_app = now;
+    prog.value = 1;
+    setState(`done: now running v${now.version}` + (now.variant ? ` (${now.variant})` : ''), 'good');
+    if (typeof loadInitialValues === 'function') loadInitialValues();
+  } catch (e) {
+    prog.value = 0;
+    setState(`update failed: ${e.message || e}`, 'bad');
+  } finally {
+    g_busy = false;
+    if (typeof startPolling === 'function') startPolling();
+    render(); expertGate();
+  }
+}
+
+// -- wiring ---------------------------------------------------------------
+$('updcheck').onclick = () => { if (!g_busy) check(true); };
+$('updinstall').onclick = () => {
+  const r = g_app && newestFor(g_app.variant);
+  if (!r) return;
+  if (!confirm(`Install firmware v${r.version} (${g_app.variant}) on ${location.host}?\n\n` +
+               `The image is downloaded from GitHub Pages, checked (size, sha256) and ` +
+               `uploaded to the device, which then reboots. A failed update leaves the ` +
+               `current v${g_app.version} running.`)) return;
+  install(r, g_app.variant);
+};
+$('updxvar').onchange = expertGate;
+$('updxconfirm').oninput = expertGate;
+$('updxinstall').onclick = () => {
+  const r = newestAny(), v = $('updxvar').value;
+  if (!r || !v || $('updxconfirm').value.trim() !== v) return;
+  if (!confirm(`Replace this device's firmware (${g_app ? 'v' + g_app.version + ', ' + (g_app.variant || 'variant unknown') : 'unknown'}) ` +
+               `with the release image ${v} v${r.version}?\n\nFeatures of the current build that ` +
+               `the release image lacks are gone after the reboot.`)) return;
+  install(r, v);
+};
+
+// Start once the dashboard is up (HTTP: right after the transport probe;
+// BLE: after Connect), then re-check when the cache expires.
+let started = false;
+function maybeStart() {
+  if (started || $('app').classList.contains('hidden')) return;
+  started = true;
+  check(false);
+  setInterval(() => { if (!g_busy) check(false); }, 30 * 60e3);
+}
+new MutationObserver(maybeStart).observe($('app'), { attributes: true, attributeFilter: ['class'] });
+maybeStart();
 })();
 </script>
 </body>

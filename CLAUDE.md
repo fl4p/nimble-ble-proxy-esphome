@@ -1261,3 +1261,27 @@ rest:
   before, A got 5 notifies in 120 s; after, 2240/2246 sent, no sequence
   gap, repeat GetServices 20–400 ms. A Service Changed indication is not
   handled (the cache is not invalidated by it).
+
+## Dashboard update check (`web/index.html`, last script block)
+
+- **The browser checks and downloads, the device does not.** The page reads
+  `https://fl4p.github.io/nimble-ble-proxy-esphome/updates.json` and the
+  image from `firmware/<tag>/nimble_ble_proxy-<variant>-ota.bin` next to it,
+  checks size + sha256 (pure-JS SHA-256: `crypto.subtle` is missing on a
+  plain-http page) and the image header (chip id, app descriptor), then
+  POSTs it to the unchanged `/update` with `X-NBP-Confirm: yes`, waits for
+  the reboot and requires `/appinfo` `elf_sha256` == the manifest's.
+  Release-asset downloads send no `Access-Control-Allow-Origin` (Pages and
+  api.github.com send `*`), so the images must be on Pages:
+  `pages.yml` stages them and writes `updates.json` with
+  `scripts/make_updates_manifest.py` (newest stable + newer prereleases,
+  never drafts; fails on a size/digest mismatch). Without `updates.json`
+  the page falls back to the releases API, display-only.
+- **Variant identity.** `GET /appinfo` `variant` is the CI label
+  (`-DNBP_VARIANT=<target>-ble-on|ble-off`, `build.yml`) or `custom`; the
+  root CMakeLists.txt refuses a stock label on a non-stock config. Only an
+  image of exactly that variant is offered. `custom`, or firmware before
+  the field (<= 0.2.8), gets no offer, only the expert override (pick a
+  variant of the same target + type its name). Prereleases only with
+  `?debug-releases=1`. Install is HTTP-only (no `/update` over BLE).
+  `?upd-base=<url>` overrides the source on a localhost-served page only.
