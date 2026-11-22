@@ -1,0 +1,9 @@
+# Known-bad calibration for the QEMU OTA-signature self-test only
+# (components/ota/sig_selftest.cpp): the image is still signed, but the app
+# no longer checks signatures at esp_ota_end, so the unsigned, wrong-key and
+# tampered uploads must be accepted and their steps FAIL.
+#   idf.py -B build-qemu-sig-nocheck -DIDF_TARGET=esp32s3
+#     -DSDKCONFIG=build-qemu-sig-nocheck/sdkconfig -DNBP_SIG_SELFTEST=1
+#     -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.sigtest-nocheck" build
+# Never for firmware.
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=n

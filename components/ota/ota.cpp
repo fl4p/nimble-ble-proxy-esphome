@@ -1,4 +1,5 @@
 #include "ota.h"
+#include "ota_sig.h"
 
 #include "proxy_config.h"
 #include "http_confirm.h"
@@ -107,20 +108,26 @@ esp_err_t update_post(httpd_req_t *req) {
                esp_err_to_name(err));
       esp_ota_abort(handle);
       if (g_quiesce_end) g_quiesce_end();
-      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                          "ota_write failed");
+      // VALIDATE_FAILED here = first byte is not the image magic.
+      if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "refused: not an app image");
+      } else {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "ota_write failed");
+      }
       return ESP_FAIL;
     }
     total += static_cast<size_t>(n);
   }
 
+  // With CONFIG_SECURE_SIGNED_ON_UPDATE this is where the signature is
+  // checked (esp_ota_end -> esp_image_verify). On failure the boot partition
+  // is never switched; sig::reject explains why (403 signature / 400 image).
   err = esp_ota_end(handle);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "esp_ota_end: %s (bad image?)", esp_err_to_name(err));
     if (g_quiesce_end) g_quiesce_end();
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                        "ota_end failed — bad image?");
-    return ESP_FAIL;
+    return sig::reject(req, target, total, err, buf, sizeof(buf));
   }
 
   err = esp_ota_set_boot_partition(target);
@@ -140,6 +147,9 @@ esp_err_t update_post(httpd_req_t *req) {
 
   ESP_LOGI(TAG, "OTA complete (%u bytes) → rebooting into %s",
            static_cast<unsigned>(total), target->label);
+#if NBP_SIG_SELFTEST
+  return ESP_OK;  // QEMU signature self-test drives the reboot itself
+#endif
   // Give the HTTP response a chance to drain before pulling the rug.
   vTaskDelay(pdMS_TO_TICKS(500));
   esp_restart();
@@ -168,7 +178,7 @@ void start() {
   // /devices drop at boot), so size with a comfortable margin and add
   // a runtime assert at registration time. Each slot is one pointer of
   // heap (4 B).
-  cfg.max_uri_handlers = 44;
+  cfg.max_uri_handlers = 45;  // 44 + GET /update (signature status)
 #if CONFIG_NBP_MODBUS_BRIDGE
   cfg.max_uri_handlers += 2;  // /modbus GET+POST
 #endif
@@ -206,6 +216,13 @@ void start() {
                         .handler = &update_post,
                         .user_ctx = nullptr};
   httpd_register_uri_handler(g_srv, &update);
+  // On the httpd task: its stack fits the signature-block read (ota_sig.h).
+  httpd_queue_work(g_srv, [](void *) { sig::init(); }, nullptr);
+  httpd_uri_t update_status = {.uri = "/update",
+                               .method = HTTP_GET,
+                               .handler = &sig::status_get,
+                               .user_ctx = nullptr};
+  httpd_register_uri_handler(g_srv, &update_status);
 
   ESP_LOGI(TAG, "OTA endpoint at http://%s.local/update", proxy::hostname());
 #else

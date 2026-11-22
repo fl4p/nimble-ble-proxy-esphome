@@ -43,6 +43,15 @@ if(NBP_WS_SELFTEST)
     idf_build_set_property(COMPILE_DEFINITIONS "NBP_WS_SELFTEST=1" APPEND)
 endif()
 
+# QEMU OTA-signature self-test only (idf.py -B build-qemu-sig
+# -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-qemu-sig/sdkconfig
+# -DNBP_SIG_SELFTEST=1 build, then … qemu): app_main runs
+# ota::sig_selftest::run() against the real /update handler on lwIP
+# loopback. Needs the dev signing key. Never in a firmware build.
+if(NBP_SIG_SELFTEST)
+    idf_build_set_property(COMPILE_DEFINITIONS "NBP_SIG_SELFTEST=1" APPEND)
+endif()
+
 project(nimble_ble_proxy
     LANGUAGES C CXX
     VERSION 0.2.8)
@@ -107,4 +116,91 @@ if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
             endif()
         endif()
     endforeach()
+endif()
+
+# App image signing (CLAUDE.md "App image signing", docs/signing.md).
+# sdkconfig.defaults turns on CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT but
+# leaves CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES off, so IDF writes an
+# unsigned nimble_ble_proxy.bin (what CI publishes; releases are signed by
+# scripts/release_sign.py). Local builds sign it in place here with the dev
+# key, so `idf.py flash` and the curl OTA keep working on dev-key devices.
+# The unsigned image stays next to it as nimble_ble_proxy-unsigned.bin.
+#   key: -DNBP_SIGNING_KEY=<pem> | env NBP_SIGNING_KEY |
+#        ~/.config/nbp-signing/dev-key.pem; "none" = leave unsigned.
+if(CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT AND
+   NOT CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES)
+    if(DEFINED NBP_SIGNING_KEY)
+        set(nbp_sign_key "${NBP_SIGNING_KEY}")
+    elseif(DEFINED ENV{NBP_SIGNING_KEY})
+        set(nbp_sign_key "$ENV{NBP_SIGNING_KEY}")
+    else()
+        set(nbp_sign_key "$ENV{HOME}/.config/nbp-signing/dev-key.pem")
+    endif()
+    idf_build_get_property(build_dir BUILD_DIR)
+    idf_build_get_property(python PYTHON)
+    idf_build_get_property(project_bin PROJECT_BIN)
+    set(nbp_sign_py "${CMAKE_CURRENT_SOURCE_DIR}/scripts/nbp_sign.py")
+    if(nbp_sign_key STREQUAL "none" OR NOT EXISTS "${nbp_sign_key}")
+        if(NBP_SIG_SELFTEST)
+            message(FATAL_ERROR "NBP_SIG_SELFTEST needs a signing key "
+                "(${nbp_sign_key}); see docs/signing.md")
+        endif()
+        message(WARNING "nbp: no signing key (${nbp_sign_key}): "
+            "${project_bin} stays UNSIGNED. A device running a signed image "
+            "refuses it over OTA, and a device flashed with it over USB "
+            "refuses every OTA. See docs/signing.md.")
+        add_custom_command(TARGET app POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E echo
+                "nbp: ${project_bin} was not signed by this build (no key at ${nbp_sign_key}); check with scripts/nbp_sign.py info"
+            VERBATIM)
+    else()
+        add_custom_command(OUTPUT "${build_dir}/.nbp_signed_stamp"
+            COMMAND ${python} "${nbp_sign_py}" build-sign
+                --bin "${build_dir}/${project_bin}" --key "${nbp_sign_key}"
+                --stamp "${build_dir}/.nbp_signed_stamp"
+            DEPENDS "${build_dir}/.bin_timestamp" "${nbp_sign_key}" "${nbp_sign_py}"
+            VERBATIM
+            COMMENT "Signing ${project_bin} with ${nbp_sign_key}")
+        add_custom_target(nbp_sign_app DEPENDS "${build_dir}/.nbp_signed_stamp")
+        add_dependencies(gen_project_binary nbp_sign_app)
+        # IDF's own POST_BUILD line says "App built but not signed" (it means
+        # its build-time signing, which is off); correct it right after.
+        add_custom_command(TARGET app POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E echo
+                "nbp: ignore the line above: ${project_bin} was signed by scripts/nbp_sign.py (key ${nbp_sign_key})"
+            VERBATIM)
+
+        if(NBP_SIG_SELFTEST)
+            # Throwaway "attacker" key, generated into the build dir.
+            set(nbp_wrong_key "${build_dir}/sigtest-wrong-key.pem")
+            if(NOT EXISTS "${nbp_wrong_key}")
+                execute_process(COMMAND ${python} -m espsecure generate-signing-key
+                        --version 2 --scheme rsa3072 "${nbp_wrong_key}"
+                    RESULT_VARIABLE rc OUTPUT_QUIET)
+                if(NOT rc EQUAL 0)
+                    message(FATAL_ERROR "could not generate ${nbp_wrong_key}")
+                endif()
+            endif()
+            execute_process(COMMAND ${python} "${nbp_sign_py}" fingerprint "${nbp_sign_key}"
+                OUTPUT_VARIABLE nbp_key_fp OUTPUT_STRIP_TRAILING_WHITESPACE
+                RESULT_VARIABLE rc)
+            if(NOT rc EQUAL 0)
+                message(FATAL_ERROR "fingerprint of ${nbp_sign_key} failed")
+            endif()
+            idf_component_get_property(ota_lib ota COMPONENT_LIB)
+            target_compile_definitions(${ota_lib} PRIVATE
+                NBP_SIG_SELFTEST_KEY="${nbp_key_fp}")
+            set(nbp_blob "${build_dir}/sigtest-blob.bin")
+            add_custom_command(OUTPUT "${nbp_blob}"
+                COMMAND ${python} "${nbp_sign_py}" selftest-blob
+                    --bin "${build_dir}/${project_bin}" --wrong-key "${nbp_wrong_key}"
+                    -o "${nbp_blob}"
+                DEPENDS "${build_dir}/.nbp_signed_stamp" "${nbp_sign_py}"
+                VERBATIM)
+            add_custom_target(nbp_sigtest_blob ALL DEPENDS "${nbp_blob}")
+            # Last 8 KiB of the coredump partition (0x3E0000 + 0x20000); the
+            # core dump check at boot only reads the start of the partition.
+            esptool_py_flash_target_image(flash sigtest_blob 0x3FE000 "${nbp_blob}")
+        endif()
+    endif()
 endif()
