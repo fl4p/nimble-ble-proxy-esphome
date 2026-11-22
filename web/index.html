@@ -89,6 +89,8 @@ h1,h2{font-size:1.1em;margin:0 0 1em}
 h2{margin-top:1.5em}
 #chart,#chart2,#chart3,#chart4{background:#1a1a1a;padding:.5em;border-radius:6px;display:block;max-width:100%}
 #chart,#chart3,#chart4{margin-top:.5em}
+#chart .u-title,#chart2 .u-title,#chart3 .u-title,#chart4 .u-title{
+  text-align:left;font-size:13px;font-weight:600;color:#ccc;padding:.2em 0 .4em .5em}
 #console{background:#0a0a0a;color:#d4d4d4;
   font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
   padding:.3em 1em .5em;width:100%;height:var(--logh,30vh);overflow-y:auto;
@@ -390,8 +392,8 @@ table#portmaps button.del:hover{background:#3b0a0a}
                             spellcheck=false autocomplete=off
                             placeholder=123456></label>
       <button id=bondpinsave>save passkey</button>
-      <span id=bondhint class=muted>used for every outbound pairing that
-        asks for one</span>
+      <span id=bondhint class=muted>the PIN this proxy enters when a device it
+        connects to asks for a passkey (e.g. a BMS's factory PIN)</span>
     </div>
     <div class=bondlists>
       <div class=bondlist>
@@ -749,6 +751,7 @@ function resizeCharts() {
 }
 function initCharts() {
   u_rates = new uPlot({
+    title: 'BLE activity · connections · heap',
     width: chartW(chartEl), height: 320,
     scales: { x: { time: false }, y: {}, kb: {} },
     axes: [
@@ -759,29 +762,37 @@ function initCharts() {
     ],
     series: [
       { label: 't (s ago)' },
-      { label: 'reads/s',    stroke: '#4ade80', width: 2, value: fmt1 },
-      { label: 'writes/s',   stroke: '#60a5fa', width: 2, value: fmt1 },
-      { label: 'notifies/s', stroke: '#f472b6', width: 2, value: fmt1 },
-      { label: 'adverts/s',  stroke: '#fbbf24', width: 2, value: fmt1 },
-      { label: 'conns',      stroke: '#a78bfa', width: 2 },
-      { label: 'heap',       scale: 'kb', stroke: '#9ca3af', width: 2, dash: [4, 4] },
+      { label: 'reads/s',    stroke: '#4ade80', width: 2, value: fmt1, points: { show: false } },
+      { label: 'writes/s',   stroke: '#60a5fa', width: 2, value: fmt1, points: { show: false } },
+      { label: 'notifies/s', stroke: '#f472b6', width: 2, value: fmt1, points: { show: false } },
+      { label: 'adverts/s',  stroke: '#fbbf24', width: 2, value: fmt1, points: { show: false } },
+      { label: 'conns',      stroke: '#a78bfa', width: 2, points: { show: false } },
+      { label: 'heap',       scale: 'kb', stroke: '#9ca3af', width: 2, dash: [4, 4], points: { show: false } },
     ],
   }, [t, r, w, n, a, c, h], chartEl);
 
   u_cpu = new uPlot({
+    title: 'CPU load · temperature',
     width: chartW(chart2El), height: 200,
-    scales: { x: { time: false }, y: { range: [0, 100] }, temp: {} },
+    // temp: at least a 4 °C span, so a sub-degree wobble doesn't fill the
+    // chart and the ticks don't all round to the same whole degree.
+    scales: { x: { time: false }, y: { range: [0, 100] },
+      temp: { range: (u, mn, mx) => {
+        if (mn == null || mx == null) return [30, 60];
+        const mid = (mn + mx) / 2, half = Math.max(2, (mx - mn) / 2 + 0.5);
+        return [Math.floor(mid - half), Math.ceil(mid + half)];
+      } } },
     axes: [
       { stroke: '#aaa', grid: { stroke: '#333' } },
       { stroke: '#aaa', grid: { stroke: '#333' }, values: (u, vs) => vs.map(v => v + '%') },
       { side: 1, scale: 'temp', stroke: '#22d3ee', grid: { show: false }, size: 42,
-        values: (u, vs) => vs.map(v => v.toFixed(0) + '°C') },
+        values: (u, vs) => vs.map(v => (Number.isInteger(v) ? v : v.toFixed(1)) + '°C') },
     ],
     series: [
       { label: 't (s ago)' },
-      { label: 'cpu0%',    stroke: '#ef4444', width: 2 },
-      { label: 'cpu1%',    stroke: '#f97316', width: 2 },
-      { label: 'temp°C', scale: 'temp', stroke: '#22d3ee', width: 2, value: fmt1 },
+      { label: 'cpu0%',    stroke: '#ef4444', width: 2, points: { show: false } },
+      { label: 'cpu1%',    stroke: '#f97316', width: 2, points: { show: false } },
+      { label: 'temp°C', scale: 'temp', stroke: '#22d3ee', width: 2, value: fmt1, points: { show: false } },
     ],
   }, [t, c0, c1, tcA], chart2El);
 
@@ -790,6 +801,7 @@ function initCharts() {
   // Created even on non-NAT builds (cheap); the container stays hidden via
   // .nat-only until applyCaps() sees ap_rx in /stats.json.
   u_thru = new uPlot({
+    title: 'Repeater throughput (SoftAP clients)',
     width: chartW(chart3El), height: 200,
     scales: { x: { time: false }, y: {} },
     axes: [
@@ -799,8 +811,8 @@ function initCharts() {
     ],
     series: [
       { label: 't (s ago)' },
-      { label: 'down KB/s', stroke: '#34d399', width: 2, value: fmt1 },
-      { label: 'up KB/s',   stroke: '#f59e0b', width: 2, value: fmt1 },
+      { label: 'down KB/s', stroke: '#34d399', width: 2, value: fmt1, points: { show: false } },
+      { label: 'up KB/s',   stroke: '#f59e0b', width: 2, value: fmt1, points: { show: false } },
     ],
   }, [t, tx, rx], chart3El);
 }
@@ -1013,6 +1025,7 @@ async function tickStats() {
 let g_wifihist = null;
 function initWifiChart() {
   u_wifi = new uPlot({
+    title: 'WiFi link, last hour · signal, gateway RTT, loss',
     width: chartW(chart4El), height: 220,
     scales: { x: { time: false }, y: {}, ms: {} },
     axes: [
@@ -1025,10 +1038,10 @@ function initWifiChart() {
     ],
     series: [
       { label: 't (min ago)' },
-      { label: 'uplink dBm', stroke: '#4ade80', width: 2 },
-      { label: 'client dBm', stroke: '#f472b6', width: 2 },
-      { label: 'RTT ms', scale: 'ms', stroke: '#22d3ee', width: 2, value: fmt1 },
-      { label: 'loss%', scale: 'ms', stroke: '#ef4444', width: 1, dash: [4, 4], value: fmt1 },
+      { label: 'uplink dBm', stroke: '#4ade80', width: 2, points: { show: false } },
+      { label: 'client dBm', stroke: '#f472b6', width: 2, points: { show: false } },
+      { label: 'RTT ms', scale: 'ms', stroke: '#22d3ee', width: 2, value: fmt1, points: { show: false } },
+      { label: 'loss%', scale: 'ms', stroke: '#ef4444', width: 1, dash: [4, 4], value: fmt1, points: { show: false } },
     ],
   }, [[0], [null], [null], [null], [null]], chart4El);
 }
