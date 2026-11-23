@@ -227,3 +227,10 @@ CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
 CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
 CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
 CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n
+# With signing on, every IDF image check (esp_ota_check_rollback_is_possible,
+# esp_ota_mark_app_invalid_rollback*, esp_ota_get_last_invalid_partition)
+# runs an RSA-3072 verify, ~2 KiB of stack. ota_verify::early_init calls the
+# first on the main task, and at 3584 B that overflowed: the first boot of an
+# OTA'd image panicked in intr_alloc (QEMU 2026-11-23, rolled back). The main
+# task is deleted when app_main returns, so this costs heap during boot only.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144

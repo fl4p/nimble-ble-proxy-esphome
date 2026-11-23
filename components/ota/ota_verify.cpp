@@ -440,6 +440,11 @@ bool loopback_listens(uint16_t port) {
   return tcp_try(htonl(INADDR_LOOPBACK), port, 1000) == 1;
 }
 
+// The worker may call esp_ota_mark_app_invalid_rollback_and_reboot(), which
+// validates the rollback target; with app signing that is an RSA-3072
+// verify (~2 KiB of stack on top of the worker's own ~1.6 KiB).
+constexpr uint32_t kWorkerStack = 6144;
+
 void early_init() {
   g_t0_us = esp_timer_get_time();
   g_running = esp_ota_get_running_partition();
@@ -519,7 +524,7 @@ void early_init() {
     esp_timer_start_once(g_backstop,
                          static_cast<uint64_t>(kParams.deadline_s + kBackstopGraceS) * 1000000);
   }
-  if (xTaskCreate(&worker, "ota_verify", 4096, nullptr, 2, nullptr) != pdPASS) {
+  if (xTaskCreate(&worker, "ota_verify", kWorkerStack, nullptr, 2, nullptr) != pdPASS) {
     // No worker: the backstop restart still ends this attempt.
     ESP_LOGE(TAG, "xTaskCreate(ota_verify) failed; the backstop will restart");
   }
@@ -724,6 +729,12 @@ bool st_install_copy() {
   std::printf("OTA-SELFTEST reading image metadata of %s\n", src->label);
   std::fflush(stdout);
   if (esp_image_get_metadata(&pos, &md) != ESP_OK) return false;
+#if CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT
+  // image_len ends before the signature sector; esp_ota_end() refuses the
+  // copy without it ("unsigned").
+  md.image_len = ((md.image_len + 4095u) & ~4095u) + 4096u;
+  if (md.image_len > src->size) return false;
+#endif
   std::printf("OTA-SELFTEST installing %lu B from %s into %s\n",
               static_cast<unsigned long>(md.image_len), src->label, dst->label);
   std::fflush(stdout);

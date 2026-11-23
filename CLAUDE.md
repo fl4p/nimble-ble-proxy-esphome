@@ -1495,6 +1495,27 @@ rest:
   unchanged, slot header erased; signed → 200, boots from ota_1, same key.
   Known-bad: add `sdkconfig.defaults.sigtest-nocheck` (own build dir); the
   three refusals and the counter FAIL.
+- **Stack: every IDF image check is an RSA verify now** (~2 KiB of stack):
+  `esp_ota_check_rollback_is_possible`, `esp_ota_mark_app_invalid_rollback*`,
+  `esp_ota_get_last_invalid_partition`, `esp_ota_set_boot_partition`. With the
+  3584 B main task, `ota_verify::early_init` overflowed it on the first boot
+  of every OTA'd image (panic in `intr_alloc`, then rolled back; QEMU
+  2026-11-23, only with rollback + signing merged). `ESP_MAIN_TASK_STACK_SIZE`
+  is 6144 (the task exits after boot; the boot-complete log line prints the
+  unused stack) and the `ota_verify` worker has 6 KiB (high-water 4532 B
+  free in QEMU, the deadline rollback included). Any new caller of those IDF
+  functions needs a task with that headroom.
+- **Publish gate:** `scripts/nbp_sign.py check-release IMG…` passes an
+  `*-ota.bin` or merged `*-flash.bin` (app found via the partition table at
+  0x8000) only if block 0 is signed with `RELEASE_KEY_SHA256`, the digest
+  matches and RSA-PSS verifies; classic ESP32 passes unsigned; no pinned key
+  = everything refused. `pages.yml` runs it on every staged file and deletes
+  refused ones, `make_updates_manifest.py` re-checks and leaves them out,
+  and `pages.yml` is no longer triggered by tag builds:
+  `release_sign.py --upload` dispatches it after uploading. The dashboard
+  install also refuses an unsigned image and one whose key differs from the
+  device's `GET /update` `key_sha256` (key comparison only; the RSA check is
+  the device's).
 - **Release flow:** CI stays unsigned. `scripts/release_sign.py sign <tag>`
   (dry run; `--upload` asks for the tag, then `gh release upload --clobber`)
   signs `*-ota.bin` with the Keychain key, rebuilds `*-flash.bin` after

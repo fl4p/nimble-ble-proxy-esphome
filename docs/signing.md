@@ -81,8 +81,13 @@ USB flash (section 6).
    scripts/release_sign.py sign vX.Y.Z --upload
    ```
 
-   It runs `gh release upload vX.Y.Z … --clobber`.
-5. Restage the web flasher: `gh workflow run pages.yml --repo fl4p/nimble-ble-proxy-esphome`.
+   It runs `gh release upload vX.Y.Z … --clobber`, then
+   `gh workflow run pages.yml`.
+5. Pages publishes the web flasher images and the dashboard's `updates.json`.
+   It no longer runs after a tag build. Its gate (`nbp_sign.py check-release`)
+   drops every image that is not signed with the pinned release key (classic
+   ESP32 excepted), so a run before step 4 publishes nothing for S3/C3/C6.
+   Check the run log for `REFUSED` lines.
 6. Check one device: after the OTA, `curl http://<device>/update` shows the
    release fingerprint.
 
@@ -95,8 +100,11 @@ A device that installs an **unsigned** image from this firmware onward has no
 trusted key. It refuses every OTA (`403`, `no_trusted_key`) until it is flashed
 over USB. This affects:
 
-- the unsigned CI `*-ota.bin`, OTA'd before step 4;
-- the unsigned CI `*-flash.bin`, flashed with the web flasher before step 5;
+- the unsigned CI `*-ota.bin`, downloaded from the release page and OTA'd
+  by hand before step 4 (the dashboard only offers what Pages lists, and
+  Pages lists only signed images);
+- the unsigned CI `*-flash.bin`, downloaded from the release page and
+  flashed by hand (the web flasher only serves what the Pages gate passed);
 - a local build made without a signing key (the build prints `UNSIGNED`).
 
 Devices still running firmware from before signing (0.2.8 and older) check no

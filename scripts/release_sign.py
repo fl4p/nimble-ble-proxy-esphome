@@ -290,7 +290,11 @@ def cmd_sign(args):
     if ans != args.tag:
         die('not confirmed; nothing uploaded')
     run(['gh', 'release', 'upload', args.tag, '--repo', args.repo, '--clobber'] + uploads)
-    print('Uploaded. Restage the web flasher: gh workflow run pages.yml --repo ' + args.repo)
+    print('Uploaded. Publishing to Pages (web flasher + dashboard updates.json): '
+          'gh workflow run pages.yml')
+    # pages.yml no longer runs after a tag build (it would stage the unsigned CI
+    # images); this is what publishes a release. Its gate re-checks every image.
+    run(['gh', 'workflow', 'run', 'pages.yml', '--repo', args.repo])
 
 
 def main():

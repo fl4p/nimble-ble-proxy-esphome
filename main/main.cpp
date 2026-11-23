@@ -518,8 +518,11 @@ extern "C" void app_main() {
            static_cast<unsigned>(
                heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
 #endif
-  ESP_LOGI(TAG, "boot complete; heap free=%u largest=%u min=%u; main task exiting",
+  ESP_LOGI(TAG, "boot complete; heap free=%u largest=%u min=%u; main task exiting "
+           "(stack %u B never used of %u)",
            static_cast<unsigned>(heap_caps_get_free_size(kInternal)),
            static_cast<unsigned>(heap_caps_get_largest_free_block(kInternal)),
-           static_cast<unsigned>(heap_caps_get_minimum_free_size(kInternal)));
+           static_cast<unsigned>(heap_caps_get_minimum_free_size(kInternal)),
+           static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)),
+           static_cast<unsigned>(CONFIG_ESP_MAIN_TASK_STACK_SIZE));
 }

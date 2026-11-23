@@ -237,6 +237,80 @@ def verify(path: str, pub_pem_path: str, expect_fp: str) -> None:
             f'expected {expect_fp}')
 
 
+# --- publish gate -------------------------------------------------------------
+# An image built with SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT but published
+# unsigned locks every device that installs it out of OTA (no trusted key)
+# until a USB flash. The Pages workflow and make_updates_manifest.py stage or
+# list an image only if check_release_image() returns None.
+
+CHIP_ID_ESP32 = 0  # esp_image_header_t.chip_id; classic ESP32 builds unsigned
+PART_TABLE_OFF = 0x8000
+
+
+def app_in_flash_image(data: bytes) -> bytes:
+    """The ota_0 (else factory) app of a merged *-flash.bin, via its
+    partition table at 0x8000. Raises ValueError when there is none."""
+    for i in range(0, 0xC00, 32):
+        e = data[PART_TABLE_OFF + i:PART_TABLE_OFF + i + 32]
+        if len(e) < 32 or e[:2] != b'\xaa\x50':
+            break
+        ptype, subtype, off, size = e[2], e[3], *struct.unpack_from('<II', e, 4)
+        if ptype == 0 and subtype in (0x10, 0x00):
+            if len(data) <= off or data[off] != 0xE9:
+                raise ValueError(f'no app image at 0x{off:x}')
+            return data[off:off + size]
+    raise ValueError('no ota_0/factory partition in the partition table')
+
+
+def verify_block_rsa(content: bytes, blk: bytes) -> bool:
+    """RSA-PSS check of signature block 0 over `content`, as espsecure
+    verify-signature --version 2 does (n and the signature are stored LE)."""
+    hashes, _, padding, rsa, utils = _crypto()
+    from cryptography.exceptions import InvalidSignature
+    digest = hashlib.sha256(content).digest()
+    if blk[4:36] != digest:
+        return False
+    n = int.from_bytes(blk[KEY_OFF:KEY_OFF + 384], 'little')
+    e = struct.unpack_from('<I', blk, KEY_OFF + 384)[0]
+    sig = blk[KEY_OFF + KEY_LEN:KEY_OFF + KEY_LEN + 384][::-1]
+    pub = rsa.RSAPublicNumbers(e, n).public_key()
+    try:
+        pub.verify(sig, digest,
+                   padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32),
+                   utils.Prehashed(hashes.SHA256()))
+    except InvalidSignature:
+        return False
+    return True
+
+
+def check_release_image(data: bytes, expect_fp) -> 'str | None':
+    """None if `data` (an *-ota.bin app image, or a *-flash.bin merged image)
+    may be published; else the reason it may not. Fails closed: an unparsable
+    image, a missing pinned fingerprint or a missing crypto library refuse."""
+    try:
+        if data[PART_TABLE_OFF:PART_TABLE_OFF + 2] == b'\xaa\x50':  # merged flash image
+            data = app_in_flash_image(data)
+        if len(data) < 24 or data[0] != 0xE9:
+            return 'not an ESP app image'
+        chip_id = struct.unpack_from('<H', data, 12)[0]
+        if chip_id == CHIP_ID_ESP32:
+            return None  # signing is off on classic ESP32 (sdkconfig.defaults.esp32)
+        if not expect_fp:
+            return 'no release key pinned (RELEASE_KEY_SHA256 is None)'
+        off = sig_offset(data)
+        blk = data[off:off + SIG_BLOCK_SIZE]
+        b0 = parse_block(blk)
+        if b0 is None:
+            return 'UNSIGNED (no valid signature block)'
+        if b0['key_sha256'] != expect_fp:
+            return f'signed with key {b0["key_sha256"]}, not the release key {expect_fp}'
+        if not verify_block_rsa(data[:off], blk):
+            return 'signature block does not verify (digest or RSA)'
+    except ValueError as e:
+        return str(e)
+    return None
+
+
 def assert_outside_repo(path: str, what: str):
     p = os.path.realpath(path)
     if p == REPO or p.startswith(REPO + os.sep):
@@ -293,6 +367,16 @@ def cmd_build_sign(a):
     print(msg)
     if a.stamp:
         open(a.stamp, 'w').write(fp + '\n')
+
+
+def cmd_check_release(a):
+    fp = a.fp or RELEASE_KEY_SHA256
+    bad = 0
+    for path in a.images:
+        why = check_release_image(open(path, 'rb').read(), fp)
+        print(f'{"OK     " if why is None else "REFUSED"} {path}' + (f': {why}' if why else ''))
+        bad += why is not None
+    return 1 if bad else 0
 
 
 def cmd_selftest_blob(a):
@@ -362,6 +446,11 @@ def main():
     s.add_argument('--key', required=True)
     s.add_argument('--stamp')
     s.set_defaults(fn=cmd_build_sign)
+    s = sub.add_parser('check-release',
+                       help='may these images be published? (exit 1 if any may not)')
+    s.add_argument('images', nargs='+')
+    s.add_argument('--fp', help='expected key fingerprint (default: RELEASE_KEY_SHA256)')
+    s.set_defaults(fn=cmd_check_release)
     s = sub.add_parser('selftest-blob')
     s.add_argument('--bin', required=True)
     s.add_argument('--wrong-key', required=True)

@@ -25,6 +25,14 @@ the workflow does not publish a manifest that disagrees with its files:
 the GitHub asset digest (when the API reports one) and size match the file,
 the ESP image and app-descriptor magics are present, and the project name
 is nimble_ble_proxy.
+
+Signed images only (scripts/nbp_sign.py check_release_image): an image
+built to accept only signed updates but published unsigned would lock every
+device that installs it out of OTA until a USB flash. An image that is not
+signed with the pinned release key (RELEASE_KEY_SHA256), or is missing (the
+workflow deletes refused files first), is left out of the manifest and
+reported on stderr; classic ESP32 images are unsigned by design and pass.
+With no release key pinned no signing-capable image is ever listed.
 """
 import argparse
 import hashlib
@@ -34,6 +42,9 @@ import struct
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import nbp_sign  # noqa: E402
 
 ASSET_RE = re.compile(r"^nimble_ble_proxy-(?P<variant>[a-z0-9]+-[a-z0-9-]+)-ota\.bin$")
 SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
@@ -107,7 +118,14 @@ def main():
             if not m:
                 continue
             path = fw / tag / a["name"]
+            if not path.exists():
+                print(f"{tag}/{a['name']}: not staged (refused), not listed", file=sys.stderr)
+                continue
             data = path.read_bytes()
+            why = nbp_sign.check_release_image(data, nbp_sign.RELEASE_KEY_SHA256)
+            if why is not None:
+                print(f"{tag}/{a['name']}: {why}; not listed", file=sys.stderr)
+                continue
             sha = hashlib.sha256(data).hexdigest()
             if len(data) != a["size"]:
                 sys.exit(f"{tag}/{a['name']}: {len(data)} B on disk, "

@@ -2427,6 +2427,60 @@ function checkImage(buf, img, target) {
   if (img.app_version && cstr(32 + 16, 32) !== img.app_version)
     throw new Error(`image says v${cstr(32 + 16, 32)}, manifest v${img.app_version}`);
 }
+// Signature block 0 (Secure Boot V2 RSA layout, scripts/nbp_sign.py): one
+// 1216 B block at the first 4 KiB boundary after the image. The device does
+// the real RSA check in esp_ota_end(); this only refuses what it would refuse
+// (another key) or what nothing would stop: an unsigned image on a device
+// that checks no signatures yet installs fine and then trusts no key, so
+// every later OTA is refused until a USB flash.
+function imageLen(buf) {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.length);
+  const nseg = buf[1];
+  if (nseg < 1 || nseg > 16) throw new Error(`bad segment count ${nseg}`);
+  let pos = 24;
+  for (let i = 0; i < nseg; i++) {
+    if (pos + 8 > buf.length) throw new Error('truncated image');
+    pos += 8 + dv.getUint32(pos + 4, true);
+  }
+  pos = (pos + 1 + 15) & ~15;
+  if (buf[23] === 1) pos += 32;
+  if (pos > buf.length) throw new Error('truncated image');
+  return pos;
+}
+function crc32(b) {
+  let c = ~0;
+  for (let i = 0; i < b.length; i++) {
+    c ^= b[i];
+    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+  }
+  return ~c >>> 0;
+}
+// sha256 of block 0's public key (= GET /update key_sha256), or null.
+function imageSigKey(buf) {
+  const off = (imageLen(buf) + 4095) & ~4095;
+  const blk = buf.subarray(off, off + 1216);
+  if (blk.length < 1216 || blk[0] !== 0xe7 || blk[1] !== 0x02) return null;
+  const crc = new DataView(blk.buffer, blk.byteOffset).getUint32(1196, true);
+  if (crc32(blk.subarray(0, 1196)) !== crc) return null;
+  return sha256hex(blk.subarray(36, 36 + 776));
+}
+async function checkSignature(buf) {
+  if ((buf[12] | (buf[13] << 8)) === CHIP_ID.esp32) return;  // classic ESP32: unsigned by design
+  const key = imageSigKey(buf);
+  if (!key) throw new Error('the image is not signed. Installing it would leave the device ' +
+                            'refusing every later update until a USB flash; not uploaded');
+  let st = null;
+  try { st = await apiJson('GET /update'); } catch (e) { /* firmware before signing: no GET /update */ }
+  if (st && st.sig_check) {
+    if (!st.running_signed)
+      throw new Error('the device runs an unsigned image and trusts no key; it refuses every OTA. ' +
+                      'Flash the signed release over USB (web flasher)');
+    if (st.key_sha256 && st.key_sha256 !== key)
+      throw new Error(`the image is signed with key ${key.slice(0, 16)}…, the device trusts ` +
+                      `${st.key_sha256.slice(0, 16)}… (a dev-signed build?). It would refuse it; ` +
+                      'flash over USB to change keys');
+  }
+}
 function upload(buf, onProgress) {
   return new Promise(resolve => {
     const x = new XMLHttpRequest();
@@ -2475,6 +2529,7 @@ async function install(release, variant) {
     const sha = sha256hex(buf);
     if (sha !== img.sha256) throw new Error(`sha256 mismatch: got ${sha.slice(0, 16)}…, manifest ${img.sha256.slice(0, 16)}…`);
     checkImage(buf, img, oldApp && oldApp.target);
+    await checkSignature(buf);
     setState('uploading to the device…'); prog.value = 0;
     const res = await upload(buf, f => { prog.value = f; setState(`uploading… ${Math.round(f * 100)} %`); });
     if (res.status !== 200 && res.status !== 0)
@@ -2507,7 +2562,7 @@ $('updinstall').onclick = () => {
   const r = g_app && newestFor(g_app.variant);
   if (!r) return;
   if (!confirm(`Install firmware v${r.version} (${g_app.variant}) on ${location.host}?\n\n` +
-               `The image is downloaded from GitHub Pages, checked (size, sha256) and ` +
+               `The image is downloaded from GitHub Pages, checked (size, sha256, signature) and ` +
                `uploaded to the device, which then reboots. A failed update leaves the ` +
                `current v${g_app.version} running.`)) return;
   install(r, g_app.variant);
