@@ -20,6 +20,10 @@
 #include "esp_efuse_table.h"
 #endif
 #include "esp_app_desc.h"  // esp_app_get_description (project/version/build)
+
+#ifndef NBP_VARIANT  // set by the root CMakeLists.txt; never undefined in a real build
+#define NBP_VARIANT "custom"
+#endif
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_sleep.h"
@@ -752,7 +756,7 @@ esp_err_t hostname_get(httpd_req_t *req) {
 }
 
 esp_err_t appinfo_get(httpd_req_t *req) {
-  char buf[256];
+  char buf[384];
   size_t n = build_appinfo_json(buf, sizeof(buf));
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, buf, n);
@@ -1746,12 +1750,18 @@ size_t build_appinfo_json(char *buf, size_t cap) {
   char sha[17];
   for (int i = 0; i < 8; ++i)
     std::snprintf(sha + i * 2, 3, "%02x", d->app_elf_sha256[i]);
+  // "variant" names the release asset this image was built as
+  // (nimble_ble_proxy-<variant>-ota.bin), or "custom" for any other build;
+  // the dashboard's update check offers only an image of the same variant.
+  // Set and validated in the root CMakeLists.txt.
   int n = std::snprintf(
       buf, cap,
       "{\"project\":\"%s\",\"version\":\"%s\",\"date\":\"%s\",\"time\":\"%s\","
-      "\"idf\":\"%s\",\"secure\":%lu,\"elf_sha256\":\"%s\"}",
+      "\"idf\":\"%s\",\"secure\":%lu,\"elf_sha256\":\"%s\","
+      "\"target\":\"%s\",\"variant\":\"%s\"}",
       d->project_name, d->version, d->date, d->time, d->idf_ver,
-      static_cast<unsigned long>(d->secure_version), sha);
+      static_cast<unsigned long>(d->secure_version), sha, CONFIG_IDF_TARGET,
+      NBP_VARIANT);
   if (n < 0) return 0;
   return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
 }

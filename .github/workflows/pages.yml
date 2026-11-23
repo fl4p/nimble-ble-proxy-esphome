@@ -6,6 +6,7 @@ on:
     paths:
       - web-flasher/**
       - .github/workflows/pages.yml
+      - scripts/make_updates_manifest.py
   workflow_dispatch:
   # A release is created by the build workflow's GITHUB_TOKEN, which triggers no
   # other workflow, so a `release` trigger would never fire. Restage the flasher
@@ -44,6 +45,29 @@ jobs:
             mkdir -p "web-flasher/firmware/$tag"
             gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*-flash.bin' --dir "web-flasher/firmware/$tag" --clobber
           fi
+      # Update manifest for the device dashboard's "update available" check
+      # (web/index.html). The browser downloads the OTA image itself and
+      # POSTs it to the device's /update; release-asset downloads carry no
+      # Access-Control-Allow-Origin, Pages does, so the -ota.bin files are
+      # staged here next to updates.json. Lists the newest stable release
+      # plus newer prereleases, never drafts; every image is checked against
+      # the release's size/sha256 digest and its own app descriptor first.
+      - name: Stage OTA images and updates.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=30" > "$RUNNER_TEMP/releases.json"
+          python3 scripts/make_updates_manifest.py "$RUNNER_TEMP/releases.json" web-flasher/firmware \
+            --repo "$GITHUB_REPOSITORY" --list-only > "$RUNNER_TEMP/ota-assets.txt"
+          while read -r tag name; do
+            mkdir -p "web-flasher/firmware/$tag"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$name" \
+              --dir "web-flasher/firmware/$tag" --clobber
+          done < "$RUNNER_TEMP/ota-assets.txt"
+          python3 scripts/make_updates_manifest.py "$RUNNER_TEMP/releases.json" web-flasher/firmware \
+            --repo "$GITHUB_REPOSITORY" > web-flasher/updates.json
+          cat web-flasher/updates.json
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web-flasher
