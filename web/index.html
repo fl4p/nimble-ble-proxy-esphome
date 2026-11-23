@@ -2513,6 +2513,43 @@ async function waitForDevice(img, oldElf, maxMs) {
   }
   return last;
 }
+// An installed image boots unverified (OTA rollback) and confirms itself
+// once WiFi, the gateway and its own services work, or rolls back by its
+// deadline. Follow GET /ota until one of the two; older firmware has no /ota.
+async function followVerify(now, oldApp) {
+  const t0 = Date.now();
+  let limitMs = 20 * 60000;
+  while (Date.now() - t0 < limitMs) {
+    let o = null, a = null;
+    try { const r = await fetchT('/ota', { cache: 'no-store' }, 4000);
+          if (r.status === 404) { setState(`done: now running v${now.version}`, 'good'); return; }
+          if (r.ok) o = await r.json(); } catch (e) {}
+    try { const r = await fetchT('/appinfo', { cache: 'no-store' }, 4000); if (r.ok) a = await r.json(); } catch (e) {}
+    if (a && oldApp && a.elf_sha256 === oldApp.elf_sha256 && a.elf_sha256 !== now.elf_sha256) {
+      const rb = o && o.last_rollback;
+      setState(`update ROLLED BACK: the device runs v${a.version} again` +
+               (rb && rb.cause ? ` (${rb.cause})` : '') + '. GET /ota has the details', 'bad');
+      g_app = a; render(); return;
+    }
+    if (o) {
+      if (o.phase === 'pending') {
+        const v = o.verify || {};
+        if (v.deadline_s) limitMs = (v.deadline_s + 180) * 1000;
+        setState(`v${now.version} installed; verifying itself (it rolls back if WiFi, the ` +
+                 `gateway or its services fail)` + (v.left_s ? `, ${v.left_s} s left` : '') + '…');
+      } else if (o.state === 'valid' || o.phase === 'valid') {
+        setState(`done: v${now.version} verified` + (now.variant ? ` (${now.variant})` : ''), 'good');
+        return;
+      } else if (o.phase === 'not_pending') {
+        // Installed by firmware without rollback: nothing to verify.
+        setState(`done: now running v${now.version}`, 'good');
+        return;
+      }
+    }
+    await sleep(5000);
+  }
+  setState(`v${now.version} is running, but it did not report itself verified; check GET /ota`, 'bad');
+}
 async function install(release, variant) {
   const img = release.images[variant];
   if (g_busy || !img || !img.path || !TRANSPORT_ok()) return;
@@ -2532,6 +2569,9 @@ async function install(release, variant) {
     await checkSignature(buf);
     setState('uploading to the device…'); prog.value = 0;
     const res = await upload(buf, f => { prog.value = f; setState(`uploading… ${Math.round(f * 100)} %`); });
+    if (res.status === 409)
+      throw new Error(`the device is still verifying its current image (it can still roll back), ` +
+                      `so it accepts no update yet. Try again once it has marked itself valid`);
     if (res.status !== 200 && res.status !== 0)
       throw new Error(`device refused the image (HTTP ${res.status}: ${res.text.trim()}); it keeps running v${oldApp.version}`);
     setState(res.status === 200 ? 'upload done, device is rebooting…' : `upload ended without a reply (${res.text}); checking the device…`);
@@ -2544,8 +2584,9 @@ async function install(release, variant) {
       throw new Error(`the device now runs v${now.version} (${now.elf_sha256}), not the expected v${img.app_version} (${img.elf_sha256})`);
     g_app = now;
     prog.value = 1;
-    setState(`done: now running v${now.version}` + (now.variant ? ` (${now.variant})` : ''), 'good');
+    setState(`v${now.version} is running; checking whether it verified itself…`);
     if (typeof loadInitialValues === 'function') loadInitialValues();
+    followVerify(now, oldApp);
   } catch (e) {
     prog.value = 0;
     setState(`update failed: ${e.message || e}`, 'bad');

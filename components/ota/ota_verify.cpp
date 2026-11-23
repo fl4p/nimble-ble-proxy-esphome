@@ -255,8 +255,24 @@ bool mark_valid(const char *via) {
   vTaskDelay(pdMS_TO_TICKS(200));  // let the line reach /log and serial
   const esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
   ESP_LOGE(TAG, "rollback failed: %s", esp_err_to_name(err));
-  g_phase.store(kPending);
-  if (err == ESP_ERR_OTA_ROLLBACK_FAILED) mark_valid("no_rollback_target");
+  // early_init only gets this far into pending mode after
+  // esp_ota_check_rollback_is_possible() found a target. IDF re-runs that
+  // check here, and with app signing it is an RSA verify that allocates heap:
+  // under the low heap that may have failed the criterion, it can fail for
+  // that reason alone. Never turn that into "accepted". Restart instead: a
+  // rollback bootloader aborts the still-pending image and boots the previous
+  // one with no app-side check, and under an old bootloader the restart is one
+  // more counted start, so early_init rolls back on a fresh heap.
+  if (cause == kStarts && g_starts > static_cast<uint32_t>(CONFIG_NBP_OTA_VERIFY_MAX_BOOTS) + 2) {
+    // Old bootloader, and the boot-time rollback keeps failing on a fresh
+    // heap: restarting again would loop forever. Keep the image.
+    g_phase.store(kPending);
+    mark_valid("rollback_failed");
+    return;
+  }
+  ESP_LOGE(TAG, "restarting so the bootloader / start counter rolls back");
+  vTaskDelay(pdMS_TO_TICKS(200));
+  esp_restart();
 }
 
 [[maybe_unused]] void backstop_cb(void *) {

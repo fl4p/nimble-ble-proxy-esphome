@@ -259,7 +259,19 @@
   The same object is `"ota"` in `GET /crash`. `POST /ota?mark=valid|invalid`
   (`X-NBP-Confirm: yes`; 409 unless pending) for manual tests. A pending image
   with no valid other slot (`esp_ota_check_rollback_is_possible` false) is
-  accepted at once (`valid_via: no_rollback_target`).
+  accepted at once (`valid_via: no_rollback_target`). That check runs once, in
+  `early_init`; when a later rollback attempt fails (IDF re-runs the check,
+  an RSA verify that allocates heap and can fail under exactly the low heap
+  that failed the criterion) the image is NOT accepted: `rollback()`
+  restarts, so a rollback bootloader aborts the pending image and an old
+  bootloader counts one more start. Only a boot-time start-counter rollback
+  that keeps failing past `MAX_BOOTS + 2` starts keeps the image
+  (`valid_via: rollback_failed`), so it cannot loop. Review 2026-11-23: the
+  first OTA after a USB flash IS protected: every bootloader writes
+  `otadata[0]` on the first boot of a flashed image (`set_actual_ota_seq`,
+  `bootloader_utility.c:501`, not rollback-gated), so the OTA leaves two
+  valid entries (QEMU self-test starts from a serial flash). The dashboard
+  install follows `GET /ota` until `valid` or a rollback and explains the 409.
 - **Any reset of a pending image on a rollback bootloader is a rollback**,
   including `/reboot`, a liveness reboot or a power cut in the first minute.
   That is IDF's design; retry the update.
@@ -1309,7 +1321,11 @@ rest:
   remote-switch contact: high = closed = inverter on. It feeds a fridge,
   so the output must not glitch. Checked by `nbp_gpio::allowed()` and
   claimed first (before the bridge and sensors); a disallowed pin is left
-  untouched (`running:false`).
+  untouched (`running:false`). On ESP32/C3/C6 the switch also refuses
+  strapping and USB pins (`nbp_gpio::strap_or_usb`: ESP32 0/2/5/12/15, C3
+  2/8/9/18/19, C6 8/9/12/13/15): the gate's pull-down held through a reset
+  would pick download mode or the flash voltage (the S3 excludes its straps
+  in `allowed()` for every peripheral).
 - `GET /switch` → `{"gpio":14,"name":"inverter","on":true,"boot":"last","changes":0,"since_s":12,"running":true}`
   (`changes` since boot, `since_s` since the last change or boot; `gpio`
   -1 = not configured).
@@ -1505,11 +1521,20 @@ rest:
   unused stack) and the `ota_verify` worker has 6 KiB (high-water 4532 B
   free in QEMU, the deadline rollback included). Any new caller of those IDF
   functions needs a task with that headroom.
+- **Release = draft until signed.** `build.yml`'s `release` job (after the
+  whole matrix) creates the tag's release as a **draft** with the unsigned CI
+  assets, and refuses to upload to an already published release.
+  `release_sign.py sign <tag> --upload` replaces the S3/C3/C6 images, then
+  `gh release edit --draft=false`, then dispatches `pages.yml`.
 - **Publish gate:** `scripts/nbp_sign.py check-release IMG…` passes an
   `*-ota.bin` or merged `*-flash.bin` (app found via the partition table at
   0x8000) only if block 0 is signed with `RELEASE_KEY_SHA256`, the digest
   matches and RSA-PSS verifies; classic ESP32 passes unsigned; no pinned key
-  = everything refused. `pages.yml` runs it on every staged file and deletes
+  = everything else refused, except releases up to `LAST_PRE_SIGNING_RELEASE`
+  (v0.2.8; firmware that checks no signature) whose image version equals the
+  tag and whose length is not 64 KiB-aligned (signing builds are padded to
+  the MMU page; a signing build under an old tag is refused). The tag comes
+  from the staging path `firmware/<tag>/` or `--tag`. `pages.yml` runs it on every staged file and deletes
   refused ones, `make_updates_manifest.py` re-checks and leaves them out,
   and `pages.yml` is no longer triggered by tag builds:
   `release_sign.py --upload` dispatches it after uploading. The dashboard

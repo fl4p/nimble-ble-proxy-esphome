@@ -171,7 +171,8 @@ esp_err_t switch_post(httpd_req_t *req) {
     if (std::strcmp(v, "none") == 0 || std::strcmp(v, "-1") == 0) {
       pin = -1;
     } else if (e == v || *e != 0 || p < 0 || p > 63 ||
-               !nbp_gpio::allowed(static_cast<int>(p), nbp_gpio::bit(g_pin))) {
+               !nbp_gpio::allowed(static_cast<int>(p), nbp_gpio::bit(g_pin)) ||
+               nbp_gpio::strap_or_usb(static_cast<int>(p))) {
       return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                  "gpio not allowed (reserved, strap, in use or invalid)");
     } else {
@@ -272,7 +273,7 @@ void early_init() {
     ESP_LOGI(TAG, "not configured (POST /switch?gpio=N)");
     return;
   }
-  if (!nbp_gpio::allowed(pin)) {
+  if (!nbp_gpio::allowed(pin) || nbp_gpio::strap_or_usb(pin)) {
     ESP_LOGE(TAG, "GPIO%d not allowed, switch off", pin);
     return;
   }

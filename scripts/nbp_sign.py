@@ -283,10 +283,24 @@ def verify_block_rsa(content: bytes, blk: bytes) -> bool:
     return True
 
 
-def check_release_image(data: bytes, expect_fp) -> 'str | None':
+# Releases up to this one were built without the signature check: their
+# images trust no key and accept the next image signed or not, so publishing
+# them unsigned locks nobody out. Matched on the release tag AND the image's
+# own version (branch builds before the next bump still say 0.2.8).
+LAST_PRE_SIGNING_RELEASE = (0, 2, 8)
+
+
+def _semver3(v):
+    import re
+    m = re.match(r'^v?(\d+)\.(\d+)\.(\d+)$', v or '')
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def check_release_image(data: bytes, expect_fp, tag=None) -> 'str | None':
     """None if `data` (an *-ota.bin app image, or a *-flash.bin merged image)
-    may be published; else the reason it may not. Fails closed: an unparsable
-    image, a missing pinned fingerprint or a missing crypto library refuse."""
+    of release `tag` may be published; else the reason it may not. Fails
+    closed: an unparsable image, a missing pinned fingerprint or a missing
+    crypto library refuse."""
     try:
         if data[PART_TABLE_OFF:PART_TABLE_OFF + 2] == b'\xaa\x50':  # merged flash image
             data = app_in_flash_image(data)
@@ -295,6 +309,17 @@ def check_release_image(data: bytes, expect_fp) -> 'str | None':
         chip_id = struct.unpack_from('<H', data, 12)[0]
         if chip_id == CHIP_ID_ESP32:
             return None  # signing is off on classic ESP32 (sdkconfig.defaults.esp32)
+        tag_v = _semver3(tag)
+        if tag_v is not None and tag_v <= LAST_PRE_SIGNING_RELEASE:
+            img_v = data[32 + 16:32 + 48].split(b'\0', 1)[0].decode('ascii', 'replace')
+            if image_len(data) % 0x10000 == 0:
+                # Signing builds pad the image to the 64 KiB MMU page
+                # (--secure-pad-v2); pre-signing releases never were. Fail
+                # closed on a signing-capable image under an old tag.
+                return f'release {tag} but the image is padded like a signing build'
+            if _semver3(img_v) == tag_v:
+                return None  # pre-signing release: checks no signature itself
+            return f'release {tag} but the image says {img_v!r}'
         if not expect_fp:
             return 'no release key pinned (RELEASE_KEY_SHA256 is None)'
         off = sig_offset(data)
@@ -373,7 +398,8 @@ def cmd_check_release(a):
     fp = a.fp or RELEASE_KEY_SHA256
     bad = 0
     for path in a.images:
-        why = check_release_image(open(path, 'rb').read(), fp)
+        tag = a.tag or os.path.basename(os.path.dirname(os.path.abspath(path)))
+        why = check_release_image(open(path, 'rb').read(), fp, tag)
         print(f'{"OK     " if why is None else "REFUSED"} {path}' + (f': {why}' if why else ''))
         bad += why is not None
     return 1 if bad else 0
@@ -450,6 +476,8 @@ def main():
                        help='may these images be published? (exit 1 if any may not)')
     s.add_argument('images', nargs='+')
     s.add_argument('--fp', help='expected key fingerprint (default: RELEASE_KEY_SHA256)')
+    s.add_argument('--tag', help='release tag (default: the parent directory name, '
+                                 'as staged by pages.yml: firmware/<tag>/<asset>)')
     s.set_defaults(fn=cmd_check_release)
     s = sub.add_parser('selftest-blob')
     s.add_argument('--bin', required=True)

@@ -54,10 +54,11 @@ USB flash (section 6).
 
 ## 3. Sign and upload a release
 
-1. Push the tag `vX.Y.Z`. CI builds and attaches **unsigned** assets to the
-   release.
-2. Sign them as soon as CI has finished. Until then, the release and the web
-   flasher serve unsigned images, see "Hazard" below.
+1. Bump `VERSION` in `CMakeLists.txt`, then push the tag `vX.Y.Z`. CI builds
+   and creates a **draft** release with the **unsigned** assets (job
+   `release` in `build.yml`). A draft is not public.
+2. Sign them once CI has finished. Pages and the web flasher keep serving
+   the previous release until step 4 publishes this one.
 3. Dry run (downloads, signs, verifies, uploads nothing):
 
    ```sh
@@ -81,8 +82,9 @@ USB flash (section 6).
    scripts/release_sign.py sign vX.Y.Z --upload
    ```
 
-   It runs `gh release upload vX.Y.Z … --clobber`, then
-   `gh workflow run pages.yml`.
+   It runs `gh release upload vX.Y.Z … --clobber`, publishes the draft
+   (`gh release edit vX.Y.Z --draft=false`), then `gh workflow run pages.yml`.
+   Write the release notes on the draft before this step or after it.
 5. Pages publishes the web flasher images and the dashboard's `updates.json`.
    It no longer runs after a tag build. Its gate (`nbp_sign.py check-release`)
    drops every image that is not signed with the pinned release key (classic

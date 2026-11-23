@@ -122,7 +122,7 @@ def main():
                 print(f"{tag}/{a['name']}: not staged (refused), not listed", file=sys.stderr)
                 continue
             data = path.read_bytes()
-            why = nbp_sign.check_release_image(data, nbp_sign.RELEASE_KEY_SHA256)
+            why = nbp_sign.check_release_image(data, nbp_sign.RELEASE_KEY_SHA256, tag)
             if why is not None:
                 print(f"{tag}/{a['name']}: {why}; not listed", file=sys.stderr)
                 continue

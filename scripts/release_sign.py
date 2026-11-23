@@ -283,14 +283,19 @@ def cmd_sign(args):
         print('Dry run: nothing uploaded. Re-run with --upload to replace the release assets.')
         return
     if not uploads:
-        print('Nothing to upload.')
+        print('Nothing to upload (all signed already). To publish the draft: '
+              f'gh release edit {args.tag} --draft=false && gh workflow run pages.yml')
         return
     print(f'\nThis replaces {len(uploads)} assets of release {args.tag} on {args.repo} (--clobber).')
     ans = input(f'Type the tag ({args.tag}) to upload: ').strip()
     if ans != args.tag:
         die('not confirmed; nothing uploaded')
     run(['gh', 'release', 'upload', args.tag, '--repo', args.repo, '--clobber'] + uploads)
-    print('Uploaded. Publishing to Pages (web flasher + dashboard updates.json): '
+    # CI creates the release as a draft (build.yml, job release) so the
+    # unsigned images are never public. Publish only now that they are signed.
+    print(f'Uploaded. Publishing the release: gh release edit {args.tag} --draft=false')
+    run(['gh', 'release', 'edit', args.tag, '--repo', args.repo, '--draft=false'])
+    print('Publishing to Pages (web flasher + dashboard updates.json): '
           'gh workflow run pages.yml')
     # pages.yml no longer runs after a tag build (it would stage the unsigned CI
     # images); this is what publishes a release. Its gate re-checks every image.
