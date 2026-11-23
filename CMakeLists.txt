@@ -91,8 +91,8 @@ endif()
 # Release-variant identity, reported in GET /appinfo as "variant". The
 # dashboard offers an update image only to a device whose variant names
 # exactly one release asset (nimble_ble_proxy-<variant>-ota.bin), so a
-# wrong label could put a stock image on a custom build (PSRAM, switch
-# output, ...). CI sets it (-DNBP_VARIANT=<target>-ble-on|ble-off, see
+# wrong label could put a stock image on a custom build (PSRAM, a preset
+# switch pin, ...). CI sets it (-DNBP_VARIANT=<target>-ble-on|ble-off, see
 # .github/workflows/build.yml); every other build is "custom" and gets no
 # offer. A stock label is refused unless the build really is the stock
 # configuration: the target and BLE gate match the name, the defaults list
@@ -129,13 +129,20 @@ if(NOT NBP_VARIANT STREQUAL "custom")
             "SDKCONFIG_DEFAULTS=\"${_nbp_stock_defaults}\" (got "
             "\"${_nbp_defaults}\"); label other builds custom")
     endif()
-    foreach(_nbp_opt SPIRAM NBP_SWITCH_OUT NBP_MODBUS_BRIDGE NBP_ENV_SENSORS
+    foreach(_nbp_opt SPIRAM NBP_MODBUS_BRIDGE NBP_ENV_SENSORS
                      NBP_CRASH_TEST)
         if(CONFIG_${_nbp_opt})
             message(FATAL_ERROR "NBP_VARIANT=${NBP_VARIANT} with "
                 "CONFIG_${_nbp_opt}=y is not a release build; label it custom")
         endif()
     endforeach()
+    # The switch output is in every image; only a preset pin is custom
+    # (a release image must touch no GPIO until one is set at runtime).
+    if(DEFINED CONFIG_NBP_SWITCH_GPIO AND NOT CONFIG_NBP_SWITCH_GPIO EQUAL -1)
+        message(FATAL_ERROR "NBP_VARIANT=${NBP_VARIANT} with "
+            "CONFIG_NBP_SWITCH_GPIO=${CONFIG_NBP_SWITCH_GPIO} is not a release "
+            "build (release images preset no pin); label it custom")
+    endif()
     foreach(_nbp_st NBP_DHCPS_SELFTEST NBP_WS_SELFTEST NBP_HEAP_SELFTEST
                     NBP_OOM_SELFTEST NBP_CRASH_SELFTEST)
         if(${_nbp_st})
