@@ -53,3 +53,7 @@ elf-archive/
 
 # Local crash/coredump captures pulled from devices (raw, per-session; not tracked).
 crashes/
+
+# Signing keys never live in the repo (docs/signing.md); only public keys do.
+*.pem
+!keys/*.pub.pem

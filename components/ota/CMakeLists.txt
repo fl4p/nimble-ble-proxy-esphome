@@ -11,10 +11,10 @@
 # back) is always built: an image must confirm itself whenever an app with
 # rollback installed it, whatever this build's NBP_OTA/NBP_WIFI say.
 idf_component_register(
-    SRCS "ota.cpp" "ota_verify.cpp"
+    SRCS "ota.cpp" "ota_verify.cpp" "ota_sig.cpp" "sig_selftest.cpp"
     INCLUDE_DIRS "." "../../include"
     REQUIRES esp_http_server esp_partition
-    PRIV_REQUIRES log app_update bootloader_support nvs_flash esp_netif lwip esp_timer
+    PRIV_REQUIRES log app_update bootloader_support nvs_flash esp_netif lwip esp_timer esp_rom mbedtls
 )
 
 # Known-bad calibration of the QEMU OTA-rollback self-test (NBP_OTA_SELFTEST

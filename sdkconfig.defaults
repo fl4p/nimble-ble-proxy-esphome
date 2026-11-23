@@ -215,3 +215,15 @@ CONFIG_NBP_LIVENESS_THRESHOLD=6
 # can tell from its esp_bootloader_desc_t (every earlier build had 1).
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_BOOTLOADER_PROJECT_VER=2
+
+# App image signing (OTA only accepts images signed with the running image's
+# key). Secure Boot V2 signature format, RSA-3072, checked by the running app
+# in esp_ota_end(); the bootloader checks nothing and no eFuse is touched. The
+# IDF build leaves the .bin unsigned (CI builds unsigned, releases are signed
+# by scripts/release_sign.py); the root CMakeLists signs local builds with the
+# dev key. See "App image signing" in CLAUDE.md and docs/signing.md. Classic
+# ESP32 turns it off in sdkconfig.defaults.esp32.
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n

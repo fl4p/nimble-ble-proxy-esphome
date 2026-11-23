@@ -210,6 +210,9 @@ extern "C" void app_main() {
 #if NBP_WS_SELFTEST
   ws_selftest::run();  // QEMU test build only; never returns
 #endif
+#if NBP_SIG_SELFTEST
+  ota::sig_selftest::run();  // QEMU test build only; never returns
+#endif
 
   ESP_LOGI(TAG, "nimble-ble-proxy %s booting",
            esp_app_get_description()->version);
