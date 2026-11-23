@@ -149,6 +149,10 @@
   (`needs header X-NBP-Confirm: yes`) and writes nothing; curl still sends
   the whole body first, httpd discards it. Firmware older than the guard
   ignores the header, so the same command works on every version.
+  While the running image is still unverified (see "OTA app rollback"
+  below) `/update` answers **409** and writes nothing: the other slot holds
+  the only image to roll back to. Wait for `GET /ota` `"phase":"valid"`, or
+  `POST /ota?mark=valid` first.
 
 - **A firmware upload competes for the single radio and gets starved.** On a
   busy NAT build (`/update` POST of ~1.3 MB) the SoftAP forward path + BLE scan
@@ -177,7 +181,114 @@
   with `?enabled=1` (NVS-persisted, so it also survives reboot — remember to turn
   it back on). Diagnose the quiesce live (non-destructively) by POSTing a short
   bogus image: it fails validation without rebooting and leaves `OTA: dropping
-  SoftAP` / `scan paused` / `restoring SoftAP` in `/log`.
+  SoftAP` / `scan paused` / `restoring SoftAP` in `/log`. Since app rollback
+  is on, every `esp_ota_begin` (bogus or not) also erases the inactive
+  otadata sector (`esp_ota_invalidate_inactive_ota_data_slot`,
+  esp_ota_ops.c:205-209), so the image in the other slot stops being a
+  rollback target. Harmless for a verified running image.
+
+## OTA app rollback (`components/ota/ota_verify.cpp`, 2026-11-22)
+
+- **What it does.** `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` and
+  `CONFIG_BOOTLOADER_PROJECT_VER=2` (`sdkconfig.defaults`, every target and
+  profile; the C3 overlay and `.github/build-no-ble.defaults` do not touch
+  them). An image installed by `esp_ota_set_boot_partition()` from a
+  rollback-enabled app is written with otadata state `NEW`
+  (esp_ota_ops.c:115-122, :786). `ota_verify::early_init()` (right after
+  `crash_capture::init()`, before the provisioning window and the WiFi
+  connect, which can block) starts a worker task (4 KiB stack, only while
+  unverified; high-water 2488 B free in QEMU) and an esp_timer backstop. The image
+  marks itself valid (`esp_ota_mark_app_valid_cancel_rollback`) once, in one
+  evaluation: uptime >= `NBP_OTA_VERIFY_MIN_SECS` (60) AND STA has an IP AND
+  an uplink proof (a liveness cycle passed this boot, an upstream API
+  session >= 30 s old with ACKed sends, the gateway answered :80 with a
+  connect or RST, or the gateway is in the ARP table after that attempt; DHCP
+  with no router counts as proof too) AND 127.0.0.1:80 and :6053 accept.
+  Unmet at `NBP_OTA_VERIFY_DEADLINE_SECS` (900): `esp_ota_mark_app_invalid_
+  rollback_and_reboot`. Backstop: 60 s after the deadline a still-pending
+  image is `esp_restart()`ed (a stuck worker). The ARP proof is what keeps a
+  LAN whose gateway drops :80 (the liveness case) from rolling back good
+  images. Builds without WiFi wire null hooks: uptime only.
+- **The clocks are boot-relative.** `esp_timer_get_time()` is NOT reset by
+  `esp_restart()` (QEMU S3: app_main at 16 s on the boot after a SW reset),
+  so `uptime_s()` subtracts the value captured in `early_init()`. A deadline
+  on raw esp_timer time fired immediately on the next boot.
+- **Bootloaders in the field have no rollback, and an app OTA never
+  replaces the bootloader.** IDF 6.0.3 (and 5.5.4, same lines) with rollback
+  off: the bootloader neither turns `NEW` into `PENDING_VERIFY`
+  (bootloader_utility.c:445-451) nor `PENDING_VERIFY` into `ABORTED` (:395-404,
+  both `#ifdef CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`). It boots a `NEW` image
+  like a valid one (bootloader_common_loader.c:78-86 treats only
+  `INVALID`/`ABORTED`/blank as invalid) and keeps booting it after every
+  reset. What still works there: `esp_ota_get_state_partition` reports `NEW`
+  (esp_ota_ops.c:1198-1230, reads otadata as is);
+  `esp_ota_mark_app_valid_cancel_rollback` writes `VALID` (:1095-1112, no
+  bootloader involvement); `esp_ota_mark_app_invalid_rollback_and_reboot`
+  writes `INVALID` and the old bootloader honours it, because
+  `bootloader_common_get_active_otadata` (unconditional,
+  bootloader_utility.c:426) skips `INVALID` entries. What does not: rollback on
+  a crash/reset (bootloader-only). Covered in the app instead: an unverified
+  `NEW` image counts its own starts in `RTC_NOINIT` (power-on resets the
+  count) and rolls back at `NBP_OTA_VERIFY_MAX_BOOTS` (3). Not covered: a crash
+  before app_main, which then loops (as before this feature). `esp_ota_begin`
+  refuses only `PENDING_VERIFY` (esp_ota_ops.c:166-171), not `NEW`, so
+  `/update` refuses itself while unverified.
+- **The first rollback-capable image is not protected.** It is installed
+  by an app without rollback, which writes state `UNDEFINED`
+  (`set_new_state_otadata`), so it boots as verified. Only updates *from* it
+  are verified.
+- **Which bootloader?** Observed on the first boot of an image (`PENDING_
+  VERIFY` = rollback bootloader, `NEW` = none), else from the bootloader's
+  `esp_bootloader_desc_t.version` (`esp_ota_get_bootloader_description`):
+  2 = built with rollback, 1 = every earlier build of this project (IDF
+  default). Boot log: `ota_verify: running ota_1, otadata state
+  pending_verify; bootloader v2 (v6.0.3), rollback yes (observed)`.
+- **A rollback is recorded.** `/update` (`note_update`) and every unverified
+  boot write NVS `otarb/exp` (slot, ELF SHA prefix, version, cause). A boot
+  that runs another slot than `exp` names logs `ROLLED BACK from ota_0
+  (0.2.9, elf …): <cause>` and keeps it in `otarb/rb`. Causes:
+  `reset_while_pending` (bootloader `ABORTED` it; `reset_reason` says why,
+  e.g. `panic`), `deadline`, `unverified_starts`, `manual`,
+  `backstop_restart`, `not_booted` (the bootloader skipped the image),
+  `marked_invalid`.
+- **Endpoints.** `GET /ota`: `running`, `state`, `phase`
+  (`pending|valid|rolling_back|not_pending`), `bootloader{ver,idf,rollback,
+  source}`, `verify{uptime_s,min_s,deadline_s,left_s,starts,hooks,sta,uplink,
+  via,service,valid_at_s,valid_via}`, `other{label,state,version,elf}`,
+  `last_rollback{this_boot,from,version,elf,cause,from_state,reset_reason}`.
+  The same object is `"ota"` in `GET /crash`. `POST /ota?mark=valid|invalid`
+  (`X-NBP-Confirm: yes`; 409 unless pending) for manual tests. A pending image
+  with no valid other slot (`esp_ota_check_rollback_is_possible` false) is
+  accepted at once (`valid_via: no_rollback_target`).
+- **Any reset of a pending image on a rollback bootloader is a rollback**,
+  including `/reboot`, a liveness reboot or a power cut in the first minute.
+  That is IDF's design; retry the update.
+- **RAM cost** (`idf.py size`, IDF 6.0.3, vs 3dd7a29): S3 DIRAM +224 B
+  (.bss +192, .data +32), RTC slow +16 B, flash +9.5 KB; C3 DRAM +216 B,
+  RTC +16 B, flash +11 KB. Bootloader +80 B (S3) / +128 B (C3); the ESP32
+  bootloader is 0x66c0 of 0x7000 (8 % free). Steady state on a verified
+  image: no task, no timer.
+- **QEMU test** (S3, IDF 6.0.3): `idf.py -B build-qemu-ota -DIDF_TARGET=esp32s3
+  -DNBP_OTA_SELFTEST=1 build`, then `… qemu` (~2 min, kill it after `OTA-SELFTEST
+  done`). It adds `sdkconfig.defaults.otatest` (min 3 s, deadline 20 s), and
+  each boot prints `OTA-SELFTEST <step>: PASS|FAIL`: a real OTA install of a
+  copy of itself, `first_boot` + `bootloader_observed`,
+  `valid_after_criterion`, `rollback_on_panic`, `rollback_on_deadline`.
+  **Old-bootloader run:** take the bootloader of a build without rollback
+  (main before this change, or `sdkconfig.defaults.oldbl`), merge a fresh
+  image (`cd build-qemu-ota && python -m esptool --chip=esp32s3 merge-bin
+  --output=/tmp/f.bin --pad-to-size=4MB @flash_args`), overwrite 0x0..0x8000
+  with 0xFF + that bootloader.bin, and run `idf.py … qemu --flash-file
+  /tmp/f.bin`. Use a fresh merge: QEMU writes to the flash file, so an old
+  `qemu_flash.bin` carries otadata from the last run. Expected there: state
+  `new`, rollback on panic after 3 starts (`unverified_starts`), deadline
+  rollback honoured. **Known-bad:** `-DNBP_OTA_SELFTEST_BREAK=1` (mark-valid
+  writes nothing) fails `valid_after_criterion`. Host test of the policy:
+  `components/ota/host_test/test_ota_verify_policy.cpp` (build line inside).
+  `esp_image_verify()` on the running partition hung in QEMU; the self-test
+  uses `esp_image_get_metadata()` for the image length.
+- **Not verified on hardware yet:** the ARP/gateway proof, the loopback
+  checks against the real listeners, and the `/update` 409.
 
 ## `CONFIG_NBP_BLE` — compile-time master gate (vs the runtime auto-off above)
 

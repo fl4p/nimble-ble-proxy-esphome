@@ -1,0 +1,4 @@
+# QEMU OTA-rollback self-test only (-DNBP_OTA_SELFTEST=1, root CMakeLists).
+# Short verify times so a run takes about two minutes.
+CONFIG_NBP_OTA_VERIFY_MIN_SECS=3
+CONFIG_NBP_OTA_VERIFY_DEADLINE_SECS=20

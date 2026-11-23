@@ -205,3 +205,13 @@ CONFIG_NBP_LIVENESS_WDT=y
 CONFIG_NBP_LIVENESS_INTERVAL_SECS=30
 CONFIG_NBP_LIVENESS_THRESHOLD=6
 
+
+# OTA app rollback (components/ota/ota_verify.cpp, CLAUDE.md "OTA app
+# rollback"). An image installed by OTA boots unverified and marks itself
+# valid once it has proven itself; otherwise it rolls back. The bootloader
+# part only reaches devices flashed over serial (an app OTA never rewrites
+# the bootloader); the app part also works on older bootloaders.
+# BOOTLOADER_PROJECT_VER=2 marks a bootloader built with rollback, so the app
+# can tell from its esp_bootloader_desc_t (every earlier build had 1).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_BOOTLOADER_PROJECT_VER=2

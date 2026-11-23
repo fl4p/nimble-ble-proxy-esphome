@@ -1,0 +1,6 @@
+# QEMU OTA-rollback self-test only: a bootloader like the ones in the field
+# (built before app rollback). Only build/bootloader/bootloader.bin of a build
+# with this fragment is used, patched into the self-test's flash image
+# (CLAUDE.md "OTA app rollback").
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=n
+CONFIG_BOOTLOADER_PROJECT_VER=1

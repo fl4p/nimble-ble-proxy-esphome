@@ -63,6 +63,7 @@
 #endif
 
 #include "bench.h"
+#include "ota_verify.h"
 
 #include "esp_app_desc.h"
 #include "esp_event.h"
@@ -184,6 +185,16 @@ extern "C" void app_main() {
   // dump) into /log, and give a pre-coredump partition table a coredump
   // region. After install_log_hook so it lands in the web console.
   crash_capture::init();
+
+  // OTA app rollback: classify this boot (rolled back? unverified image?) and,
+  // for an unverified image, start the deadline now, before anything that
+  // can block (provisioning window, WiFi connect). May reboot into the
+  // previous image (old-bootloader start counter).
+  ota_verify::early_init();
+  crash_capture::set_ota_json_provider(&ota_verify::write_json);
+#if NBP_OTA_SELFTEST
+  ota_verify::selftest::run();  // QEMU test build only; never returns
+#endif
 
   ESP_ERROR_CHECK(esp_event_loop_create_default());
 
@@ -308,6 +319,32 @@ extern "C" void app_main() {
   // other BLE singletons.
   api_server::stats::register_endpoints(ota::handle());
   api_server::start();
+  // Criterion for an unverified OTA image (ota_verify.h). Wired only now:
+  // stable_rx_us needs the api_server up, and the listeners it checks exist.
+  {
+    ota_verify::Hooks h{};
+    h.sta_up = &wifi_sta::is_connected;
+    h.uplink = [](const char **via) {
+#if CONFIG_NBP_LIVENESS_WDT
+      // A liveness cycle passed this boot (probe target or vouching client).
+      if (liveness_wdt::get_state().last_ok_age_s != UINT32_MAX) {
+        *via = "liveness";
+        return true;
+      }
+#endif
+      // An upstream API session open >= 30 s whose sends are ACKed.
+      if (api_server::stable_rx_us(30LL * 1000 * 1000) > 0) {
+        *via = "api";
+        return true;
+      }
+      return ota_verify::gateway_reachable(via);
+    };
+    h.service = [] {
+      return ota::handle() != nullptr && ota_verify::loopback_listens(80) &&
+             ota_verify::loopback_listens(proxy::API_PORT);
+    };
+    ota_verify::set_hooks(h);
+  }
   // Test builds only (CONFIG_NBP_BENCH, default n); a no-op otherwise.
   bench::start();
 #if CONFIG_NBP_WS_PROXY
@@ -461,6 +498,12 @@ extern "C" void app_main() {
   // clone remains enabled across the next reboot. A panic before then
   // leaves the flag set; the next boot reads it and force-disables clone.
   schedule_boot_stable_mark();
+#endif
+
+#if !CONFIG_NBP_WIFI
+  // No network in this build: an updated image only has to stay up for
+  // NBP_OTA_VERIFY_MIN_SECS (null hooks = not applicable).
+  ota_verify::set_hooks(ota_verify::Hooks{});
 #endif
 
   // Internal-RAM headroom after everything is up. An api_server connection

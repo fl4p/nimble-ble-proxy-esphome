@@ -1,0 +1,38 @@
+menu "nimble-ble-proxy: OTA image verification (app rollback)"
+    depends on BOOTLOADER_APP_ROLLBACK_ENABLE
+
+    config NBP_OTA_VERIFY_MIN_SECS
+        int "Seconds an updated image must run before it can mark itself valid"
+        range 2 3600
+        default 60
+        help
+            A freshly installed image (otadata state NEW or PENDING_VERIFY)
+            marks itself valid only after this much uptime AND once the
+            network criterion holds (STA has an IP, the uplink answered,
+            the httpd and api_server listeners accept). See
+            components/ota/ota_verify.h.
+
+    config NBP_OTA_VERIFY_DEADLINE_SECS
+        int "Seconds an updated image has to prove itself before it rolls back"
+        range 10 86400
+        default 900
+        help
+            If the criterion is still unmet after this much uptime, the image
+            marks itself invalid and reboots into the previous one
+            (esp_ota_mark_app_invalid_rollback_and_reboot). A WiFi outage
+            longer than this right after an update rolls back a good image;
+            the previous image is kept and the update can be retried.
+
+    config NBP_OTA_VERIFY_MAX_BOOTS
+        int "Starts of an unverified image before the app rolls it back (old bootloaders)"
+        range 2 10
+        default 3
+        help
+            Only used when the bootloader was built without app rollback
+            (the image boots in state NEW, never PENDING_VERIFY): such a
+            bootloader re-boots the new image after every reset, so the app
+            counts its own unverified starts (RTC memory, so power cycles
+            reset the count) and rolls back at this count. A bootloader with
+            rollback rolls back on the first reset by itself.
+
+endmenu
