@@ -1,8 +1,12 @@
 // Tiny HTTP OTA server. POST a raw .bin to /update to flash the
-// inactive OTA slot and reboot. No auth — assumes a trusted LAN.
+// inactive OTA slot and reboot. No auth — assumes a trusted LAN; but with
+// app signing on (sdkconfig.defaults) only an image signed with the running
+// image's key is accepted (403 otherwise, see ota_sig.h). GET /update
+// reports the trusted key.
 //
 // Usage:
-//   curl --data-binary @nimble_ble_proxy.bin http://nimble-proxy.local/update
+//   curl -H 'X-NBP-Confirm: yes' --data-binary @nimble_ble_proxy.bin
+//     http://nimble-proxy.local/update   (one line)
 //
 // When NBP_OTA=n, the /update handler is not registered (and
 // esp_ota_ops is not linked), but start() still brings up the shared
@@ -33,5 +37,12 @@ void set_quiesce_hooks(QuiesceFn begin, QuiesceFn end);
 // components piggyback URIs on this so we only open one listener —
 // LWIP_MAX_SOCKETS is tight on ESP32.
 httpd_handle_t handle();
+
+#if NBP_SIG_SELFTEST
+// QEMU signature self-test (sig_selftest.cpp); never returns.
+namespace sig_selftest {
+void run();
+}
+#endif
 
 }  // namespace ota

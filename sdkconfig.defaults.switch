@@ -1,5 +1,8 @@
-# Switched output (components/switch_out): GPIO14 -> N-MOSFET gate across the
-# inverter's remote on/off contact (high = closed = on). Layer on the PSRAM build:
+# Switched output (components/switch_out) is built into every image since
+# 0.2.9 and configured at runtime (POST /switch?gpio=N). This fragment only
+# presets the pin of the .231 caravan unit: GPIO14 -> N-MOSFET gate across the
+# inverter's remote on/off contact (high = closed = on). The first boot writes
+# it to NVS, so a later stock image keeps it. Layer on the PSRAM build:
 #   idf.py -B build-psram-sw -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-psram-sw/sdkconfig \
 #     -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.switch" build
 # GPIO14 avoids flash/PSRAM (26-37), straps (0/3/45/46), USB (19/20), console

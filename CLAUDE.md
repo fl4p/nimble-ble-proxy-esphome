@@ -149,6 +149,10 @@
   (`needs header X-NBP-Confirm: yes`) and writes nothing; curl still sends
   the whole body first, httpd discards it. Firmware older than the guard
   ignores the header, so the same command works on every version.
+  While the running image is still unverified (see "OTA app rollback"
+  below) `/update` answers **409** and writes nothing: the other slot holds
+  the only image to roll back to. Wait for `GET /ota` `"phase":"valid"`, or
+  `POST /ota?mark=valid` first.
 
 - **A firmware upload competes for the single radio and gets starved.** On a
   busy NAT build (`/update` POST of ~1.3 MB) the SoftAP forward path + BLE scan
@@ -177,7 +181,133 @@
   with `?enabled=1` (NVS-persisted, so it also survives reboot — remember to turn
   it back on). Diagnose the quiesce live (non-destructively) by POSTing a short
   bogus image: it fails validation without rebooting and leaves `OTA: dropping
-  SoftAP` / `scan paused` / `restoring SoftAP` in `/log`.
+  SoftAP` / `scan paused` / `restoring SoftAP` in `/log`. Since app rollback
+  is on, every `esp_ota_begin` (bogus or not) also erases the inactive
+  otadata sector (`esp_ota_invalidate_inactive_ota_data_slot`,
+  esp_ota_ops.c:205-209), so the image in the other slot stops being a
+  rollback target. Harmless for a verified running image.
+
+## OTA app rollback (`components/ota/ota_verify.cpp`, 2026-11-22)
+
+- **What it does.** `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` and
+  `CONFIG_BOOTLOADER_PROJECT_VER=2` (`sdkconfig.defaults`, every target and
+  profile; the C3 overlay and `.github/build-no-ble.defaults` do not touch
+  them). An image installed by `esp_ota_set_boot_partition()` from a
+  rollback-enabled app is written with otadata state `NEW`
+  (esp_ota_ops.c:115-122, :786). `ota_verify::early_init()` (right after
+  `crash_capture::init()`, before the provisioning window and the WiFi
+  connect, which can block) starts a worker task (3 KiB stack, only while
+  unverified; high-water 1476 B free on .231 with the real network hooks)
+  and an esp_timer backstop. The image
+  marks itself valid (`esp_ota_mark_app_valid_cancel_rollback`) once, in one
+  evaluation: uptime >= `NBP_OTA_VERIFY_MIN_SECS` (60) AND STA has an IP AND
+  an uplink proof (a liveness cycle passed this boot, an upstream API
+  session >= 30 s old with ACKed sends, the gateway answered :80 with a
+  connect or RST, or the gateway is in the ARP table after that attempt; DHCP
+  with no router counts as proof too) AND 127.0.0.1:80 and :6053 accept.
+  Unmet at `NBP_OTA_VERIFY_DEADLINE_SECS` (900): `request_rollback()`
+  records the cause (NVS `exp`, RTC `req_cause`) and restarts; it does not
+  call IDF's rollback itself, which needs the RSA stack (see "App image
+  signing", Stack). A rollback bootloader then aborts the pending image
+  (`last_rollback.from_state` `aborted`, cause `deadline`); under an old
+  bootloader the next boot's `early_init` sees `req_cause` and runs
+  `esp_ota_mark_app_invalid_rollback_and_reboot` on the main task (`invalid`).
+  `POST /ota?mark=invalid` takes the same path. Backstop: 60 s after the deadline a still-pending
+  image is `esp_restart()`ed (a stuck worker). The ARP proof is what keeps a
+  LAN whose gateway drops :80 (the liveness case) from rolling back good
+  images. Builds without WiFi wire null hooks: uptime only.
+- **The clocks are boot-relative.** `esp_timer_get_time()` is NOT reset by
+  `esp_restart()` (QEMU S3: app_main at 16 s on the boot after a SW reset),
+  so `uptime_s()` subtracts the value captured in `early_init()`. A deadline
+  on raw esp_timer time fired immediately on the next boot.
+- **Bootloaders in the field have no rollback, and an app OTA never
+  replaces the bootloader.** IDF 6.0.3 (and 5.5.4, same lines) with rollback
+  off: the bootloader neither turns `NEW` into `PENDING_VERIFY`
+  (bootloader_utility.c:445-451) nor `PENDING_VERIFY` into `ABORTED` (:395-404,
+  both `#ifdef CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`). It boots a `NEW` image
+  like a valid one (bootloader_common_loader.c:78-86 treats only
+  `INVALID`/`ABORTED`/blank as invalid) and keeps booting it after every
+  reset. What still works there: `esp_ota_get_state_partition` reports `NEW`
+  (esp_ota_ops.c:1198-1230, reads otadata as is);
+  `esp_ota_mark_app_valid_cancel_rollback` writes `VALID` (:1095-1112, no
+  bootloader involvement); `esp_ota_mark_app_invalid_rollback_and_reboot`
+  writes `INVALID` and the old bootloader honours it, because
+  `bootloader_common_get_active_otadata` (unconditional,
+  bootloader_utility.c:426) skips `INVALID` entries. What does not: rollback on
+  a crash/reset (bootloader-only). Covered in the app instead: an unverified
+  `NEW` image counts its own starts in `RTC_NOINIT` (power-on resets the
+  count) and rolls back at `NBP_OTA_VERIFY_MAX_BOOTS` (3). Not covered: a crash
+  before app_main, which then loops (as before this feature). `esp_ota_begin`
+  refuses only `PENDING_VERIFY` (esp_ota_ops.c:166-171), not `NEW`, so
+  `/update` refuses itself while unverified.
+- **The first rollback-capable image is not protected.** It is installed
+  by an app without rollback, which writes state `UNDEFINED`
+  (`set_new_state_otadata`), so it boots as verified. Only updates *from* it
+  are verified.
+- **Which bootloader?** Observed on the first boot of an image (`PENDING_
+  VERIFY` = rollback bootloader, `NEW` = none), else from the bootloader's
+  `esp_bootloader_desc_t.version` (`esp_ota_get_bootloader_description`):
+  2 = built with rollback, 1 = every earlier build of this project (IDF
+  default). Boot log: `ota_verify: running ota_1, otadata state
+  pending_verify; bootloader v2 (v6.0.3), rollback yes (observed)`.
+- **A rollback is recorded.** `/update` (`note_update`) and every unverified
+  boot write NVS `otarb/exp` (slot, ELF SHA prefix, version, cause). A boot
+  that runs another slot than `exp` names logs `ROLLED BACK from ota_0
+  (0.2.9, elf …): <cause>` and keeps it in `otarb/rb`. Causes:
+  `reset_while_pending` (bootloader `ABORTED` it; `reset_reason` says why,
+  e.g. `panic`), `deadline`, `unverified_starts`, `manual`,
+  `backstop_restart`, `not_booted` (the bootloader skipped the image),
+  `marked_invalid`.
+- **Endpoints.** `GET /ota`: `running`, `state`, `phase`
+  (`pending|valid|rolling_back|not_pending`), `bootloader{ver,idf,rollback,
+  source}`, `verify{uptime_s,min_s,deadline_s,left_s,starts,hooks,sta,uplink,
+  via,service,valid_at_s,valid_via}`, `other{label,state,version,elf}`,
+  `last_rollback{this_boot,from,version,elf,cause,from_state,reset_reason}`.
+  The same object is `"ota"` in `GET /crash`. `POST /ota?mark=valid|invalid`
+  (`X-NBP-Confirm: yes`; 409 unless pending) for manual tests. A pending image
+  with no valid other slot (`esp_ota_check_rollback_is_possible` false) is
+  accepted at once (`valid_via: no_rollback_target`). That check runs once, in
+  `early_init`; when a later rollback attempt fails (IDF re-runs the check,
+  an RSA verify that allocates heap and can fail under exactly the low heap
+  that failed the criterion) the image is NOT accepted: `rollback()`
+  restarts, so a rollback bootloader aborts the pending image and an old
+  bootloader counts one more start. Only a boot-time start-counter rollback
+  that keeps failing past `MAX_BOOTS + 2` starts keeps the image
+  (`valid_via: rollback_failed`), so it cannot loop. Review 2026-11-23: the
+  first OTA after a USB flash IS protected: every bootloader writes
+  `otadata[0]` on the first boot of a flashed image (`set_actual_ota_seq`,
+  `bootloader_utility.c:501`, not rollback-gated), so the OTA leaves two
+  valid entries (QEMU self-test starts from a serial flash). The dashboard
+  install follows `GET /ota` until `valid` or a rollback and explains the 409.
+- **Any reset of a pending image on a rollback bootloader is a rollback**,
+  including `/reboot`, a liveness reboot or a power cut in the first minute.
+  That is IDF's design; retry the update.
+- **RAM cost** (`idf.py size`, IDF 6.0.3, vs 3dd7a29): S3 DIRAM +224 B
+  (.bss +192, .data +32), RTC slow +16 B, flash +9.5 KB; C3 DRAM +216 B,
+  RTC +16 B, flash +11 KB. Bootloader +80 B (S3) / +128 B (C3); the ESP32
+  bootloader is 0x66c0 of 0x7000 (8 % free). Steady state on a verified
+  image: no task, no timer.
+- **QEMU test** (S3, IDF 6.0.3): `idf.py -B build-qemu-ota -DIDF_TARGET=esp32s3
+  -DNBP_OTA_SELFTEST=1 build`, then `… qemu` (~2 min, kill it after `OTA-SELFTEST
+  done`). It adds `sdkconfig.defaults.otatest` (min 3 s, deadline 20 s), and
+  each boot prints `OTA-SELFTEST <step>: PASS|FAIL`: a real OTA install of a
+  copy of itself, `first_boot` + `bootloader_observed`,
+  `valid_after_criterion`, `rollback_on_panic`, `rollback_on_deadline`.
+  **Old-bootloader run:** take the bootloader of a build without rollback
+  (main before this change, or `sdkconfig.defaults.oldbl`), merge a fresh
+  image (`cd build-qemu-ota && python -m esptool --chip=esp32s3 merge-bin
+  --output=/tmp/f.bin --pad-to-size=4MB @flash_args`), overwrite 0x0..0x8000
+  with 0xFF + that bootloader.bin, and run `idf.py … qemu --flash-file
+  /tmp/f.bin`. Use a fresh merge: QEMU writes to the flash file, so an old
+  `qemu_flash.bin` carries otadata from the last run. Expected there: state
+  `new`, rollback on panic after 3 starts (`unverified_starts`), deadline
+  rollback honoured. **Known-bad:** `-DNBP_OTA_SELFTEST_BREAK=1` (mark-valid
+  writes nothing) fails `valid_after_criterion`. Host test of the policy:
+  `components/ota/host_test/test_ota_verify_policy.cpp` (build line inside).
+  `esp_image_verify()` on the running partition hung in QEMU; the self-test
+  uses `esp_image_get_metadata()` for the image length.
+- **Not verified on hardware yet:** the ARP/gateway proof, the loopback
+  checks against the real listeners, and the `/update` 409.
 
 ## `CONFIG_NBP_BLE` — compile-time master gate (vs the runtime auto-off above)
 
@@ -1206,24 +1336,46 @@ rest:
 
 ## Switch output (`NBP_SWITCH_OUT`, `components/switch_out`)
 
-- **Build** (PSRAM unit): `idf.py -B build-psram-sw -DIDF_TARGET=esp32s3
-  -DSDKCONFIG=build-psram-sw/sdkconfig
+- **Built into every image since 2026-11-22** (`NBP_SWITCH_OUT` default y,
+  needs `NBP_WIFI`), so a device can run a stock release and keep its
+  switch. The pin is runtime config: NVS `switch`/`gpio` (i8, -1 = none),
+  else `CONFIG_NBP_SWITCH_GPIO` (default **-1**: release images touch no
+  pin until one is set). A build with a Kconfig pin writes it to NVS on the
+  first boot that finds no `gpio` key (migration), so a later stock image
+  keeps using it. `sdkconfig.defaults.switch` only presets GPIO14 for .231:
+  `idf.py -B build-psram-sw -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-psram-sw/sdkconfig
   -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.switch" build`.
-  Default n. Builds only so far, not hardware-tested.
-- GPIO14 (`NBP_SWITCH_GPIO`) drives an N-MOSFET gate across the EPEVER
-  IP3000 remote-switch contact: high = closed = inverter on. It feeds a
-  fridge, so the output must not glitch. Checked by `nbp_gpio::allowed()`
-  and claimed first (before the bridge and sensors); a disallowed pin is
-  left untouched (`running:false`, POST 500).
-- `GET /switch` → `{"gpio":14,"on":true,"boot":"last","changes":0,"since_s":12,"running":true}`
-  (`changes` since boot, `since_s` since the last change or boot).
-  `POST /switch?on=0|1` and/or `?boot=off|on|last` with `X-NBP-Confirm: yes`,
+  Running on .231 since 2026-11-18 (on/off, boot policy, held across OTA
+  reboots). Not yet run on hardware: a stock image picking the pin up from
+  NVS, and the live pin move/disable path.
+- On .231, GPIO14 drives an N-MOSFET gate across the EPEVER IP3000
+  remote-switch contact: high = closed = inverter on. It feeds a fridge,
+  so the output must not glitch. Checked by `nbp_gpio::allowed()` and
+  claimed first (before the bridge and sensors); a disallowed pin is left
+  untouched (`running:false`). On ESP32/C3/C6 the switch also refuses
+  strapping and USB pins (`nbp_gpio::strap_or_usb`: ESP32 0/2/5/12/15, C3
+  2/8/9/18/19, C6 8/9/12/13/15): the gate's pull-down held through a reset
+  would pick download mode or the flash voltage (the S3 excludes its straps
+  in `allowed()` for every peripheral).
+- `GET /switch` → `{"gpio":14,"name":"inverter","on":true,"boot":"last","changes":0,"since_s":12,"running":true}`
+  (`changes` since boot, `since_s` since the last change or boot; `gpio`
+  -1 = not configured).
+  `POST /switch?on=0|1`, `?boot=off|on|last`, `?gpio=N|none`, `?name=TEXT`
+  (combinable) with `X-NBP-Confirm: yes`,
   **STA side only** (request on the STA address from the STA subnet, never
   from a SoftAP client; IPv6 peers refused; `getsockname`/`getpeername` on
   `httpd_req_to_sockfd`, IPv4-mapped on the dual-stack listener), else 403.
-  NVS namespace `switch` (`on`, `boot`, u8), written only when a value
-  differs from the stored one, before the pin changes. Default boot policy
-  `last`; no stored state = off. `/stats.json`: `sw_on`, `sw_changes`.
+  `gpio` is checked with `nbp_gpio::allowed(p, own pin)` (400 if refused)
+  and **applies at once**: the old pin is driven off and stays held off
+  (the safe level; nothing else drives it until power-off), the new pin
+  starts off and `on=0` is stored; `on=1` together with a new gpio is
+  refused. `name`: 1-24 printable ASCII after %XX/+ decoding, no `"` or
+  `\` (it goes into the JSON unescaped). on/boot without a working pin:
+  400. NVS namespace `switch` (`on`, `boot` u8, `gpio` i8, `name` str),
+  written only when a value differs, before the pin changes. Default boot
+  policy `last`; no stored state = off. `/stats.json`: `sw_on`,
+  `sw_changes`, `sw_cfg` (1 = pin active). Dashboard: Switches tab, name
+  and pin under "configure".
 - **Boot:** `switch_out::early_init()` right after `nvs_flash_init`, before
   WiFi: level into the output register, `gpio_config` (in+out, no pulls),
   `gpio_sleep_sel_dis` (startup isolates every pad in light sleep,
@@ -1285,3 +1437,155 @@ rest:
   before, A got 5 notifies in 120 s; after, 2240/2246 sent, no sequence
   gap, repeat GetServices 20–400 ms. A Service Changed indication is not
   handled (the cache is not invalidated by it).
+
+## Dashboard is embedded gzipped (`components/api_server/CMakeLists.txt`)
+
+- The build gzips `web/index.html` (level 9, `mtime=0` so the image stays
+  reproducible) into `index.html.gz` and embeds that: 119,766 → ~38 KB,
+  −78 KB of C6 image (flash budget: `docs/flash-budget.md`). `root_get`
+  sends it with `Content-Encoding: gzip` + `Vary: Accept-Encoding`; a client
+  without `gzip` in `Accept-Encoding` gets **406** and a hint. Use `curl
+  --compressed http://<device>/`; browsers always send it. Verified on .231
+  2026-11-24 (decompressed bytes == `web/index.html`, headless Chrome renders it).
+
+## Dashboard update check (`web/index.html`, last script block)
+
+- **The browser checks and downloads, the device does not.** The page reads
+  `https://fl4p.github.io/nimble-ble-proxy-esphome/updates.json` and the
+  image from `firmware/<tag>/nimble_ble_proxy-<variant>-ota.bin` next to it,
+  checks size + sha256 (pure-JS SHA-256: `crypto.subtle` is missing on a
+  plain-http page) and the image header (chip id, app descriptor), then
+  POSTs it to the unchanged `/update` with `X-NBP-Confirm: yes`, waits for
+  the reboot and requires `/appinfo` `elf_sha256` == the manifest's.
+  Release-asset downloads send no `Access-Control-Allow-Origin` (Pages and
+  api.github.com send `*`), so the images must be on Pages:
+  `pages.yml` stages them and writes `updates.json` with
+  `scripts/make_updates_manifest.py` (newest stable + newer prereleases,
+  never drafts; fails on a size/digest mismatch). Without `updates.json`
+  the page falls back to the releases API, display-only.
+- **Variant identity.** `GET /appinfo` `variant` is the CI label
+  (`-DNBP_VARIANT=<target>-ble-on|ble-off`, `build.yml`) or `custom`; the
+  root CMakeLists.txt refuses a stock label on a non-stock config. Only an
+  image of exactly that variant is offered. `custom`, or firmware before
+  the field (<= 0.2.8), gets no offer, only the expert override (pick a
+  variant of the same target + type its name). Prereleases only with
+  `?debug-releases=1`. Install is HTTP-only (no `/update` over BLE).
+  `?upd-base=<url>` overrides the source on a localhost-served page only.
+
+## App image signing (OTA accepts only images signed with the running key)
+
+- **What is on** (`sdkconfig.defaults`, S3/C3/C6): `SECURE_SIGNED_APPS_NO_SECURE_BOOT`
+  + `SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`, RSA scheme (Secure Boot V2 block,
+  RSA-3072 PSS), `SECURE_BOOT_BUILD_SIGNED_BINARIES=n`. No secure boot, no
+  flash encryption, no eFuse is written. Release checklist, key handling,
+  recovery and rotation: `docs/signing.md`.
+- **Where it is checked:** only in the running app. `esp_ota_end()` →
+  `ota_verify_partition` → `esp_image_verify` (IDF 6.0.3
+  `app_update/esp_ota_ops.c:554-566,593-626`); `esp_ota_set_boot_partition`
+  re-validates (`:790-797`). The app build gets `SECURE_BOOT_CHECK_SIGNATURE=1`
+  from `SECURE_SIGNED_ON_UPDATE`, the bootloader build does not
+  (`bootloader_support/src/esp_image_format.c:36-48`); bootloader-side checking
+  without secure boot exists only for the V1/ECDSA scheme
+  (`bootloader/Kconfig.projbuild:619-629`). Verification itself is PSA RSA-PSS
+  (`secure_boot_v2/secure_boot_rsa_signature.c:88-189`).
+- **The trusted key is the running image's own signature block 0** — not
+  eFuse, not a compiled-in key: `get_secure_boot_key_digests` takes the
+  digests from the running app when secure boot is off
+  (`secure_boot_v2/secure_boot_signatures_app.c:154-160`), and with
+  `SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` only index 0 is compared on both
+  sides (`:233-237`, loop `:239-283`). Consequences: (1) a dev-signed device
+  accepts only dev-signed images and a release device only release-signed
+  ones; switching keys = USB flash; (2) **key rotation over OTA is
+  impossible**, it is a USB reflash of every device; (3) **a running image
+  without a valid signature has no trusted key and refuses every OTA**
+  (`no_trusted_key`) until a USB flash.
+- **Field transition:** firmware up to 0.2.8 has no check, so it accepts the
+  next image signed or not (and the extra signature sector is ignored). A
+  pre-signing bootloader boots a signed image: it verifies only the appended
+  SHA-256 (`esp_image_format.c:236-241`), the 4 KiB signature sector sits past
+  the image length (`:1034-1055` only in signing builds), and `--secure-pad-v2`
+  padding is a segment inside the image. QEMU 2026-11-22: the baseline
+  bootloader (main 3dd7a29) booted the release-style signed S3 app. So: give
+  field devices the **signed** release first; if they get the unsigned CI
+  image they lock themselves out of OTA. App OTA cannot replace the
+  bootloader, and nothing here needs it to.
+- **USB:** `idf.py flash`/esptool check nothing about signatures and the
+  bootloader does not either, so USB flashing is always the escape hatch.
+  Secure boot would add a bootloader-checked chain and refuse unsigned USB
+  images; flash encryption would stop reading/patching flash. Both burn
+  eFuses irreversibly and a lost key bricks the board: out of scope.
+- **Classic ESP32: off** (`sdkconfig.defaults.esp32`). Its RSA scheme needs chip
+  rev >= 3 (`Kconfig.projbuild:470-474`; `ets_rsa_pss_verify` is only in
+  `esp32.rom.eco3.ld`), and V1/ECDSA would need a second key and a build-time
+  embedded public key. The release script skips `esp32` assets.
+- **Local builds are signed with the dev key** by the root `CMakeLists.txt`
+  (`scripts/nbp_sign.py build-sign`, after IDF's `.bin` step):
+  `build/nimble_ble_proxy.bin` is signed in place, the unsigned image stays as
+  `nimble_ble_proxy-unsigned.bin`. Key: `-DNBP_SIGNING_KEY=` / env
+  `NBP_SIGNING_KEY` / `~/.config/nbp-signing/dev-key.pem`; `none` or a missing
+  key builds UNSIGNED with a CMake warning. The release key is refused there.
+  IDF still prints "App built but not signed" (its own build-time signing is
+  off); the next line says it was signed. ~2 s per relink. `idf.py flash` and
+  the OTA curl in "OTA over a loaded device" work unchanged on a dev-key
+  device; the first dev-signed OTA onto an unsigned-era device is accepted.
+- **Device side** (`components/ota/ota_sig.cpp`): `GET /update` →
+  `{"sig_check","scheme","running","running_signed","key_sha256","rejects","last_reject","last_reject_key"}`;
+  `key_sha256` equals `scripts/nbp_sign.py fingerprint <pem>`. A failed
+  `esp_ota_end` answers 403 (`unsigned`, `untrusted_key`, `bad_signature`,
+  `no_trusted_key`) or 400 (`corrupt`, `not_an_image`) with header
+  `X-OTA-Refused`, logs `OTA REFUSED: …` (image key vs trusted key), never
+  switches the boot partition, and erases the target slot's first sector
+  (the bootloader checks no signature, so a fallback must not boot it). The
+  classification only explains IDF's verdict; it cannot turn a failure into a
+  success. It returns ESP_OK after the 4xx: with ESP_FAIL http_guard's
+  abortive close ate the body. `sig::init` runs on the httpd task (queued by
+  `ota::start`): IDF's running-app signature read needs ~2 KiB of stack and
+  overflowed the 3.5 KiB main task into the heap (QEMU, pm-lock deadlock).
+- **QEMU test:** `idf.py -B build-qemu-sig -DIDF_TARGET=esp32s3
+  -DSDKCONFIG=build-qemu-sig/sdkconfig -DNBP_SIG_SELFTEST=1 build`, then
+  `… qemu` (needs the dev key; QEMU must not be a background job reading the
+  tty, or it stops on SIGTTIN: redirect stdin or use `-serial file:`). Test
+  vectors from `nbp_sign.py selftest-blob` go to the last 8 KiB of the
+  coredump partition (0x3FE000). Prints `SIG-SELFTEST <step>: PASS|FAIL`:
+  fingerprint, unsigned / wrong key / tampered (one byte of the app
+  description flipped, checksum and SHA-256 fixed up) → 403, boot partition
+  unchanged, slot header erased; signed → 200, boots from ota_1, same key.
+  Known-bad: add `sdkconfig.defaults.sigtest-nocheck` (own build dir); the
+  three refusals and the counter FAIL.
+- **Stack: every IDF image check is an RSA verify now** (~2 KiB of stack):
+  `esp_ota_check_rollback_is_possible`, `esp_ota_mark_app_invalid_rollback*`,
+  `esp_ota_get_last_invalid_partition`, `esp_ota_set_boot_partition`. With the
+  3584 B main task, `ota_verify::early_init` overflowed it on the first boot
+  of every OTA'd image (panic in `intr_alloc`, then rolled back; QEMU
+  2026-11-23, only with rollback + signing merged). `ESP_MAIN_TASK_STACK_SIZE`
+  is 6144 (the task exits after boot; the boot-complete log line prints the
+  unused stack). Only `early_init` (main task) calls them; the `ota_verify`
+  worker hands a rollback to the next boot (`request_rollback`), so it
+  keeps a 3 KiB stack (was 6 KiB, which cost a C3 heap while unverified).
+  Any new caller of those IDF functions needs a task with that headroom.
+- **Release = draft until signed.** `build.yml`'s `release` job (after the
+  whole matrix) creates the tag's release as a **draft** with the unsigned CI
+  assets, and refuses to upload to an already published release.
+  `release_sign.py sign <tag> --upload` replaces the S3/C3/C6 images, then
+  `gh release edit --draft=false`, then dispatches `pages.yml`.
+- **Publish gate:** `scripts/nbp_sign.py check-release IMG…` passes an
+  `*-ota.bin` or merged `*-flash.bin` (app found via the partition table at
+  0x8000) only if block 0 is signed with `RELEASE_KEY_SHA256`, the digest
+  matches and RSA-PSS verifies; classic ESP32 passes unsigned; no pinned key
+  = everything else refused, except releases up to `LAST_PRE_SIGNING_RELEASE`
+  (v0.2.8; firmware that checks no signature) whose image version equals the
+  tag and whose length is not 64 KiB-aligned (signing builds are padded to
+  the MMU page; a signing build under an old tag is refused). The tag comes
+  from the staging path `firmware/<tag>/` or `--tag`. `pages.yml` runs it on every staged file and deletes
+  refused ones, `make_updates_manifest.py` re-checks and leaves them out,
+  and `pages.yml` is no longer triggered by tag builds:
+  `release_sign.py --upload` dispatches it after uploading. The dashboard
+  install also refuses an unsigned image and one whose key differs from the
+  device's `GET /update` `key_sha256` (key comparison only; the RSA check is
+  the device's).
+- **Release flow:** CI stays unsigned. `scripts/release_sign.py sign <tag>`
+  (dry run; `--upload` asks for the tag, then `gh release upload --clobber`)
+  signs `*-ota.bin` with the Keychain key, rebuilds `*-flash.bin` after
+  checking the CI parts reproduce the CI merged image, verifies with
+  espsecure against `keys/release.pub.pem` and the fingerprint pinned in
+  `scripts/nbp_sign.py`. Never run it against a real release from an agent.

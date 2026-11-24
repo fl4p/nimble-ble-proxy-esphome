@@ -6,14 +6,13 @@ on:
     paths:
       - web-flasher/**
       - .github/workflows/pages.yml
+      - scripts/make_updates_manifest.py
+  # Run by scripts/release_sign.py --upload once the signed images replaced the
+  # CI ones. Deliberately NOT triggered by the build workflow: right after a tag
+  # build the release holds the unsigned CI images, and an unsigned image on a
+  # signing build locks a device out of OTA until a USB flash. The "Drop
+  # images..." step below refuses them as well, should this run too early.
   workflow_dispatch:
-  # A release is created by the build workflow's GITHUB_TOKEN, which triggers no
-  # other workflow, so a `release` trigger would never fire. Restage the flasher
-  # firmware once a tag build has uploaded its assets instead. A failed run counts
-  # too: its matrix jobs upload independently, so the other chips' images exist.
-  workflow_run:
-    workflows: [build]
-    types: [completed]
 
 permissions:
   contents: read
@@ -26,14 +25,13 @@ concurrency:
 
 jobs:
   deploy:
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.event == 'push' &&
-       startsWith(github.event.workflow_run.head_branch, 'v') &&
-       contains(fromJSON('["success","failure"]'), github.event.workflow_run.conclusion))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography
       - uses: actions/configure-pages@v5
       - name: Stage latest release firmware
         env:
@@ -44,6 +42,35 @@ jobs:
             mkdir -p "web-flasher/firmware/$tag"
             gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*-flash.bin' --dir "web-flasher/firmware/$tag" --clobber
           fi
+      # Update manifest for the device dashboard's "update available" check
+      # (web/index.html). The browser downloads the OTA image itself and
+      # POSTs it to the device's /update; release-asset downloads carry no
+      # Access-Control-Allow-Origin, Pages does, so the -ota.bin files are
+      # staged here next to updates.json. Lists the newest stable release
+      # plus newer prereleases, never drafts; every image is checked against
+      # the release's size/sha256 digest and its own app descriptor first.
+      - name: Stage OTA images and updates.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=30" > "$RUNNER_TEMP/releases.json"
+          python scripts/make_updates_manifest.py "$RUNNER_TEMP/releases.json" web-flasher/firmware \
+            --repo "$GITHUB_REPOSITORY" --list-only > "$RUNNER_TEMP/ota-assets.txt"
+          while read -r tag name; do
+            mkdir -p "web-flasher/firmware/$tag"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$name" \
+              --dir "web-flasher/firmware/$tag" --clobber
+          done < "$RUNNER_TEMP/ota-assets.txt"
+          # Publish gate: only images signed with the pinned release key (and
+          # classic ESP32 images, unsigned by design) stay on Pages, flasher
+          # images included. Fails closed while RELEASE_KEY_SHA256 is unset.
+          find web-flasher/firmware -name '*.bin' -print0 | while IFS= read -r -d '' f; do
+            python scripts/nbp_sign.py check-release "$f" || rm -f "$f"
+          done
+          python scripts/make_updates_manifest.py "$RUNNER_TEMP/releases.json" web-flasher/firmware \
+            --repo "$GITHUB_REPOSITORY" > web-flasher/updates.json
+          cat web-flasher/updates.json
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web-flasher

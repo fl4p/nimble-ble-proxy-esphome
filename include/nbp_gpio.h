@@ -39,4 +39,24 @@ inline bool allowed(int p, uint64_t own = 0) {
   return true;
 }
 
+// Strapping and USB pins that allowed() lets through on targets other than
+// the S3 (which excludes its own there). For outputs that sit behind a
+// pull-up/pull-down and are held across resets, like the switch output: a
+// strap held at the wrong level when the chip resets selects download mode
+// (ESP32 GPIO0, C3/C6 GPIO9 low) or the wrong flash voltage (ESP32 GPIO12
+// high), and the USB pins carry the console. The I2C/UART peripherals keep
+// using allowed() alone (their pull-ups leave the straps at boot level).
+inline bool strap_or_usb(int p) {
+#if CONFIG_IDF_TARGET_ESP32
+  return p == 0 || p == 2 || p == 5 || p == 12 || p == 15;
+#elif CONFIG_IDF_TARGET_ESP32C3
+  return p == 2 || p == 8 || p == 9 || p == 18 || p == 19;
+#elif CONFIG_IDF_TARGET_ESP32C6
+  return p == 8 || p == 9 || p == 15 || p == 12 || p == 13;
+#else
+  (void)p;
+  return false;  // S3: already refused by allowed()
+#endif
+}
+
 }  // namespace nbp_gpio

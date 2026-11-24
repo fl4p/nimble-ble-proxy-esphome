@@ -205,3 +205,32 @@ CONFIG_NBP_LIVENESS_WDT=y
 CONFIG_NBP_LIVENESS_INTERVAL_SECS=30
 CONFIG_NBP_LIVENESS_THRESHOLD=6
 
+
+# OTA app rollback (components/ota/ota_verify.cpp, CLAUDE.md "OTA app
+# rollback"). An image installed by OTA boots unverified and marks itself
+# valid once it has proven itself; otherwise it rolls back. The bootloader
+# part only reaches devices flashed over serial (an app OTA never rewrites
+# the bootloader); the app part also works on older bootloaders.
+# BOOTLOADER_PROJECT_VER=2 marks a bootloader built with rollback, so the app
+# can tell from its esp_bootloader_desc_t (every earlier build had 1).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_BOOTLOADER_PROJECT_VER=2
+
+# App image signing (OTA only accepts images signed with the running image's
+# key). Secure Boot V2 signature format, RSA-3072, checked by the running app
+# in esp_ota_end(); the bootloader checks nothing and no eFuse is touched. The
+# IDF build leaves the .bin unsigned (CI builds unsigned, releases are signed
+# by scripts/release_sign.py); the root CMakeLists signs local builds with the
+# dev key. See "App image signing" in CLAUDE.md and docs/signing.md. Classic
+# ESP32 turns it off in sdkconfig.defaults.esp32.
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n
+# With signing on, every IDF image check (esp_ota_check_rollback_is_possible,
+# esp_ota_mark_app_invalid_rollback*, esp_ota_get_last_invalid_partition)
+# runs an RSA-3072 verify, ~2 KiB of stack. ota_verify::early_init calls the
+# first on the main task, and at 3584 B that overflowed: the first boot of an
+# OTA'd image panicked in intr_alloc (QEMU 2026-11-23, rolled back). The main
+# task is deleted when app_main returns, so this costs heap during boot only.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
