@@ -1161,18 +1161,39 @@ esp_err_t devices_get(httpd_req_t *req) {
 // this component's CMakeLists.txt (also gated on CONFIG_NBP_WIFI so we
 // don't carry the bytes in BLE-only builds). The same file is served
 // to an off-device Web Bluetooth client; the page auto-detects which
-// transport to use.
-extern const uint8_t index_html_start[] asm("_binary_index_html_start");
-extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
+// transport to use. It is embedded gzip-compressed (the CMakeLists
+// compresses it at build time) and sent as Content-Encoding: gzip; every
+// browser accepts that. A client that does not announce gzip (plain curl,
+// urllib) gets 406 with a hint instead of bytes it cannot read.
+extern const uint8_t index_html_gz_start[] asm("_binary_index_html_gz_start");
+extern const uint8_t index_html_gz_end[]   asm("_binary_index_html_gz_end");
 extern const uint8_t favicon_svg_start[] asm("_binary_favicon_svg_start");
 extern const uint8_t favicon_svg_end[]   asm("_binary_favicon_svg_end");
 
+bool accepts_gzip(httpd_req_t *req) {
+  char ae[128];
+  // A value longer than the buffer comes back truncated (strlcpy), still
+  // terminated; browsers list gzip first, so search what fits.
+  const esp_err_t err = httpd_req_get_hdr_value_str(req, "Accept-Encoding", ae, sizeof ae);
+  if (err != ESP_OK && err != ESP_ERR_HTTPD_RESULT_TRUNC) return false;
+  return strstr(ae, "gzip") != nullptr;
+}
+
 esp_err_t root_get(httpd_req_t *req) {
   if (!http_guard::bulk_ok(req)) return ESP_OK;
-  const size_t n = static_cast<size_t>(index_html_end - index_html_start);
+  httpd_resp_set_hdr(req, "Vary", "Accept-Encoding");
+  if (!accepts_gzip(req)) {
+    httpd_resp_set_status(req, "406 Not Acceptable");
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(
+        req, "The dashboard is served gzip-compressed only; "
+             "send Accept-Encoding: gzip (curl --compressed).\n");
+  }
+  const size_t n = static_cast<size_t>(index_html_gz_end - index_html_gz_start);
   httpd_resp_set_type(req, "text/html");
+  httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
   return httpd_resp_send(
-      req, reinterpret_cast<const char *>(index_html_start), n);
+      req, reinterpret_cast<const char *>(index_html_gz_start), n);
 }
 
 esp_err_t favicon_get(httpd_req_t *req) {

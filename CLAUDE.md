@@ -196,16 +196,23 @@
   rollback-enabled app is written with otadata state `NEW`
   (esp_ota_ops.c:115-122, :786). `ota_verify::early_init()` (right after
   `crash_capture::init()`, before the provisioning window and the WiFi
-  connect, which can block) starts a worker task (4 KiB stack, only while
-  unverified; high-water 2488 B free in QEMU) and an esp_timer backstop. The image
+  connect, which can block) starts a worker task (3 KiB stack, only while
+  unverified; high-water 1476 B free on .231 with the real network hooks)
+  and an esp_timer backstop. The image
   marks itself valid (`esp_ota_mark_app_valid_cancel_rollback`) once, in one
   evaluation: uptime >= `NBP_OTA_VERIFY_MIN_SECS` (60) AND STA has an IP AND
   an uplink proof (a liveness cycle passed this boot, an upstream API
   session >= 30 s old with ACKed sends, the gateway answered :80 with a
   connect or RST, or the gateway is in the ARP table after that attempt; DHCP
   with no router counts as proof too) AND 127.0.0.1:80 and :6053 accept.
-  Unmet at `NBP_OTA_VERIFY_DEADLINE_SECS` (900): `esp_ota_mark_app_invalid_
-  rollback_and_reboot`. Backstop: 60 s after the deadline a still-pending
+  Unmet at `NBP_OTA_VERIFY_DEADLINE_SECS` (900): `request_rollback()`
+  records the cause (NVS `exp`, RTC `req_cause`) and restarts; it does not
+  call IDF's rollback itself, which needs the RSA stack (see "App image
+  signing", Stack). A rollback bootloader then aborts the pending image
+  (`last_rollback.from_state` `aborted`, cause `deadline`); under an old
+  bootloader the next boot's `early_init` sees `req_cause` and runs
+  `esp_ota_mark_app_invalid_rollback_and_reboot` on the main task (`invalid`).
+  `POST /ota?mark=invalid` takes the same path. Backstop: 60 s after the deadline a still-pending
   image is `esp_restart()`ed (a stuck worker). The ARP proof is what keeps a
   LAN whose gateway drops :80 (the liveness case) from rolling back good
   images. Builds without WiFi wire null hooks: uptime only.
@@ -1407,6 +1414,16 @@ rest:
   gap, repeat GetServices 20–400 ms. A Service Changed indication is not
   handled (the cache is not invalidated by it).
 
+## Dashboard is embedded gzipped (`components/api_server/CMakeLists.txt`)
+
+- The build gzips `web/index.html` (level 9, `mtime=0` so the image stays
+  reproducible) into `index.html.gz` and embeds that: 119,766 → ~38 KB,
+  −78 KB of C6 image (flash budget: `docs/flash-budget.md`). `root_get`
+  sends it with `Content-Encoding: gzip` + `Vary: Accept-Encoding`; a client
+  without `gzip` in `Accept-Encoding` gets **406** and a hint. Use `curl
+  --compressed http://<device>/`; browsers always send it. Verified on .231
+  2026-11-24 (decompressed bytes == `web/index.html`, headless Chrome renders it).
+
 ## Dashboard update check (`web/index.html`, last script block)
 
 - **The browser checks and downloads, the device does not.** The page reads
@@ -1518,9 +1535,10 @@ rest:
   of every OTA'd image (panic in `intr_alloc`, then rolled back; QEMU
   2026-11-23, only with rollback + signing merged). `ESP_MAIN_TASK_STACK_SIZE`
   is 6144 (the task exits after boot; the boot-complete log line prints the
-  unused stack) and the `ota_verify` worker has 6 KiB (high-water 4532 B
-  free in QEMU, the deadline rollback included). Any new caller of those IDF
-  functions needs a task with that headroom.
+  unused stack). Only `early_init` (main task) calls them; the `ota_verify`
+  worker hands a rollback to the next boot (`request_rollback`), so it
+  keeps a 3 KiB stack (was 6 KiB, which cost a C3 heap while unverified).
+  Any new caller of those IDF functions needs a task with that headroom.
 - **Release = draft until signed.** `build.yml`'s `release` job (after the
   whole matrix) creates the tag's release as a **draft** with the unsigned CI
   assets, and refuses to upload to an already published release.

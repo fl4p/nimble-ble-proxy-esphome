@@ -40,7 +40,7 @@ constexpr const char *kRbKey = "rb";    // last rollback seen
 
 constexpr uint32_t kExpMagic = 0x4F545845;  // "EXTO"
 constexpr uint32_t kRbMagic = 0x4F544252;   // "RBTO"
-constexpr uint32_t kRtcMagic = 0x4F545652;  // "RVTO"
+constexpr uint32_t kRtcMagic = 0x3256544F;  // "OTV2" (RtcState grew req_cause)
 
 enum Cause : uint8_t {
   kNone = 0,
@@ -119,6 +119,7 @@ struct RtcState {
   uint32_t addr;      // running image the counter belongs to
   uint32_t starts;    // unverified starts (old bootloader)
   uint32_t backstop;  // 1 = the backstop timer restarted the chip
+  uint32_t req_cause; // != 0: a rollback was requested; the next boot does it
 };
 RTC_NOINIT_ATTR RtcState s_rtc;
 
@@ -237,17 +238,22 @@ bool mark_valid(const char *via) {
   return true;
 }
 
-// Mark the running image invalid and reboot into the previous one. Returns
-// only on failure. With no rollback target there is nothing to go back to:
-// the image is accepted instead (and says so).
-[[maybe_unused]] void rollback(uint8_t cause) {
-  uint8_t expect = kPending;
-  if (!g_phase.compare_exchange_strong(expect, kRollingBack)) return;
+void record_cause(uint8_t cause) {
   Expect e{};
   if (nvs_read(kExpKey, &e, sizeof(e)) && e.magic == kExpMagic) {
     e.cause = cause;
     nvs_write(kExpKey, &e, sizeof(e));
   }
+}
+
+// Mark the running image invalid and reboot into the previous one. Runs only
+// in early_init, on the main task: IDF validates the rollback target first,
+// with app signing an RSA-3072 verify (~2 KiB of stack, see CLAUDE.md
+// "Stack"). Returns only on failure.
+[[maybe_unused]] void rollback(uint8_t cause) {
+  uint8_t expect = kPending;
+  if (!g_phase.compare_exchange_strong(expect, kRollingBack)) return;
+  record_cause(cause);
   s_rtc.backstop = 0;
   ESP_LOGE(TAG, "image %s NOT verified (%s) after %lu s: rolling back",
            g_running ? g_running->label : "?", cause_name(cause),
@@ -263,7 +269,7 @@ bool mark_valid(const char *via) {
   // rollback bootloader aborts the still-pending image and boots the previous
   // one with no app-side check, and under an old bootloader the restart is one
   // more counted start, so early_init rolls back on a fresh heap.
-  if (cause == kStarts && g_starts > static_cast<uint32_t>(CONFIG_NBP_OTA_VERIFY_MAX_BOOTS) + 2) {
+  if (g_starts > static_cast<uint32_t>(CONFIG_NBP_OTA_VERIFY_MAX_BOOTS) + 2) {
     // Old bootloader, and the boot-time rollback keeps failing on a fresh
     // heap: restarting again would loop forever. Keep the image.
     g_phase.store(kPending);
@@ -272,6 +278,25 @@ bool mark_valid(const char *via) {
   }
   ESP_LOGE(TAG, "restarting so the bootloader / start counter rolls back");
   vTaskDelay(pdMS_TO_TICKS(200));
+  esp_restart();
+}
+
+// A rollback decided after boot (deadline, POST /ota?mark=invalid). It does
+// not call IDF's rollback here: that needs the RSA stack, which the worker and
+// httpd tasks do not have to spare on a C3. Record the cause and restart
+// instead. A rollback bootloader aborts the still-pending image and boots the
+// previous one (from_state "aborted"); under an old bootloader the next boot
+// sees req_cause and rolls back in early_init on the main task ("invalid").
+[[maybe_unused]] void request_rollback(uint8_t cause) {
+  uint8_t expect = kPending;
+  if (!g_phase.compare_exchange_strong(expect, kRollingBack)) return;
+  record_cause(cause);
+  s_rtc.backstop = 0;
+  s_rtc.req_cause = cause;
+  ESP_LOGE(TAG, "image %s NOT verified (%s) after %lu s: restarting to roll back",
+           g_running ? g_running->label : "?", cause_name(cause),
+           static_cast<unsigned long>(uptime_s()));
+  vTaskDelay(pdMS_TO_TICKS(200));  // let the line reach /log and serial
   esp_restart();
 }
 
@@ -311,7 +336,7 @@ policy::Inputs evaluate() {
         mark_valid(g_last_via);
         break;
       case policy::Verdict::Rollback:
-        rollback(kDeadline);
+        request_rollback(kDeadline);
         break;
       case policy::Verdict::Wait:
         break;
@@ -456,10 +481,11 @@ bool loopback_listens(uint16_t port) {
   return tcp_try(htonl(INADDR_LOOPBACK), port, 1000) == 1;
 }
 
-// The worker may call esp_ota_mark_app_invalid_rollback_and_reboot(), which
-// validates the rollback target; with app signing that is an RSA-3072
-// verify (~2 KiB of stack on top of the worker's own ~1.6 KiB).
-constexpr uint32_t kWorkerStack = 6144;
+// The worker calls no IDF image check (a rollback is request_rollback(): a
+// restart). Its own use is ~1.6 KiB (high-water 4544 B free of 6144 on .231
+// with the network hooks); every stack byte is heap while an update is
+// unverified, which matters on a C3.
+constexpr uint32_t kWorkerStack = 3072;
 
 void early_init() {
   g_t0_us = esp_timer_get_time();
@@ -515,16 +541,18 @@ void early_init() {
     if (s_rtc.magic == kRtcMagic && s_rtc.addr == g_running->address) {
       s_rtc.starts++;
     } else {
-      s_rtc = RtcState{kRtcMagic, g_running->address, 1, 0};
+      s_rtc = RtcState{kRtcMagic, g_running->address, 1, 0, 0};
     }
     g_starts = s_rtc.starts;
     ESP_LOGW(TAG, "bootloader has no rollback: unverified start %lu of %d",
              static_cast<unsigned long>(g_starts), CONFIG_NBP_OTA_VERIFY_MAX_BOOTS);
     if (policy::starts_exceeded(g_starts, CONFIG_NBP_OTA_VERIFY_MAX_BOOTS)) {
       rollback(kStarts);  // returns only if that failed
+    } else if (s_rtc.req_cause != 0) {
+      rollback(static_cast<uint8_t>(s_rtc.req_cause));  // requested before the restart
     }
   } else {
-    s_rtc = RtcState{kRtcMagic, g_running->address, 1, 0};
+    s_rtc = RtcState{kRtcMagic, g_running->address, 1, 0, 0};
     g_starts = 1;
   }
   if (g_phase.load() != kPending) return;
@@ -684,7 +712,7 @@ esp_err_t ota_post(httpd_req_t *req) {
   }
   httpd_resp_sendstr(req, "ok: rolling back, rebooting\n");
   vTaskDelay(pdMS_TO_TICKS(300));
-  rollback(kManual);  // returns only on failure
+  request_rollback(kManual);  // restarts; returns only if no longer pending
   return ESP_OK;
 }
 }  // namespace
@@ -878,9 +906,11 @@ void selftest::run() {
       }
       st_check("rollback_on_deadline",
                g_rb_this_boot && target != nullptr && g_rb.subtype == target->subtype &&
-                   g_rb.cause == kDeadline && g_rb.from_state == ESP_OTA_IMG_INVALID &&
+                   g_rb.cause == kDeadline &&
+                   g_rb.from_state == (old_bl ? ESP_OTA_IMG_INVALID : ESP_OTA_IMG_ABORTED) &&
                    !pending(),
-               "deadline -> marked invalid -> previous image boots");
+               old_bl ? "deadline -> restart -> marked invalid at boot -> previous image boots"
+                      : "deadline -> restart -> bootloader aborts -> previous image boots");
       s_st_phase = ST_DONE;
       std::printf("OTA-SELFTEST done: bootloader rollback %s\n", g_bl_rb);
       break;

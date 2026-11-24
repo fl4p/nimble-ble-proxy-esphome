@@ -1,9 +1,9 @@
 set(embed_files "")
 if(CONFIG_NBP_WIFI)
     # Dashboard HTML, served by stats.cpp::root_get. The BLE-only build
-    # never reaches root_get, so don't burn ~20 KB of flash for unused
-    # bytes when CONFIG_NBP_WIFI=n.
-    set(embed_files "../../web/index.html" "../../web/favicon.svg")
+    # never reaches root_get, so don't burn the flash for unused bytes
+    # when CONFIG_NBP_WIFI=n. index.html is embedded gzipped (below).
+    set(embed_files "../../web/favicon.svg")
 endif()
 
 idf_component_register(
@@ -39,6 +39,23 @@ idf_component_register(
         liveness_wdt
         oom_guard
 )
+
+# The dashboard is stored gzip-compressed (120 KB -> ~38 KB of flash) and
+# served with Content-Encoding: gzip (stats.cpp root_get). mtime=0 keeps
+# the bytes, and so the image, reproducible.
+if(CONFIG_NBP_WIFI)
+    idf_build_get_property(python PYTHON)
+    set(_html "${CMAKE_CURRENT_SOURCE_DIR}/../../web/index.html")
+    set(_html_gz "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz")
+    add_custom_command(OUTPUT "${_html_gz}"
+        COMMAND "${python}" -c
+            "import gzip,sys; d=open(sys.argv[1],'rb').read(); open(sys.argv[2],'wb').write(gzip.compress(d,9,mtime=0))"
+            "${_html}" "${_html_gz}"
+        DEPENDS "${_html}"
+        VERBATIM)
+    target_add_binary_data(${COMPONENT_LIB} "${_html_gz}" BINARY
+        RENAME_TO index_html_gz)
+endif()
 
 # Patch the managed esp-nimble-cpp header to add `setNotifyCallback`.
 # bt_handlers needs to register a notify callback WITHOUT writing the
