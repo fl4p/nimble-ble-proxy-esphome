@@ -38,3 +38,6 @@ CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_DEFAULT=y
 # from SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY). Nothing here wants one; a PSRAM
 # stack must never run while the cache is off (flash writes), so keep it off.
 CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=n
+# PSRAM units have the heap for a third API client: Home Assistant, the
+# telemetry relay and an ad-hoc console (fugu_console --ble-proxy) at once.
+CONFIG_NBP_API_MAX_CLIENTS=3
